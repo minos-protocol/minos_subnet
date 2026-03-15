@@ -1,0 +1,41 @@
+{
+  "description": "Reference data paths for Minos genomics subnet",
+  "chromosome": "chr20",
+  "contig_length": 64444167,
+  "ref_build": "GRCh38",
+  "data": {
+    "reference": {
+      "local": "datasets/reference/chr20.fa",
+      "s3": "https://minos-reference.s3.us-east-1.amazonaws.com/reference/chr20.fa"
+    },
+    "reference_index": {
+      "local": "datasets/reference/chr20.fa.fai",
+      "s3": "https://minos-reference.s3.us-east-1.amazonaws.com/reference/chr20.fa.fai"
+    },
+    "reference_dict": {
+      "local": "datasets/reference/chr20.dict",
+      "s3": "https://minos-reference.s3.us-east-1.amazonaws.com/reference/chr20.dict"
+    },
+    "reference_sdf": {
+      "local": "datasets/reference/chr20.sdf",
+      "s3": "https://minos-reference.s3.us-east-1.amazonaws.com/reference/chr20.sdf.tar.gz"
+    },
+    "truth_vcf": {
+      "local": "datasets/truth/sample_GRCh38_1_22_v4.2.1_benchmark.chr20.vcf.gz",
+      "s3": "https://minos-reference.s3.us-east-1.amazonaws.com/truth/sample_GRCh38_1_22_v4.2.1_benchmark.chr20.vcf.gz"
+    },
+    "truth_vcf_index": {
+      "local": "datasets/truth/sample_GRCh38_1_22_v4.2.1_benchmark.chr20.vcf.gz.csi",
+      "s3": "https://minos-reference.s3.us-east-1.amazonaws.com/truth/sample_GRCh38_1_22_v4.2.1_benchmark.chr20.vcf.gz.csi"
+    },
+    "truth_bed": {
+      "local": "datasets/truth/sample_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.chr20.bed",
+      "s3": "https://minos-reference.s3.us-east-1.amazonaws.com/truth/sample_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.chr20.bed"
+    }
+  },
+  "region_bounds": {
+    "min_start": 10000000,
+    "max_start": 55000000,
+    "window_size": 5000000
+  }
+}

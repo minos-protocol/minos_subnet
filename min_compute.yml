@@ -1,0 +1,198 @@
+# Use this document to specify the minimum compute requirements.
+# This document will be used to generate a list of recommended hardware for your subnet.
+
+# This is intended to give a rough estimate of the minimum requirements
+# so that the user can make an informed decision about whether or not
+# they want to run a miner or validator on their machine.
+
+# NOTE: Specification for miners may be different from validators
+
+version: '1.0'
+
+compute_spec:
+
+  miner:
+
+    cpu:
+      min_cores: 4              # Minimum number of CPU cores (GATK HaplotypeCaller scales with cores)
+      min_speed: 2.5            # Minimum speed per core (GHz)
+      recommended_cores: 8      # Recommended number of CPU cores (for faster variant calling)
+      recommended_speed: 3.5    # Recommended speed per core (GHz)
+      architecture: "x86_64"    # Architecture type (required for Docker containers)
+
+    gpu:
+      required: False                       # GPU not required (GATK and DeepVariant can run on CPU)
+      min_vram: 0                           # Minimum GPU VRAM (GB)
+      recommended_vram: 8                   # Recommended GPU VRAM for DeepVariant GPU mode (optional)
+      cuda_cores: 0                         # Minimum number of CUDA cores
+      min_compute_capability: 0.0           # Minimum CUDA compute capability
+      recommended_compute_capability: 7.0   # For DeepVariant GPU acceleration (optional)
+      recommended_gpu: "NVIDIA T4 or better (optional for DeepVariant)" # GPU recommendation
+
+    memory:
+      min_ram: 8            # Minimum RAM (GB) - GATK/FreeBayes/BCFtools run on 8GB; DeepVariant needs 16GB
+      min_swap: 8           # Minimum swap space (GB)
+      recommended_ram: 16   # Recommended RAM (required for DeepVariant template)
+      recommended_swap: 16  # Recommended swap space (GB)
+      ram_type: "DDR4"      # RAM type (e.g., DDR4, DDR5)
+
+    storage:
+      min_space: 60            # Minimum free storage (GB) - 30GB BAM cache + ~7GB Docker images + temp files
+      recommended_space: 100   # Recommended free storage (GB)
+      type: "SSD"              # SSD required for reasonable I/O performance
+      min_iops: 3000           # Minimum I/O operations per second (BAM file random access)
+      recommended_iops: 10000  # Recommended IOPS for faster BAM processing
+
+    os:
+      name: "Ubuntu"      # Preferred operating system
+      version: 20.04      # Minimum version (Docker compatibility)
+      alternatives:       # Alternative operating systems
+        - "Ubuntu 22.04"
+        - "Ubuntu 24.04"
+        - "macOS 13+ (with Docker Desktop + Rosetta for Apple Silicon)"
+        - "Debian 11+"
+
+    docker:
+      required: True                           # Docker is mandatory
+      min_version: "24.0"                      # Minimum Docker version
+      images_size: 7                           # Approximate size of Docker images (GB) - varies by chosen template
+      required_images:                         # Images depend on chosen MINER_TEMPLATE
+        - "quay.io/biocontainers/samtools:1.20--h50ea8bc_0" # samtools (~500MB) - always required for BAM indexing
+        # Pull ONE of the following depending on MINER_TEMPLATE:
+        - "broadinstitute/gatk:4.5.0.0"        # gatk template (~4GB, default)
+        - "google/deepvariant:1.5.0"            # deepvariant template (~6GB)
+        - "staphb/freebayes:1.3.7"              # freebayes template (~500MB, also needs bcftools)
+        - "quay.io/biocontainers/bcftools:1.20--h8b25389_0" # bcftools template (~500MB)
+
+  validator:
+
+    cpu:
+      min_cores: 8              # Minimum cores (hap.py scoring is CPU-intensive)
+      min_speed: 2.5            # Minimum speed per core (GHz)
+      recommended_cores: 16     # Recommended cores for parallel hap.py scoring across miners
+      recommended_speed: 3.5    # Recommended speed per core (GHz)
+      architecture: "x86_64"    # Architecture type (required for Docker containers)
+
+    gpu:
+      required: False                       # GPU not required
+      min_vram: 0                           # Minimum GPU VRAM (GB)
+      recommended_vram: 0                   # Recommended GPU VRAM (GB)
+      cuda_cores: 0                         # Minimum number of CUDA cores
+      min_compute_capability: 0.0           # Minimum CUDA compute capability
+      recommended_compute_capability: 0.0   # Recommended CUDA compute capability
+      recommended_gpu: "N/A"                # No GPU needed
+
+    memory:
+      min_ram: 32           # Minimum RAM (GB) - hap.py RTG heap (8GB) + running miner tool configs
+      min_swap: 16          # Minimum swap space (GB)
+      recommended_ram: 64   # Recommended RAM for handling many concurrent validations
+      recommended_swap: 32  # Recommended swap space (GB)
+      ram_type: "DDR4"      # RAM type (e.g., DDR4, DDR5)
+
+    storage:
+      min_space: 100           # Minimum free storage (GB) - datasets + downloaded BAMs + truth VCFs
+      recommended_space: 250   # Recommended free storage (GB) - for long-term operation
+      type: "SSD"              # SSD strongly recommended for BAM/VCF I/O
+      min_iops: 5000           # Minimum I/O operations per second
+      recommended_iops: 15000  # Recommended IOPS for BAM/VCF processing
+
+    os:
+      name: "Ubuntu"      # Preferred operating system
+      version: 20.04      # Minimum version (Docker compatibility)
+      alternatives:       # Alternative operating systems
+        - "Ubuntu 22.04"
+        - "Ubuntu 24.04"
+        - "macOS 13+ (with Docker Desktop + Rosetta for Apple Silicon)"
+        - "Debian 11+"
+
+    docker:
+      required: True                           # Docker is mandatory
+      min_version: "24.0"                      # Minimum Docker version
+      images_size: 15                          # Approximate size of required Docker images (GB)
+      required_images:                         # Validators re-run ALL miner tool configs, so all images are needed
+        - "genonet/hap-py:0.3.15"              # hap.py + RTG Tools scoring (~2GB)
+        - "broadinstitute/gatk:4.5.0.0"        # GATK template (~4GB)
+        - "google/deepvariant:1.5.0"            # DeepVariant template (~6GB)
+        - "staphb/freebayes:1.3.7"              # FreeBayes template (~500MB)
+        - "quay.io/biocontainers/bcftools:1.20--h8b25389_0" # BCFtools template + scoring (~500MB)
+        - "quay.io/biocontainers/samtools:1.20--h50ea8bc_0" # samtools for BAM indexing (~500MB)
+
+network_spec:
+  bandwidth:
+    download: 100  # Minimum download bandwidth (Mbps) - for downloading datasets and receiving BAMs
+    upload: 50     # Minimum upload bandwidth (Mbps) - for validators submitting scores and weight history
+
+  ports:
+    validator:
+      outbound: [443]   # HTTPS to platform API and Bittensor RPC
+    miner:
+      outbound: [443]   # HTTPS to platform API and Bittensor RPC
+
+# Dataset requirements (downloaded once, cached locally)
+dataset_spec:
+  total_size: 45  # Total size of required genomics datasets (GB)
+
+  files:
+    - name: "300x chr20 BAM"
+      path: "datasets/bams/sample.GRCh38.300x_chr20.bam"
+      size: 30  # GB
+      url: "https://minos-reference.s3.us-east-1.amazonaws.com/bams/sample.GRCh38.300x_chr20.bam"
+
+    - name: "GRCh38 chr20 Reference FASTA"
+      path: "datasets/reference/chr20.fa"
+      size: 0.06  # GB (~60MB)
+      url: "https://minos-reference.s3.us-east-1.amazonaws.com/reference/chr20.fa"
+
+    - name: "RTG SDF Template"
+      path: "datasets/reference/chr20.sdf"
+      size: 0.2  # GB (~200MB)
+      url: "https://minos-reference.s3.us-east-1.amazonaws.com/reference/chr20.sdf.tar.gz"
+
+    - name: "GIAB Truth VCF"
+      path: "datasets/truth/sample_GRCh38_1_22_v4.2.1_benchmark.chr20.vcf.gz"
+      size: 0.01  # GB (~10MB)
+      url: "https://minos-reference.s3.us-east-1.amazonaws.com/truth/sample_GRCh38_1_22_v4.2.1_benchmark.chr20.vcf.gz"
+
+    - name: "GIAB Confident Regions BED"
+      path: "datasets/truth/sample_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.chr20.bed"
+      size: 0.002  # GB (~2MB)
+      url: "https://minos-reference.s3.us-east-1.amazonaws.com/truth/sample_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.chr20.bed"
+
+# Performance benchmarks (approximate timing on recommended hardware)
+performance_benchmarks:
+  miner:
+    gatk_variant_calling: "10-20 minutes per 5MB window"  # GATK HaplotypeCaller runtime
+    vcf_generation: "< 1 minute"                          # VCF formatting and response
+    cache_lookup: "< 1 second"                            # Cached result retrieval
+
+  validator:
+    scoring_round_query: "< 5 seconds"                    # Poll platform for rounds in scoring phase
+    happy_scoring: "1-5 minutes per miner"                # hap.py validation runtime per miner
+    weight_update: "< 10 seconds"                         # Blockchain weight write
+    full_round: "20-30 minutes"                           # Complete validation cycle (10 miners)
+
+# Additional requirements
+additional_requirements:
+  python_version: "3.10+"        # Minimum Python version
+  bittensor_version: "9.12.2+"   # Minimum Bittensor SDK version
+
+  python_packages:               # Key Python dependencies
+    - "bittensor>=9.12.2"
+    - "torch>=2.0.0"
+    - "pysam>=0.21.0"            # Required for BAM/VCF processing
+    - "numpy>=1.24.0"
+    - "pydantic>=2.0.0"
+    - "python-dotenv>=1.0.0"
+
+  system_packages:              # Recommended system packages
+    - "docker"
+    - "git"
+
+  notes:
+    - "Docker must be installed and running"
+    - "User must be in 'docker' group (Linux) or Docker Desktop must be running (macOS/Windows)"
+    - "Apple Silicon Macs require Rosetta 2 for x86_64 Docker containers"
+    - "Validators require 24/7 uptime for consistent scoring rounds"
+    - "Miners should maintain uptime to receive tasks and build reputation"
+    - "Initial dataset download is ~45GB and takes 30-60 minutes on recommended bandwidth"
+    - "Disk usage grows over time: validators download BAMs for scoring (auto-cleaned after 5h)"

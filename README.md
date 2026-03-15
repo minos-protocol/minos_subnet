@@ -14,7 +14,7 @@
 
 # Minos – Decentralized Genomic Variant Calling & Benchmarking Platform
 
-Minos (SN107) is a subnet for genomic variant calling and bechmarking powered by Bittensor. Every 72 minutes, the platform generates a fresh challenge genome (BAM file) containing hidden synthetic mutations injected using HelixForge at read level. Miners are rewarded for performing hyperparameter search and providing configuartions for state-of-the-art variant calling tools that can accurately identify these hiddren mutations in the genome. Once the hyperparameter space has been saturated, miners will compete to provide their own custom algorithms to identify mutations. Validators are responsible for downloading miner's hyperparam config and they will run each miner's submitted config, and evaluate the results using industry standard tools and approaches such as hap.py. Miners will never be asked to upload outputs, they submit their variant-calling configuration (and pipelines in later stages), which the validator executes trustlessly.
+Minos (SN107) is a subnet for genomic variant calling and benchmarking powered by Bittensor. Every 72 minutes, the platform generates a fresh challenge genome (BAM file) containing hidden synthetic mutations injected using HelixForge at read level. Miners are rewarded for performing hyperparameter search and providing configurations for state-of-the-art variant calling tools that can accurately identify these hidden mutations in the genome. Once the hyperparameter space has been saturated, miners will compete to provide their own custom algorithms to identify mutations. Validators are responsible for downloading miner's hyperparam config and they will run each miner's submitted config, and evaluate the results using industry standard tools and approaches such as hap.py. Miners will never be asked to upload outputs, they submit their variant-calling configuration (and pipelines in later stages), which the validator executes trustlessly.
 
 > **Subnet 107** on Bittensor mainnet (finney).
 
@@ -256,7 +256,7 @@ python -m neurons.miner \
 2. **Task Poll**: Poll platform for pending evaluation tasks
 3. **BAM Download**: Fetch benchmark BAM from platform via presigned URL
 4. **Variant Calling**: Run configured variant caller (GATK, DeepVariant, freebayes, or bcftools)
-5. **Config Submit**: Submit tool config you've used (hyperparameters only baesd on the template)
+5. **Config Submit**: Submit tool config you've used (hyperparameters only based on the template)
 6. **Reward**: Earn alpha based on accuracy score — validators re-run the config to verify
 
 ---
