@@ -33,7 +33,7 @@ scorer = HappyScorer()
 results = scorer.score_vcf(
     truth_vcf="merged_truth.vcf.gz",
     query_vcf="miner_output.vcf",
-    reference_fasta="chr20.fa",
+    reference_fasta="datasets/reference/chr20/chr20.fa",
     confident_bed="confident_regions.bed"
 )
 # Returns:

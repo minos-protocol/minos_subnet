@@ -20,7 +20,7 @@ Each scoring round follows this lifecycle:
 
 ```text
 PLATFORM
-  │  Creates round with: round_id, region (e.g. chr20:10M-15M),
+  │  Creates round with: round_id, region (e.g. chr20:10M-15M, chr16:5M-10M),
   │  mutated BAM (presigned S3 URL), truth VCF (private)
   │
   ▼ status: "pending"  (round created, waiting for start time)
@@ -47,10 +47,10 @@ Key design choice: **miners submit configs, not VCFs**. Validators independently
 
 | Pool | Contents | Visibility |
 | --- | --- | --- |
-| Reference | GRCh38 chr20 FASTA + index + RTG SDF | Public (downloaded by all) |
-| Benchmark BAM | GIAB HG002 300× chr20, downsampled | Public (via platform presigned URL) |
+| Reference | GRCh38 FASTA + index + RTG SDF (chr1-chr22) | Public (downloaded by all) |
+| Benchmark BAM | GIAB donors (HG001-HG007) 100-300× per chromosome, downsampled | Public (via platform presigned URL) |
 | Truth VCF | GIAB + HelixForge-inserted synthetic mutations | Validators only (presigned URL, round-scoped) |
-| Confident BED | GIAB high-confidence regions for chr20 | Public |
+| Confident BED | GIAB high-confidence regions per chromosome | Validators only (per-round) |
 
 Synthetic mutations are injected by the platform using HelixForge into known positions, creating a merged truth (`GIAB ∪ synthetic variants`) that miners cannot pre-compute answers for.
 
@@ -155,7 +155,8 @@ SNP/INDEL weighting is truth-count-proportional (fallback: 70/30).
 minos_subnet/
 ├── neurons/
 │   ├── miner.py           # Miner loop: poll, download, call variants, submit config
-│   └── validator.py       # Validator loop: score submissions, set chain weights
+│   ├── validator.py       # Validator loop: score submissions, set chain weights
+│   └── status.py          # Health checks and system status
 ├── templates/
 │   ├── gatk.py            # GATK HaplotypeCaller template
 │   ├── deepvariant.py     # Google DeepVariant template
@@ -166,6 +167,8 @@ minos_subnet/
 │   ├── scoring.py         # hap.py Docker runner + AdvancedScorer
 │   ├── weight_tracking.py # EMA score tracker + winner-takes-all weights
 │   ├── platform_client.py # Authenticated API client (miner + validator)
+│   ├── config_loader.py   # Tool config file parser
+│   ├── path_utils.py      # Safe filesystem paths
 │   └── file_utils.py      # SHA256-verified file download + caching
 ├── base/
 │   ├── genomics_config.py # Central config (Docker images, timeouts, EMA params)
@@ -175,5 +178,8 @@ minos_subnet/
 │   ├── deepvariant.conf   # Miner-tunable DeepVariant parameters
 │   ├── freebayes.conf     # Miner-tunable FreeBayes parameters
 │   └── bcftools.conf      # Miner-tunable BCFtools parameters
-└── setup.py               # Interactive setup wizard
+├── install.sh             # Installer (full setup or update mode)
+├── setup.py               # Interactive setup wizard
+├── start-miner.sh         # Start miner (with inline wallet setup)
+└── start-validator.sh     # Start validator (with inline wallet setup)
 ```

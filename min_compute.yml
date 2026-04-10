@@ -129,34 +129,24 @@ network_spec:
       outbound: [443]   # HTTPS to platform API and Bittensor RPC
 
 # Dataset requirements (downloaded once, cached locally)
+# Reference data for chr1-chr22 (~9 GB total)
+# BAM files are downloaded per-round from the platform (not cached permanently)
+# Truth VCFs are served per-round from the platform API
 dataset_spec:
-  total_size: 45  # Total size of required genomics datasets (GB)
+  total_size: 9  # Total size of required reference datasets (GB)
 
   files:
-    - name: "300x chr20 BAM"
-      path: "datasets/bams/sample.GRCh38.300x_chr20.bam"
-      size: 30  # GB
-      url: "https://minos-reference.s3.us-east-1.amazonaws.com/bams/sample.GRCh38.300x_chr20.bam"
+    - name: "GRCh38 Reference FASTA (per chromosome, chr1-chr22)"
+      path: "datasets/reference/{chr}/{chr}.fa"
+      size: 0.06  # GB each (~60MB x 22 = ~1.3GB)
+      url: "https://genotypenet-platform.s3.us-east-1.amazonaws.com/reference_data/donors/reference/{chr}/{chr}.fa"
+      note: "Downloaded for each of chr1-chr22"
 
-    - name: "GRCh38 chr20 Reference FASTA"
-      path: "datasets/reference/chr20.fa"
-      size: 0.06  # GB (~60MB)
-      url: "https://minos-reference.s3.us-east-1.amazonaws.com/reference/chr20.fa"
-
-    - name: "RTG SDF Template"
-      path: "datasets/reference/chr20.sdf"
-      size: 0.2  # GB (~200MB)
-      url: "https://minos-reference.s3.us-east-1.amazonaws.com/reference/chr20.sdf.tar.gz"
-
-    - name: "GIAB Truth VCF"
-      path: "datasets/truth/sample_GRCh38_1_22_v4.2.1_benchmark.chr20.vcf.gz"
-      size: 0.01  # GB (~10MB)
-      url: "https://minos-reference.s3.us-east-1.amazonaws.com/truth/sample_GRCh38_1_22_v4.2.1_benchmark.chr20.vcf.gz"
-
-    - name: "GIAB Confident Regions BED"
-      path: "datasets/truth/sample_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.chr20.bed"
-      size: 0.002  # GB (~2MB)
-      url: "https://minos-reference.s3.us-east-1.amazonaws.com/truth/sample_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.chr20.bed"
+    - name: "RTG SDF Template (per chromosome, chr1-chr22, validator only)"
+      path: "datasets/reference/{chr}/{chr}.sdf"
+      size: 0.2  # GB each (~200MB x 22 = ~4.4GB)
+      url: "https://genotypenet-platform.s3.us-east-1.amazonaws.com/reference_data/donors/reference/{chr}/{chr}.sdf.tar.gz"
+      note: "Validator only — downloaded for each of chr1-chr22"
 
 # Performance benchmarks (approximate timing on recommended hardware)
 performance_benchmarks:
@@ -194,5 +184,5 @@ additional_requirements:
     - "Apple Silicon Macs require Rosetta 2 for x86_64 Docker containers"
     - "Validators require 24/7 uptime for consistent scoring rounds"
     - "Miners should maintain uptime to receive tasks and build reputation"
-    - "Initial dataset download is ~45GB and takes 30-60 minutes on recommended bandwidth"
+    - "Initial dataset download is ~9GB and takes 10-20 minutes on recommended bandwidth"
     - "Disk usage grows over time: validators download BAMs for scoring (auto-cleaned after 5h)"

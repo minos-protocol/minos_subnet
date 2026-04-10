@@ -350,6 +350,7 @@ class Validator:
             work_dir = download_result["work_dir"]
             bam_path = download_result["bam_path"]
             truth_vcf_path = download_result["truth_vcf_path"]
+            mutations_vcf_path = download_result.get("mutations_vcf_path")
             ref_path = download_result["ref_path"]
             ref_sdf_path = download_result["ref_sdf_path"]
             truth_bed_path = download_result["truth_bed_path"]
@@ -373,6 +374,7 @@ class Validator:
                     round_id, sub, already_scored, work_dir, bam_path,
                     ref_path, ref_sdf_path, truth_bed_path, truth_vcf_path,
                     region, scored_hotkeys, submission_times,
+                    mutations_vcf_path=mutations_vcf_path,
                 )
 
             # 9-10. Record round, set weights, cleanup
@@ -396,6 +398,8 @@ class Validator:
         bam_index_url, bam_index_url_backup = _ordered("bam_index_presigned_url", "bam_index_presigned_url_backup")
         truth_vcf_url, truth_vcf_url_backup = _ordered("truth_vcf_presigned_url", "truth_vcf_presigned_url_backup")
         truth_vcf_index_url, truth_vcf_index_url_backup = _ordered("truth_vcf_index_presigned_url", "truth_vcf_index_presigned_url_backup")
+        mutations_vcf_url, mutations_vcf_url_backup = _ordered("mutations_vcf_presigned_url", "mutations_vcf_presigned_url_backup")
+        mutations_vcf_index_url, mutations_vcf_index_url_backup = _ordered("mutations_vcf_index_presigned_url", "mutations_vcf_index_presigned_url_backup")
 
         if not (bam_url or bam_url_backup) or not (truth_vcf_url or truth_vcf_url_backup):
             bt.logging.error(f"Round {round_id}: missing presigned URLs")
@@ -456,17 +460,54 @@ class Validator:
             except Exception as e:
                 bt.logging.warning(f"Failed to index truth VCF: {e}")
 
+        # Download mutations-only VCF for scoring precision.
+        mutations_vcf_path = None
+        if mutations_vcf_url or mutations_vcf_url_backup:
+            mutations_vcf_path = work_dir / "mutations.vcf.gz"
+            mutations_vcf_sha256 = round_data.get("mutations_vcf_sha256")
+            print(f"   Downloading mutations VCF...", flush=True)
+            if not download_file_with_fallback(mutations_vcf_url, mutations_vcf_path, backup_url=mutations_vcf_url_backup, expected_sha256=mutations_vcf_sha256):
+                bt.logging.error(f"Round {round_id}: failed to download mutations VCF (primary and backup)")
+                return None
+            mutations_vcf_index = work_dir / "mutations.vcf.gz.tbi"
+            if mutations_vcf_index_url or mutations_vcf_index_url_backup:
+                download_file_with_fallback(mutations_vcf_index_url, mutations_vcf_index, backup_url=mutations_vcf_index_url_backup)
+        else:
+            bt.logging.error(f"Round {round_id}: no mutations VCF URL provided by platform")
+            return None
+
         print(f"   BAM: {bam_path.stat().st_size / (1024**3):.2f} GB", flush=True)
         print(f"   Processing {len(round_data.get('submissions', []))} submissions...", flush=True)
 
-        # Reference path (local dataset)
-        ref_path = BASE_DIR / "datasets" / "reference" / "chr20.fa"
-        ref_sdf_path = BASE_DIR / "datasets" / "reference" / "chr20.sdf"
-        truth_bed_path = BASE_DIR / "datasets" / "truth" / "sample_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.chr20.bed"
+        # Extract chromosome from region for dynamic path resolution
+        region = round_data.get("region", "")
+        chrom = region.split(":")[0] if region else "chr20"
 
+        # Reference path (local dataset — multi-chromosome aware)
+        ref_path = BASE_DIR / "datasets" / "reference" / chrom / f"{chrom}.fa"
+        ref_sdf_path = BASE_DIR / "datasets" / "reference" / chrom / f"{chrom}.sdf"
+
+        # Fallback to old flat structure for backward compatibility
         if not ref_path.exists():
-            bt.logging.error(f"Reference not found: {ref_path}")
-            return None
+            ref_path_legacy = BASE_DIR / "datasets" / "reference" / "chr20.fa"
+            if chrom == "chr20" and ref_path_legacy.exists():
+                ref_path = ref_path_legacy
+                ref_sdf_path = BASE_DIR / "datasets" / "reference" / "chr20.sdf"
+            else:
+                bt.logging.error(f"Reference not found: {ref_path}. Ensure reference data for {chrom} is downloaded.")
+                return None
+
+        # Truth BED — try per-chromosome local file, or skip if not available
+        # (hap.py can run without -f flag, just less focused)
+        truth_bed_path = BASE_DIR / "datasets" / "truth" / f"sample_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.{chrom}.bed"
+        if not truth_bed_path.exists():
+            # Try legacy path
+            legacy_bed = BASE_DIR / "datasets" / "truth" / "sample_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.chr20.bed"
+            if chrom == "chr20" and legacy_bed.exists():
+                truth_bed_path = legacy_bed
+            else:
+                bt.logging.warning(f"No confident BED file for {chrom} — scoring without region filtering")
+                truth_bed_path = None
 
         # The platform uploads a merged truth VCF (GIAB + synthetic) to S3.
         # Use it directly — no need to re-parse or re-merge.
@@ -492,6 +533,7 @@ class Validator:
             "work_dir": work_dir,
             "bam_path": bam_path,
             "truth_vcf_path": truth_vcf_path,
+            "mutations_vcf_path": mutations_vcf_path,
             "ref_path": ref_path,
             "ref_sdf_path": ref_sdf_path,
             "truth_bed_path": truth_bed_path,
@@ -499,7 +541,8 @@ class Validator:
 
     async def _score_single_miner(self, round_id, sub, already_scored, work_dir,
                                    bam_path, ref_path, ref_sdf_path, truth_bed_path,
-                                   truth_vcf_path, region, scored_hotkeys, submission_times):
+                                   truth_vcf_path, region, scored_hotkeys, submission_times,
+                                   mutations_vcf_path=None):
         """Run a single miner's tool, score the output, and submit results."""
         miner_hotkey = sub.get("miner_hotkey")
         tool_name = sub.get("tool_name")
@@ -563,9 +606,10 @@ class Validator:
                 truth_vcf=str(truth_vcf_path),
                 query_vcf=str(miner_vcf_path),
                 reference_fasta=str(ref_path),
-                confident_bed=str(truth_bed_path) if truth_bed_path.exists() else None,
+                confident_bed=str(truth_bed_path) if truth_bed_path and truth_bed_path.exists() else None,
                 region=region,
-                reference_sdf=str(ref_sdf_path) if ref_sdf_path.exists() else None
+                reference_sdf=str(ref_sdf_path) if ref_sdf_path.exists() else None,
+                mutations_vcf=str(mutations_vcf_path) if mutations_vcf_path else None
             )
 
             scoring_elapsed = time.time() - scoring_start

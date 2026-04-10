@@ -75,6 +75,7 @@ minos_subnet/
 ├── neurons/                  # Bittensor neuron entrypoints
 │   ├── validator.py          # Full validator orchestration
 │   ├── miner.py              # Miner loop: poll, download, call variants, submit config
+│   ├── status.py             # Health checks and system status
 │   └── README.md             # Neurons documentation
 ├── templates/                # Variant-calling tool templates
 │   ├── gatk.py               # GATK HaplotypeCaller template
@@ -97,7 +98,10 @@ minos_subnet/
 │   ├── freebayes.conf
 │   └── bcftools.conf
 ├── docs/                     # Architecture and integration docs
+├── install.sh                # Installer (full setup or update mode)
 ├── setup.py                  # Interactive setup wizard
+├── start-miner.sh            # Start miner (with inline wallet setup)
+├── start-validator.sh        # Start validator (with inline wallet setup)
 ├── requirements.txt          # Python dependencies
 ├── .env.miner.example        # Miner environment configuration
 ├── .env.validator.example    # Validator environment configuration
@@ -112,8 +116,8 @@ minos_subnet/
 |-----------|-------------|-------|
 | OS | Linux (Ubuntu 20.04+), macOS 13+ | Docker + Bittensor run best on Linux |
 | CPU/RAM (Validator) | ≥8 cores / 32 GB RAM | hap.py scoring benefits from cores |
-| CPU/RAM (Miner) | ≥4 cores / 16 GB RAM | GATK scales with threads |
-| Disk | ≥100 GB | For datasets and temporary files |
+| CPU/RAM (Miner) | ≥4 cores / 8–16 GB RAM | 8 GB for BCFtools/FreeBayes, 16 GB for DeepVariant |
+| Disk | ≥60 GB (miner) / ≥100 GB (validator) | Reference data ~9 GB + temporary files |
 | Docker | 24.0+ | Required for GATK, hap.py, bcftools |
 | Python | 3.10+ | We test on 3.12 |
 | Bittensor | Latest pip install | Provides wallet/subtensor/dendrite APIs |
@@ -122,15 +126,30 @@ minos_subnet/
 
 ## Quick Start
 
-The install script handles everything — Python venv, dependencies, Docker images, reference data, wallet setup, and configuration.
-
 ```bash
 git clone https://github.com/minos-protocol/minos_subnet.git
 cd minos_subnet
+bash install.sh          # First-time: full setup (venv, deps, Docker, reference data, wallet)
+bash start-miner.sh      # Start as miner
+bash start-validator.sh  # Start as validator
+```
+
+The `start-*.sh` scripts handle wallet setup on first run — no manual `.env` editing needed. If you already ran `install.sh` before, running it again will only update dependencies and download any new reference data (use `--fresh` to redo everything).
+
+The platform is in **demo mode** — you can run the miner immediately to test your pipeline without registering on the subnet. Register when you're ready to earn alpha.
+
+**MinosVM:** If using the MinosVM Docker image, everything is pre-installed. Just SSH in and run `bash start-miner.sh` or `bash start-validator.sh`.
+
+### Updating
+
+Already running Minos? Pull the latest code and run the installer — it detects your existing setup and only downloads new reference data:
+
+```bash
+git pull
 bash install.sh
 ```
 
-The platform is in **demo mode** — you can run the miner immediately to test your pipeline without registering on the subnet. Register when you're ready to earn alpha.
+Your wallet, `.env`, and existing data are preserved. Use `bash install.sh --fresh` to redo a full setup if needed.
 
 <details>
 <summary>Manual setup (if you prefer not to use the install script)</summary>
@@ -196,6 +215,12 @@ STORAGE_PRIMARY_BACKEND=hippius
 ### Running the Validator
 
 ```bash
+bash start-validator.sh
+```
+
+Or manually:
+
+```bash
 source .venv/bin/activate
 python -m neurons.validator \
   --netuid 107 \
@@ -240,6 +265,12 @@ STORAGE_PRIMARY_BACKEND=hippius
 ```
 
 ### Running the Miner
+
+```bash
+bash start-miner.sh
+```
+
+Or manually:
 
 ```bash
 source .venv/bin/activate
@@ -351,6 +382,7 @@ btcli subnet metagraph --netuid 107
 - [neurons/README.md](neurons/README.md) - Detailed miner/validator documentation
 - [utils/README.md](utils/README.md) - Utility modules reference
 - [docs/architecture.md](docs/architecture.md) - System architecture deep dive
+- [docs/hap_py_docker.md](docs/hap_py_docker.md) - hap.py Docker image reference
 
 ---
 

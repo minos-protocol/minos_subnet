@@ -45,6 +45,14 @@ A miner receives genomic data (DNA sequencing files) and finds genetic variants 
 
 ### Running the Miner
 
+The simplest way — handles wallet setup on first run:
+
+```bash
+bash start-miner.sh
+```
+
+Or manually:
+
 ```bash
 python -m neurons.miner \
   --netuid 107 \
@@ -53,7 +61,7 @@ python -m neurons.miner \
   --wallet.hotkey my_hotkey
 ```
 
-Or use the `.env` file (we recommend this):
+Or use the `.env` file:
 ```bash
 cp .env.miner.example .env
 # Edit .env with your wallet details
@@ -101,6 +109,14 @@ A validator uses miners config file and selected hyperparameters to run the vari
 
 ### Running the Validator
 
+The simplest way — handles wallet setup on first run:
+
+```bash
+bash start-validator.sh
+```
+
+Or manually:
+
 ```bash
 python -m neurons.validator \
   --netuid 107 \
@@ -109,7 +125,7 @@ python -m neurons.validator \
   --wallet.hotkey default
 ```
 
-Or use the `.env` file (we recommend this):
+Or use the `.env` file:
 ```bash
 cp .env.validator.example .env
 # Edit .env with your wallet details
@@ -204,7 +220,7 @@ Weights are assigned in two phases:
 
 ### Validator Needs
 
-- Reference genomic data (~15GB)
+- Reference genomic data (~9GB for chr1-chr22)
 - hap.py Docker image: `genonet/hap-py:0.3.15`
 - bcftools/samtools Docker images
 - 100GB+ storage for datasets and temporary files

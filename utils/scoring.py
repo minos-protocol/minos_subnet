@@ -209,6 +209,114 @@ def generate_synthetic_regions_bed(truth_vcf: str, output_bed: str, padding: int
         return False
 
 
+def compute_synthetic_only_metrics(happy_vcf_path: str, mutations_vcf_path: str,
+                                    position_tolerance: int = 10) -> Optional[Dict[str, float]]:
+    """Filter hap.py results to only count variants matching the mutations VCF.
+
+    SNPs are matched by exact (chrom, pos, ref, alt). INDELs use position tolerance
+    to handle normalization differences.
+    """
+    try:
+        happy_path = Path(happy_vcf_path)
+        mutations_path = Path(mutations_vcf_path)
+        if not happy_path.exists() or not mutations_path.exists():
+            logger.error(f"Missing file: happy={happy_path.exists()}, mutations={mutations_path.exists()}")
+            return None
+
+        target_snps = set()
+        target_indel_positions = []
+        opener = gzip.open if str(mutations_path).endswith('.gz') else open
+        with opener(mutations_path, 'rt') as f:
+            for line in f:
+                if line.startswith('#'):
+                    continue
+                parts = line.strip().split('\t')
+                if len(parts) < 5:
+                    continue
+                chrom, pos, ref, alt = parts[0], int(parts[1]), parts[3], parts[4]
+                if len(ref) != len(alt):
+                    target_indel_positions.append((chrom, pos))
+                else:
+                    target_snps.add((chrom, pos, ref, alt))
+
+        logger.info(f"Loaded {len(target_snps)} target SNPs and "
+                     f"{len(target_indel_positions)} target INDELs from {mutations_path.name}")
+
+        counts = {
+            'tp_snp': 0, 'fp_snp': 0, 'fn_snp': 0,
+            'tp_indel': 0, 'fp_indel': 0, 'fn_indel': 0,
+        }
+
+        def _match_snp(chrom, pos, ref, alt):
+            return (chrom, pos, ref, alt) in target_snps
+
+        def _match_indel(chrom, pos):
+            return any(chrom == sc and abs(pos - sp) <= position_tolerance
+                       for sc, sp in target_indel_positions)
+
+        opener = gzip.open if str(happy_path).endswith('.gz') else open
+        with opener(happy_path, 'rt') as f:
+            for line in f:
+                if line.startswith('#'):
+                    continue
+                fields = line.strip().split('\t')
+                if len(fields) < 11:
+                    continue
+
+                chrom, pos, ref, alt = fields[0], int(fields[1]), fields[3], fields[4]
+                fmt_keys = fields[8].split(':')
+                fmt_truth = dict(zip(fmt_keys, fields[9].split(':')))
+                fmt_query = dict(zip(fmt_keys, fields[10].split(':')))
+
+                bd_truth = fmt_truth.get('BD', '.')
+                bd_query = fmt_query.get('BD', '.')
+                bvt_truth = fmt_truth.get('BVT', '.')
+                bvt_query = fmt_query.get('BVT', '.')
+
+                if bd_truth in ('TP', 'FN'):
+                    is_snp = bvt_truth == 'SNP'
+                    matched = _match_snp(chrom, pos, ref, alt) if is_snp else _match_indel(chrom, pos)
+                    if matched:
+                        key = f"{'tp' if bd_truth == 'TP' else 'fn'}_{'snp' if is_snp else 'indel'}"
+                        counts[key] += 1
+
+                if bd_query == 'FP':
+                    is_snp = bvt_query == 'SNP'
+                    matched = _match_snp(chrom, pos, ref, alt) if is_snp else _match_indel(chrom, pos)
+                    if matched:
+                        counts[f"fp_{'snp' if is_snp else 'indel'}"] += 1
+
+        tp_s, fp_s, fn_s = counts['tp_snp'], counts['fp_snp'], counts['fn_snp']
+        tp_i, fp_i, fn_i = counts['tp_indel'], counts['fp_indel'], counts['fn_indel']
+
+        def _f1(tp, fp, fn):
+            p = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            r = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            return 2 * p * r / (p + r) if (p + r) > 0 else 0.0, p, r
+
+        f1_snp, precision_snp, recall_snp = _f1(tp_s, fp_s, fn_s)
+        f1_indel, precision_indel, recall_indel = _f1(tp_i, fp_i, fn_i)
+
+        logger.info(f"Filtered metrics: SNP TP={tp_s} FP={fp_s} FN={fn_s} F1={f1_snp:.4f} | "
+                     f"INDEL TP={tp_i} FP={fp_i} FN={fn_i} F1={f1_indel:.4f}")
+
+        return {
+            'f1_snp': f1_snp, 'precision_snp': precision_snp, 'recall_snp': recall_snp,
+            'f1_indel': f1_indel, 'precision_indel': precision_indel, 'recall_indel': recall_indel,
+            'tp_snp': float(tp_s), 'fp_snp': float(fp_s), 'fn_snp': float(fn_s),
+            'tp_indel': float(tp_i), 'fp_indel': float(fp_i), 'fn_indel': float(fn_i),
+            'truth_total_snp': float(tp_s + fn_s), 'truth_total_indel': float(tp_i + fn_i),
+            'query_total_snp': float(tp_s + fp_s), 'query_total_indel': float(tp_i + fp_i),
+            'frac_na_snp': 0.0, 'frac_na_indel': 0.0,
+            'weighted_f1': 0.7 * f1_snp + 0.3 * f1_indel,
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to compute filtered metrics: {e}")
+        logger.debug(traceback.format_exc())
+        return None
+
+
 def parse_happy_vcf_assessed_metrics(happy_vcf_path: str) -> Optional[Dict[str, float]]:
     """Parse hap.py output VCF to compute metrics from assessed variants only.
 
@@ -349,8 +457,13 @@ class HappyScorer:
 
     def score_vcf(self, truth_vcf: str, query_vcf: str,
                   reference_fasta: str = None, confident_bed: str = None,
-                  region: str = None, reference_sdf: str = None) -> Dict[str, float]:
-        """Run hap.py via Docker. Returns f1_snp, f1_indel, precision, recall metrics."""
+                  region: str = None, reference_sdf: str = None,
+                  mutations_vcf: str = None) -> Dict[str, float]:
+        """Run hap.py and return precision/recall/F1 metrics.
+
+        Args:
+            mutations_vcf: Path to mutations-only VCF. Required for accurate scoring.
+        """
         if region is not None:
             region_check = validate_region(region)
             if not region_check["valid"]:
@@ -455,8 +568,8 @@ class HappyScorer:
 
             # Require SDF for vcfeval engine — deterministic scoring depends on it
             if not sdf_path or not sdf_path.exists() or not sdf_path.is_dir():
-                logger.error("SDF reference not available — cannot score deterministically. "
-                             "Run setup.py or download chr20.sdf manually.")
+                logger.error(f"SDF reference not available at {sdf_path} — cannot score deterministically. "
+                             "Run setup.py or ensure the SDF for this chromosome is downloaded.")
                 return self._get_zero_scores()
             logger.info("Using vcfeval engine")
 
@@ -631,6 +744,20 @@ class HappyScorer:
                                 f" -> {assessed['query_total_snp']}+{assessed['query_total_indel']}")
 
                 logger.info(f"hap.py results: SNP F1={happy_results['f1_snp']:.3f}, INDEL F1={happy_results['f1_indel']:.3f}")
+
+                # Recompute metrics from only target mutation positions
+                if mutations_vcf:
+                    happy_vcf = Path(f"{output_prefix}.vcf.gz")
+                    synthetic_metrics = compute_synthetic_only_metrics(
+                        str(happy_vcf), mutations_vcf
+                    )
+                    if synthetic_metrics is None:
+                        logger.error("Failed to compute filtered metrics from hap.py output")
+                        return self._get_zero_scores()
+                    happy_results.update(synthetic_metrics)
+                    logger.info(f"Filtered metrics: SNP F1={synthetic_metrics['f1_snp']:.3f}, "
+                                f"INDEL F1={synthetic_metrics['f1_indel']:.3f}")
+
                 return happy_results
             else:
                 logger.error(f"hap.py failed - no summary CSV created. Return code: {result.returncode}")

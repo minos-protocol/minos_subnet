@@ -289,6 +289,7 @@ setup_venv() {
         local venv_pkg="python${py_ver}-venv"
         if ! dpkg -s "$venv_pkg" &>/dev/null; then
             info "Installing $venv_pkg (required for virtual environment)..."
+            sudo apt-get update -qq
             sudo apt-get install -y "$venv_pkg" || {
                 fail "Could not install $venv_pkg. Try: sudo apt-get install $venv_pkg"
                 exit 1
@@ -394,6 +395,29 @@ launch_wizard() {
     fi
 }
 
+# --- Update mode (existing install detected) ---
+
+update_only() {
+    header "Existing installation detected — updating"
+
+    local venv_dir="$SCRIPT_DIR/.venv"
+
+    # Activate venv
+    # shellcheck disable=SC1091
+    source "$venv_dir/bin/activate"
+    ok "Activated .venv ($(python --version 2>&1))"
+
+    # Update pip deps (only installs new/changed packages)
+    info "Checking for dependency updates..."
+    pip install --upgrade pip -q
+    pip install -r "$SCRIPT_DIR/requirements.txt" -q
+    ok "Dependencies up to date"
+
+    # Run migration + reference data download via setup.py --update-only
+    info "Checking reference data..."
+    python "$SCRIPT_DIR/setup.py" --update-data-only
+}
+
 # --- Main ---
 
 main() {
@@ -402,6 +426,30 @@ main() {
     echo "━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
 
+    local fresh=false
+    if [[ "${1:-}" == "--fresh" ]] || [[ "${1:-}" == "--full" ]]; then
+        fresh=true
+    fi
+
+    local venv_dir="$SCRIPT_DIR/.venv"
+    local env_file="$SCRIPT_DIR/.env"
+
+    # Detect existing install (local .venv or MinosVM /opt/minosvm_venv)
+    local minosvm_venv="/opt/minosvm_venv"
+    if [[ "$fresh" == "false" ]] && [[ -f "$minosvm_venv/bin/activate" ]] && [[ -f "$env_file" ]]; then
+        venv_dir="$minosvm_venv"
+    fi
+    if [[ "$fresh" == "false" ]] && [[ -f "$venv_dir/bin/activate" ]] && [[ -f "$env_file" ]]; then
+        detect_os
+        check_python
+        check_docker
+        update_only
+        echo ""
+        echo -e "${GREEN}Update complete.${NC} Run with ${BOLD}--fresh${NC} to redo full setup."
+        exit 0
+    fi
+
+    # Full install
     detect_os
     check_python
     check_docker

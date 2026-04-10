@@ -185,9 +185,16 @@ class Miner:
         output_dir = bam_path.parent
         output_vcf = output_dir / "output.vcf.gz"
 
-        ref_path = BASE_DIR / "datasets" / "reference" / "chr20.fa"
+        # Extract chromosome from region (e.g. "chr16:10000000-15000000" -> "chr16")
+        chrom = region.split(":")[0] if region else "chr20"
+        ref_path = BASE_DIR / "datasets" / "reference" / chrom / f"{chrom}.fa"
         if not ref_path.exists():
-            raise RuntimeError(f"Reference not found: {ref_path}")
+            # Fallback to old flat structure for backward compatibility
+            ref_path_legacy = BASE_DIR / "datasets" / "reference" / "chr20.fa"
+            if chrom == "chr20" and ref_path_legacy.exists():
+                ref_path = ref_path_legacy
+            else:
+                raise RuntimeError(f"Reference not found: {ref_path}. Ensure reference data for {chrom} is downloaded.")
 
         bt.logging.info(f"Running {self.variant_caller} on {bam_path.name}, region={region}")
 
@@ -256,7 +263,10 @@ class Miner:
 
             round_id = round_data.get("round_id")
             status = round_data.get("status")
-            region = round_data.get("region", "chr20:10000000-15000000")
+            region = round_data.get("region")
+            if not region:
+                bt.logging.error("Round has no region specified — skipping")
+                return False
             time_remaining = round_data.get("time_remaining_seconds", 0)
 
             # Validate round_id to prevent path traversal / shell injection
@@ -305,7 +315,9 @@ class Miner:
 
             # Run variant calling (or reuse existing results)
             output_dir = bam_path.parent
-            variant_count, elapsed = await self._run_variant_calling(bam_path, region, tool_config, output_dir)
+            # In demo mode, always re-run variant calling so users can test their tools
+            is_demo = round_id.startswith("2026-01-01T00:00:00")
+            variant_count, elapsed = await self._run_variant_calling(bam_path, region, tool_config, output_dir, force_rerun=is_demo)
 
             # Submit config to platform
             return await self._submit_result(round_id, tool_config, variant_count, elapsed)
@@ -393,7 +405,7 @@ class Miner:
 
         return bam_path
 
-    async def _run_variant_calling(self, bam_path, region, tool_config, output_dir):
+    async def _run_variant_calling(self, bam_path, region, tool_config, output_dir, force_rerun=False):
         """Run variant calling or reuse existing results, returning (variant_count, elapsed)."""
         # Check if variant calling was already completed with same config (restart recovery)
         output_vcf = output_dir / "output.vcf.gz"
@@ -401,6 +413,11 @@ class Miner:
         skip_variant_calling = False
         variant_count = 0
         elapsed = 0.0
+
+        if force_rerun:
+            # Demo mode: always re-run so users can test their tools
+            output_vcf.unlink(missing_ok=True)
+            vcf_meta.unlink(missing_ok=True)
 
         if output_vcf.exists() and output_vcf.stat().st_size > MIN_VCF_SIZE_BYTES:
             # Check if the existing VCF was produced with the same config

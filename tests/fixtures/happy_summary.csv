@@ -1,0 +1,5 @@
+Type,Subtype,Subset,Filter,Genotype,QQ.Field,QQ,TRUTH.TOTAL,TRUTH.TP,TRUTH.FN,QUERY.TOTAL,QUERY.FP,QUERY.UNK,FP.gt,FP.al,METRIC.Recall,METRIC.Precision,METRIC.Frac_NA,METRIC.F1_Score,TRUTH.TOTAL.TiTv_ratio,QUERY.TOTAL.TiTv_ratio,TRUTH.TOTAL.het_hom_ratio,QUERY.TOTAL.het_hom_ratio
+INDEL,*,*,ALL,*,*,*,50,45,5,55,5,5,0,0,0.9,0.9,0.0909,0.9,,,1.5,1.4
+INDEL,*,*,PASS,*,*,*,50,45,5,50,5,0,0,0,0.9,0.9,0.0,0.9,,,1.5,1.4
+SNP,*,*,ALL,*,*,*,100,95,5,105,5,5,0,0,0.95,0.95,0.0476,0.95,2.1,2.0,1.5,1.6
+SNP,*,*,PASS,*,*,*,100,95,5,100,5,0,0,0,0.95,0.95,0.0,0.95,2.1,2.0,1.5,1.6

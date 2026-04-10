@@ -111,56 +111,54 @@ VALIDATOR_DOCKER_IMAGES = [
     "quay.io/biocontainers/samtools:1.20--h50ea8bc_0",
 ]
 
-# Reference data files per role (from s3_manifest.json)
-# Estimated sizes in MB for user feedback
-MINER_DATA_FILES = [
-    {
-        "name": "GRCh38 chr20 Reference",
-        "local": "datasets/reference/chr20.fa",
-        "url": "https://minos-reference.s3.us-east-1.amazonaws.com/reference/chr20.fa",
-        "size_mb": 60,
-    },
-    {
-        "name": "Reference Index",
-        "local": "datasets/reference/chr20.fa.fai",
-        "url": "https://minos-reference.s3.us-east-1.amazonaws.com/reference/chr20.fa.fai",
-        "size_mb": 1,
-    },
-    {
-        "name": "Reference Dictionary",
-        "local": "datasets/reference/chr20.dict",
-        "url": "https://minos-reference.s3.us-east-1.amazonaws.com/reference/chr20.dict",
-        "size_mb": 1,
-    },
-]
+# Supported chromosomes
+SUPPORTED_CHROMOSOMES = [f"chr{i}" for i in range(1, 23)]  # chr1-chr22
+REF_S3_BASE = "https://genotypenet-platform.s3.us-east-1.amazonaws.com/reference_data/donors/reference"
 
-VALIDATOR_DATA_FILES = MINER_DATA_FILES + [
-    {
-        "name": "RTG SDF Template",
-        "local": "datasets/reference/chr20.sdf",
-        "url": "https://minos-reference.s3.us-east-1.amazonaws.com/reference/chr20.sdf.tar.gz",
-        "size_mb": 200,
-        "extract": True,
-    },
-    {
-        "name": "GIAB Truth VCF",
-        "local": "datasets/truth/sample_GRCh38_1_22_v4.2.1_benchmark.chr20.vcf.gz",
-        "url": "https://minos-reference.s3.us-east-1.amazonaws.com/truth/sample_GRCh38_1_22_v4.2.1_benchmark.chr20.vcf.gz",
-        "size_mb": 10,
-    },
-    {
-        "name": "Truth VCF Index",
-        "local": "datasets/truth/sample_GRCh38_1_22_v4.2.1_benchmark.chr20.vcf.gz.csi",
-        "url": "https://minos-reference.s3.us-east-1.amazonaws.com/truth/sample_GRCh38_1_22_v4.2.1_benchmark.chr20.vcf.gz.csi",
-        "size_mb": 1,
-    },
-    {
-        "name": "Confident Regions BED",
-        "local": "datasets/truth/sample_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.chr20.bed",
-        "url": "https://minos-reference.s3.us-east-1.amazonaws.com/truth/sample_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.chr20.bed",
-        "size_mb": 2,
-    },
-]
+# Reference data files per role — multi-chromosome (chr1-chr22)
+# Estimated sizes in MB for user feedback
+def _build_miner_data_files():
+    files = []
+    for chrom in SUPPORTED_CHROMOSOMES:
+        files.extend([
+            {
+                "name": f"GRCh38 {chrom} Reference",
+                "local": f"datasets/reference/{chrom}/{chrom}.fa",
+                "url": f"{REF_S3_BASE}/{chrom}/{chrom}.fa",
+                "size_mb": 60,
+            },
+            {
+                "name": f"{chrom} Reference Index",
+                "local": f"datasets/reference/{chrom}/{chrom}.fa.fai",
+                "url": f"{REF_S3_BASE}/{chrom}/{chrom}.fa.fai",
+                "size_mb": 1,
+            },
+            {
+                "name": f"{chrom} Reference Dictionary",
+                "local": f"datasets/reference/{chrom}/{chrom}.dict",
+                "url": f"{REF_S3_BASE}/{chrom}/{chrom}.dict",
+                "size_mb": 1,
+            },
+        ])
+    return files
+
+MINER_DATA_FILES = _build_miner_data_files()
+
+def _build_validator_data_files():
+    """Validators need reference + SDF for all chromosomes.
+    Truth VCFs are served per-round from the platform API — not stored locally."""
+    files = list(MINER_DATA_FILES)
+    for chrom in SUPPORTED_CHROMOSOMES:
+        files.append({
+            "name": f"{chrom} RTG SDF Template",
+            "local": f"datasets/reference/{chrom}/{chrom}.sdf",
+            "url": f"{REF_S3_BASE}/{chrom}/{chrom}.sdf.tar.gz",
+            "size_mb": 200,
+            "extract": True,
+        })
+    return files
+
+VALIDATOR_DATA_FILES = _build_validator_data_files()
 
 
 # ── Data classes ──────────────────────────────────────────────────────────────
@@ -701,7 +699,42 @@ class SetupWizard:
 
     # ── Step 7: Reference data ────────────────────────────────────────────
 
+    def _migrate_legacy_reference_data(self):
+        """Migrate old flat chr20 reference structure to new per-chromosome directories.
+
+        Old: datasets/reference/chr20.fa
+        New: datasets/reference/chr20/chr20.fa
+        """
+        old_ref = BASE_DIR / "datasets" / "reference" / "chr20.fa"
+        new_ref_dir = BASE_DIR / "datasets" / "reference" / "chr20"
+
+        if old_ref.exists() and not (new_ref_dir / "chr20.fa").exists():
+            self.console.print("  [yellow]Migrating reference data to new multi-chromosome structure...[/]")
+            new_ref_dir.mkdir(parents=True, exist_ok=True)
+
+            import glob
+            import shutil
+
+            # Move chr20.* files (fa, fai, dict, amb, ann, bwt, pac, sa)
+            for f in glob.glob(str(BASE_DIR / "datasets" / "reference" / "chr20.*")):
+                fname = Path(f).name
+                # Skip if it's actually the new directory
+                if Path(f).is_dir():
+                    continue
+                shutil.move(f, new_ref_dir / fname)
+
+            # Move chr20.sdf directory
+            old_sdf = BASE_DIR / "datasets" / "reference" / "chr20.sdf"
+            new_sdf = new_ref_dir / "chr20.sdf"
+            if old_sdf.exists() and old_sdf.is_dir() and not new_sdf.exists():
+                shutil.move(str(old_sdf), str(new_sdf))
+
+            self.console.print("  [green]Migration complete — chr20 data moved to datasets/reference/chr20/[/]")
+
     def step_reference_data(self) -> StepResult:
+        # Migrate old flat chr20 structure if detected
+        self._migrate_legacy_reference_data()
+
         files = MINER_DATA_FILES if self.state.role == "miner" else VALIDATOR_DATA_FILES
 
         existing = []
@@ -1361,4 +1394,25 @@ WantedBy=multi-user.target
 
 if __name__ == "__main__":
     wizard = SetupWizard()
-    wizard.run()
+
+    if "--update-data-only" in sys.argv:
+        # Non-interactive: just migrate legacy data + download missing reference files
+        print("\n  Checking reference data...\n")
+        wizard._migrate_legacy_reference_data()
+        # Determine role from .env if it exists
+        env_path = BASE_DIR / ".env"
+        if env_path.exists():
+            with open(env_path) as f:
+                for line in f:
+                    if line.strip().startswith("MINER_TEMPLATE"):
+                        wizard.state.role = "miner"
+                        break
+                else:
+                    # No MINER_TEMPLATE means validator (or not set)
+                    wizard.state.role = "validator"
+        else:
+            wizard.state.role = "validator"  # download all (superset)
+        wizard.step_reference_data()
+        print("\n  Reference data up to date.\n")
+    else:
+        wizard.run()

@@ -1,41 +1,49 @@
 {
   "description": "Reference data paths for Minos genomics subnet",
-  "chromosome": "chr20",
-  "contig_length": 64444167,
   "ref_build": "GRCh38",
+  "supported_chromosomes": ["chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9", "chr10", "chr11", "chr12", "chr13", "chr14", "chr15", "chr16", "chr17", "chr18", "chr19", "chr20", "chr21", "chr22"],
+  "supported_donors": ["HG001", "HG002", "HG003", "HG004", "HG005", "HG006", "HG007"],
   "data": {
     "reference": {
-      "local": "datasets/reference/chr20.fa",
-      "s3": "https://minos-reference.s3.us-east-1.amazonaws.com/reference/chr20.fa"
+      "local_pattern": "datasets/reference/{chr}/{chr}.fa",
+      "s3_pattern": "https://genotypenet-platform.s3.us-east-1.amazonaws.com/reference_data/donors/reference/{chr}/{chr}.fa"
     },
     "reference_index": {
-      "local": "datasets/reference/chr20.fa.fai",
-      "s3": "https://minos-reference.s3.us-east-1.amazonaws.com/reference/chr20.fa.fai"
+      "local_pattern": "datasets/reference/{chr}/{chr}.fa.fai",
+      "s3_pattern": "https://genotypenet-platform.s3.us-east-1.amazonaws.com/reference_data/donors/reference/{chr}/{chr}.fa.fai"
     },
     "reference_dict": {
-      "local": "datasets/reference/chr20.dict",
-      "s3": "https://minos-reference.s3.us-east-1.amazonaws.com/reference/chr20.dict"
+      "local_pattern": "datasets/reference/{chr}/{chr}.dict",
+      "s3_pattern": "https://genotypenet-platform.s3.us-east-1.amazonaws.com/reference_data/donors/reference/{chr}/{chr}.dict"
     },
     "reference_sdf": {
-      "local": "datasets/reference/chr20.sdf",
-      "s3": "https://minos-reference.s3.us-east-1.amazonaws.com/reference/chr20.sdf.tar.gz"
-    },
-    "truth_vcf": {
-      "local": "datasets/truth/sample_GRCh38_1_22_v4.2.1_benchmark.chr20.vcf.gz",
-      "s3": "https://minos-reference.s3.us-east-1.amazonaws.com/truth/sample_GRCh38_1_22_v4.2.1_benchmark.chr20.vcf.gz"
-    },
-    "truth_vcf_index": {
-      "local": "datasets/truth/sample_GRCh38_1_22_v4.2.1_benchmark.chr20.vcf.gz.csi",
-      "s3": "https://minos-reference.s3.us-east-1.amazonaws.com/truth/sample_GRCh38_1_22_v4.2.1_benchmark.chr20.vcf.gz.csi"
-    },
-    "truth_bed": {
-      "local": "datasets/truth/sample_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.chr20.bed",
-      "s3": "https://minos-reference.s3.us-east-1.amazonaws.com/truth/sample_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.chr20.bed"
+      "local_pattern": "datasets/reference/{chr}/{chr}.sdf",
+      "s3_pattern": "https://genotypenet-platform.s3.us-east-1.amazonaws.com/reference_data/donors/reference/{chr}/{chr}.sdf"
     }
   },
+  "mutations_s3_pattern": "mutations/{donor_id}/{chromosome}/{uuid}/",
   "region_bounds": {
-    "min_start": 10000000,
-    "max_start": 55000000,
-    "window_size": 5000000
+    "chr1": {"min_start": 5000000, "max_start": 243000000, "window_size": 5000000},
+    "chr2": {"min_start": 5000000, "max_start": 237000000, "window_size": 5000000},
+    "chr3": {"min_start": 5000000, "max_start": 193000000, "window_size": 5000000},
+    "chr4": {"min_start": 5000000, "max_start": 185000000, "window_size": 5000000},
+    "chr5": {"min_start": 5000000, "max_start": 176000000, "window_size": 5000000},
+    "chr6": {"min_start": 5000000, "max_start": 166000000, "window_size": 5000000},
+    "chr7": {"min_start": 5000000, "max_start": 154000000, "window_size": 5000000},
+    "chr8": {"min_start": 5000000, "max_start": 140000000, "window_size": 5000000},
+    "chr9": {"min_start": 5000000, "max_start": 133000000, "window_size": 5000000},
+    "chr10": {"min_start": 5000000, "max_start": 129000000, "window_size": 5000000},
+    "chr11": {"min_start": 5000000, "max_start": 130000000, "window_size": 5000000},
+    "chr12": {"min_start": 5000000, "max_start": 128000000, "window_size": 5000000},
+    "chr13": {"min_start": 5000000, "max_start": 109000000, "window_size": 5000000},
+    "chr14": {"min_start": 5000000, "max_start": 102000000, "window_size": 5000000},
+    "chr15": {"min_start": 5000000, "max_start": 96000000, "window_size": 5000000},
+    "chr16": {"min_start": 5000000, "max_start": 85000000, "window_size": 5000000},
+    "chr17": {"min_start": 5000000, "max_start": 78000000, "window_size": 5000000},
+    "chr18": {"min_start": 5000000, "max_start": 75000000, "window_size": 5000000},
+    "chr19": {"min_start": 5000000, "max_start": 53000000, "window_size": 5000000},
+    "chr20": {"min_start": 10000000, "max_start": 55000000, "window_size": 5000000},
+    "chr21": {"min_start": 5000000, "max_start": 41000000, "window_size": 5000000},
+    "chr22": {"min_start": 5000000, "max_start": 46000000, "window_size": 5000000}
   }
 }
