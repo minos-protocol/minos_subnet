@@ -586,6 +586,7 @@ class Miner:
         print(f"   Network: {self.config.subtensor.network}", flush=True)
         print(f"   Netuid: {self.config.netuid}", flush=True)
         print(f"   Variant Caller: {self.variant_caller}", flush=True)
+        print(f"   Config: configs/{self.variant_caller}.conf", flush=True)
         print(f"   Docker: {'Available' if is_docker_available() else 'Not Available'}", flush=True)
         print(f"   Platform: {os.getenv('PLATFORM_URL')}", flush=True)
         print(f"{'='*60}", flush=True)

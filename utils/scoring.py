@@ -17,11 +17,10 @@ from templates.tool_params import validate_region
 
 logger = logging.getLogger(__name__)
 
-# Docker images pinned by digest for reproducible scoring.
-# Tags are kept for readability; the @sha256 digest is authoritative.
-# To update: docker manifest inspect <image:tag> | jq '.config.digest // .manifests[0].digest'
+# Docker images for scoring tools.
+# hap.py pinned by digest for reproducibility; bcftools uses tag (digest removed from registry).
 HAPPY_DOCKER_IMAGE = "genonet/hap-py@sha256:03acabe84bbfba35f5a7234129d524c563f5657e1f21150a2ea2797f8e6d05f2"
-BCFTOOLS_DOCKER_IMAGE = "quay.io/biocontainers/bcftools@sha256:c96f5ec79234a85addcfe2f03445007c18434fa98897eba681c76c7f604767e6"
+BCFTOOLS_DOCKER_IMAGE = "quay.io/biocontainers/bcftools:1.20--h8b25389_0"
 
 
 def subset_bed(source_bed: Path, target_bed: Path, region: str) -> bool:

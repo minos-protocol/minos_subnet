@@ -134,7 +134,7 @@ bash start-miner.sh      # Start as miner
 bash start-validator.sh  # Start as validator
 ```
 
-The `start-*.sh` scripts handle wallet setup on first run — no manual `.env` editing needed. If you already ran `install.sh` before, running it again will only update dependencies and download any new reference data (use `--fresh` to redo everything).
+The `start-*.sh` scripts handle wallet setup on first run — no manual `.env` editing needed. Run with `--help` to see all options, or `--setup` to re-run the setup wizard. If you already ran `install.sh` before, running it again will only update dependencies and download any new reference data (use `--fresh` to redo everything).
 
 The platform is in **demo mode** — you can run the miner immediately to test your pipeline without registering on the subnet. Register when you're ready to earn alpha.
 
@@ -198,7 +198,6 @@ python setup.py
 ```bash
 # Network
 NETUID=107
-NETWORK=finney
 
 # Wallet
 WALLET_NAME=validator
@@ -216,6 +215,8 @@ STORAGE_PRIMARY_BACKEND=hippius
 
 ```bash
 bash start-validator.sh
+bash start-validator.sh --wallet-name validator   # Pre-fill wallet name
+bash start-validator.sh --setup                   # Re-run setup wizard
 ```
 
 Or manually:
@@ -247,7 +248,6 @@ python -m neurons.validator \
 ```bash
 # Network
 NETUID=107
-NETWORK=finney
 
 # Wallet
 WALLET_NAME=miner
@@ -268,6 +268,8 @@ STORAGE_PRIMARY_BACKEND=hippius
 
 ```bash
 bash start-miner.sh
+bash start-miner.sh --wallet-name miner --miner-template deepvariant  # Pre-fill values
+bash start-miner.sh --setup                                           # Re-run setup wizard
 ```
 
 Or manually:

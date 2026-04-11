@@ -51,6 +51,14 @@ The simplest way — handles wallet setup on first run:
 bash start-miner.sh
 ```
 
+The start script supports flags to pre-fill or override settings:
+
+```bash
+bash start-miner.sh --wallet-name miner --miner-template deepvariant
+bash start-miner.sh --setup              # Re-run setup wizard with current defaults
+bash start-miner.sh --help               # Show all options
+```
+
 Or manually:
 
 ```bash
@@ -73,7 +81,6 @@ python -m neurons.miner
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `NETUID` | 107 | Subnet UID |
-| `NETWORK` | finney | Bittensor network |
 | `WALLET_NAME` | default | Bittensor wallet name |
 | `WALLET_HOTKEY` | default | Bittensor hotkey name |
 | `PLATFORM_URL` | https://api.theminos.ai | Platform API URL |
@@ -115,6 +122,14 @@ The simplest way — handles wallet setup on first run:
 bash start-validator.sh
 ```
 
+The start script supports flags to pre-fill or override settings:
+
+```bash
+bash start-validator.sh --wallet-name validator
+bash start-validator.sh --setup           # Re-run setup wizard with current defaults
+bash start-validator.sh --help            # Show all options
+```
+
 Or manually:
 
 ```bash
@@ -137,7 +152,6 @@ python -m neurons.validator
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `NETUID` | 107 | Subnet UID |
-| `NETWORK` | finney | Bittensor network |
 | `WALLET_NAME` | default | Bittensor wallet name |
 | `WALLET_HOTKEY` | default | Bittensor hotkey name |
 | `PLATFORM_URL` | https://api.theminos.ai | Platform API URL |

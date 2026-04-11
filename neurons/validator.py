@@ -497,17 +497,18 @@ class Validator:
                 bt.logging.error(f"Reference not found: {ref_path}. Ensure reference data for {chrom} is downloaded.")
                 return None
 
-        # Truth BED — try per-chromosome local file, or skip if not available
-        # (hap.py can run without -f flag, just less focused)
-        truth_bed_path = BASE_DIR / "datasets" / "truth" / f"sample_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.{chrom}.bed"
-        if not truth_bed_path.exists():
-            # Try legacy path
-            legacy_bed = BASE_DIR / "datasets" / "truth" / "sample_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.chr20.bed"
-            if chrom == "chr20" and legacy_bed.exists():
-                truth_bed_path = legacy_bed
+        # Truth BED — only needed for GIAB-only scoring (no mutations VCF).
+        # With synthetic-only scoring the mutations VCF defines the evaluation scope,
+        # so the high-confidence BED region filter is unnecessary.
+        truth_bed_path = None
+        if not mutations_vcf_path:
+            bed_path = BASE_DIR / "datasets" / "truth" / f"sample_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.{chrom}.bed"
+            if bed_path.exists():
+                truth_bed_path = bed_path
             else:
-                bt.logging.warning(f"No confident BED file for {chrom} — scoring without region filtering")
-                truth_bed_path = None
+                legacy_bed = BASE_DIR / "datasets" / "truth" / "sample_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.chr20.bed"
+                if chrom == "chr20" and legacy_bed.exists():
+                    truth_bed_path = legacy_bed
 
         # The platform uploads a merged truth VCF (GIAB + synthetic) to S3.
         # Use it directly — no need to re-parse or re-merge.
@@ -631,7 +632,8 @@ class Validator:
                     if not await self.platform_client.upload_file_to_s3(
                         str(miner_vcf_path), output_vcf_s3_key
                     ):
-                        bt.logging.warning(f"Failed to upload miner VCF for {miner_hotkey[:16]}")
+                        if self.is_registered:
+                            bt.logging.warning(f"Failed to upload miner VCF for {miner_hotkey[:16]}")
                         output_vcf_s3_key = None
 
                 # Upload hap.py annotated VCF (contains BD/BVT tags)
@@ -640,13 +642,15 @@ class Validator:
                     if not await self.platform_client.upload_file_to_s3(
                         str(happy_vcf_path), happy_output_s3_key
                     ):
-                        bt.logging.warning(f"Failed to upload hap.py VCF for {miner_hotkey[:16]}")
+                        if self.is_registered:
+                            bt.logging.warning(f"Failed to upload hap.py VCF for {miner_hotkey[:16]}")
                         happy_output_s3_key = None
 
                 if output_vcf_s3_key:
                     print(f"   VCFs uploaded to S3 for audit trail", flush=True)
             except Exception as e:
-                bt.logging.warning(f"VCF upload failed for {miner_hotkey[:16]}: {e}")
+                if self.is_registered:
+                    bt.logging.warning(f"VCF upload failed for {miner_hotkey[:16]}: {e}")
 
             # 7. Submit score to platform (with VCF S3 keys)
             score_result = await self._submit_miner_score(
@@ -829,7 +833,8 @@ class Validator:
             bt.logging.info(f"Score submitted for {miner_hotkey[:16]}...")
             return result
         except Exception as e:
-            bt.logging.warning(f"Failed to submit score for {miner_hotkey[:16]}: {e}")
+            if self.is_registered:
+                bt.logging.warning(f"Failed to submit score for {miner_hotkey[:16]}: {e}")
             return None
 
     async def _set_weights_after_round(self, round_id: str, submission_times: dict = None):
