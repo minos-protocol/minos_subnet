@@ -368,6 +368,29 @@ install_deps() {
     ok "All dependencies installed."
 }
 
+# --- PM2 (when npm is available) ---
+
+install_pm2() {
+    header "PM2 (process manager)"
+
+    if command -v pm2 &>/dev/null; then
+        ok "PM2 already installed ($(pm2 -v 2>/dev/null | head -1 || echo ok))"
+        return
+    fi
+
+    if ! command -v npm &>/dev/null; then
+        warn "npm not found — skipping PM2. Install Node.js, then run: npm install -g pm2"
+        return
+    fi
+
+    info "Installing PM2 (npm install -g pm2)..."
+    if npm install -g pm2; then
+        ok "PM2 installed"
+    else
+        warn "PM2 install failed. Fix npm global install permissions or network, then run: npm install -g pm2"
+    fi
+}
+
 # --- Launch wizard ---
 
 launch_wizard() {
@@ -413,6 +436,8 @@ update_only() {
     pip install -r "$SCRIPT_DIR/requirements.txt" -q
     ok "Dependencies up to date"
 
+    install_pm2
+
     # Run migration + reference data download via setup.py --update-only
     info "Checking reference data..."
     python "$SCRIPT_DIR/setup.py" --update-data-only
@@ -455,6 +480,7 @@ main() {
     check_docker
     setup_venv
     install_deps
+    install_pm2
     launch_wizard
 }
 

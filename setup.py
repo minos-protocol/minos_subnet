@@ -1001,9 +1001,11 @@ class SetupWizard:
             self.console.print(f"  [dim]  journalctl -u {service_name} -f         # view logs[/]")
         elif pm == "pm2":
             service_name = f"minos-{role}"
+            eco_file = f"ecosystem.{role}.config.js"
             self.console.print()
             self.console.print(f"  [bold]Manage your {role} (PM2):[/]")
-            self.console.print(f"  [dim]  pm2 start ecosystem.config.js   # start[/]")
+            self.console.print(f"  [dim]  bash pm2-{role}.sh                    # start / restart (recommended)[/]")
+            self.console.print(f"  [dim]  pm2 start {eco_file} # start via config[/]")
             self.console.print(f"  [dim]  pm2 stop {service_name}                 # stop[/]")
             self.console.print(f"  [dim]  pm2 restart {service_name}              # restart[/]")
             self.console.print(f"  [dim]  pm2 delete {service_name}               # remove from PM2[/]")
@@ -1347,14 +1349,15 @@ WantedBy=multi-user.target
     def _generate_pm2(self) -> StepResult:
         role = self.state.role
         service_name = f"minos-{role}"
+        start_sh = f"start-{role}.sh"
+        config_name = f"ecosystem.{role}.config.js"
 
         config = f"""module.exports = {{
   apps: [{{
     name: "{service_name}",
-    script: "{sys.executable}",
-    args: "-m neurons.{role}",
+    script: "./{start_sh}",
+    interpreter: "bash",
     cwd: "{BASE_DIR}",
-    interpreter: "none",
     autorestart: true,
     max_restarts: 10,
     restart_delay: 30000,
@@ -1365,25 +1368,26 @@ WantedBy=multi-user.target
 
         self.console.print(Panel(
             config.strip(),
-            title="ecosystem.config.js",
+            title=config_name,
             border_style="cyan",
             padding=(0, 1),
         ))
 
         write = questionary.confirm(
-            "Write ecosystem.config.js?",
+            f"Write {config_name}?",
             default=True, style=CUSTOM_STYLE,
         ).ask()
 
         if write is None or not write:
             return StepResult(skipped=True)
 
-        config_path = BASE_DIR / "ecosystem.config.js"
+        config_path = BASE_DIR / config_name
         config_path.write_text(config)
         self.console.print(f"  [green]Written to {config_path}[/]")
         self.console.print()
         self.console.print("  To start:")
-        self.console.print(f"  [dim]  pm2 start ecosystem.config.js[/]")
+        self.console.print(f"  [dim]  bash pm2-{role}.sh[/]")
+        self.console.print(f"  [dim]  pm2 start {config_name}[/]")
         self.console.print(f"  [dim]  pm2 logs {service_name}   # view logs[/]")
         self.console.print(f"  [dim]  pm2 save                  # persist across reboots[/]")
 

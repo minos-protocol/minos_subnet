@@ -24,6 +24,7 @@ Minos (SN107) is a subnet for genomic variant calling and benchmarking powered b
 - [Repository Layout](#repository-layout)
 - [System Prerequisites](#system-prerequisites)
 - [Quick Start](#quick-start)
+- [Running with PM2 (optional)](#running-with-pm2-optional)
 - [Validator Setup](#validator-setup)
 - [Miner Setup](#miner-setup)
 - [Platform Service](#platform-service)
@@ -102,6 +103,10 @@ minos_subnet/
 ├── setup.py                  # Interactive setup wizard
 ├── start-miner.sh            # Start miner (with inline wallet setup)
 ├── start-validator.sh        # Start validator (with inline wallet setup)
+├── pm2-miner.sh              # Start / restart miner under PM2 (wraps start-miner.sh)
+├── pm2-validator.sh          # Start / restart validator under PM2 (wraps start-validator.sh)
+├── ecosystem.miner.config.js # PM2 app config (miner)
+├── ecosystem.validator.config.js # PM2 app config (validator)
 ├── requirements.txt          # Python dependencies
 ├── .env.miner.example        # Miner environment configuration
 ├── .env.validator.example    # Validator environment configuration
@@ -139,6 +144,28 @@ The `start-*.sh` scripts handle wallet setup on first run — no manual `.env` e
 The platform is in **demo mode** — you can run the miner immediately to test your pipeline without registering on the subnet. Register when you're ready to earn alpha.
 
 **MinosVM:** If using the MinosVM Docker image, everything is pre-installed. Just SSH in and run `bash start-miner.sh` or `bash start-validator.sh`.
+
+### Running with PM2 (optional)
+
+[PM2](https://pm2.keymetrics.io/) keeps the miner or validator running with restarts and log management. This repo runs the same **`start-miner.sh`** / **`start-validator.sh`** entrypoints under PM2 (so your venv, `.env`, and prerequisite checks stay identical to a manual start).
+
+1. **Install PM2** — **`bash install.sh`** runs **`npm install -g pm2`** automatically when **`npm`** is on your `PATH`. If **`npm`** is missing, install Node.js and run **`npm install -g pm2`** once.
+2. **Create `.env` first** — Run **`bash start-validator.sh`** or **`bash start-miner.sh`** once in a normal terminal so wallet/setup can run (PM2 does not provide a TTY for the interactive wizard).
+3. **Launch under PM2:**
+
+```bash
+bash pm2-validator.sh   # validator: start, or restart if already registered
+bash pm2-miner.sh       # miner: start, or restart if already registered
+```
+
+Or start from the ecosystem files directly:
+
+```bash
+pm2 start ecosystem.validator.config.js
+pm2 start ecosystem.miner.config.js
+```
+
+Useful commands: **`pm2 status`**, **`pm2 logs minos-validator`** / **`pm2 logs minos-miner`**, **`pm2 save`** (persist process list after reboot — pair with **`pm2 startup`** per PM2 docs). The interactive setup wizard can also generate **`ecosystem.<role>.config.js`** when you choose the PM2 process-manager option.
 
 ### Updating
 
@@ -219,6 +246,8 @@ bash start-validator.sh --wallet-name validator   # Pre-fill wallet name
 bash start-validator.sh --setup                   # Re-run setup wizard
 ```
 
+For production-style supervision, use **[Running with PM2 (optional)](#running-with-pm2-optional)** (`bash pm2-validator.sh`).
+
 Or manually:
 
 ```bash
@@ -271,6 +300,8 @@ bash start-miner.sh
 bash start-miner.sh --wallet-name miner --miner-template deepvariant  # Pre-fill values
 bash start-miner.sh --setup                                           # Re-run setup wizard
 ```
+
+For production-style supervision, use **[Running with PM2 (optional)](#running-with-pm2-optional)** (`bash pm2-miner.sh`).
 
 Or manually:
 
