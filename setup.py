@@ -103,7 +103,7 @@ MINER_DOCKER_IMAGES = {
 }
 
 VALIDATOR_DOCKER_IMAGES = [
-    "genonet/hap-py:0.3.15",
+    "genonet/hap-py@sha256:03acabe84bbfba35f5a7234129d524c563f5657e1f21150a2ea2797f8e6d05f2",
     "broadinstitute/gatk:4.5.0.0",
     "google/deepvariant:1.5.0",
     "staphb/freebayes:1.3.7",
@@ -893,16 +893,16 @@ class SetupWizard:
             "How would you like to run your node?",
             choices=[
                 questionary.Choice(
-                    f"Run directly  (python -m neurons.{role})",
-                    value="direct",
+                    "Generate PM2 config  (recommended — auto-restart, logs, monitoring)",
+                    value="pm2",
                 ),
                 questionary.Choice(
                     "Generate systemd service  (Linux, auto-restart)",
                     value="systemd",
                 ),
                 questionary.Choice(
-                    "Generate PM2 config  (Node.js process manager)",
-                    value="pm2",
+                    f"Run directly  (python -m neurons.{role})",
+                    value="direct",
                 ),
                 questionary.Choice(
                     "Skip  (I will configure this myself)",
@@ -1013,38 +1013,72 @@ class SetupWizard:
             self.console.print(f"  [dim]  pm2 logs {service_name}                 # view logs[/]")
             self.console.print(f"  [dim]  pm2 save                                # persist across reboots[/]")
 
-        # Launch
-        run_cmd = f"python -m neurons.{role}"
-        self.console.print()
-        self.console.print(f"  Launch command: [bold cyan]{run_cmd}[/]")
-        self.console.print()
-
-        launch = questionary.confirm(
-            "Launch now?",
-            default=False, style=CUSTOM_STYLE,
-        ).ask()
-
-        if launch:
-            self.console.print(f"\n  [bold cyan]Starting Minos {role}...[/]\n")
+        # PM2: always register the process so pm2 status / pm2 start works
+        if pm == "pm2":
+            run_cmd = f"bash pm2-{role}.sh"
+            service_name = f"minos-{role}"
+            eco_file = str(BASE_DIR / f"ecosystem.{role}.config.js")
             os.chdir(BASE_DIR)
-            # If docker group isn't active yet (fresh install), launch via sg docker
-            needs_sg = (
-                shutil.which("sg")
-                and "docker" not in os.getgroups().__str__()
-                and subprocess.run(["docker", "info"], capture_output=True).returncode != 0
-            )
-            if needs_sg:
-                cmd_str = f"{sys.executable} -m neurons.{role}"
-                sys.exit(subprocess.call(["sg", "docker", "-c", cmd_str]))
-            else:
-                sys.exit(subprocess.call([sys.executable, "-m", f"neurons.{role}"]))
 
-        self.console.print(f"\n  To start later:")
-        self.console.print(f"  [dim]  cd {BASE_DIR}[/]")
-        self.console.print(f"  [dim]  source .venv/bin/activate[/]")
-        self.console.print(f"  [dim]  {run_cmd}[/]")
-        self.console.print()
-        self.console.print(f"  [dim]  If Docker gives a permission error, run: newgrp docker[/]")
+            # Register with PM2 (start then immediately stop if user doesn't want to launch)
+            self.console.print(f"\n  [dim]Registering {service_name} with PM2...[/]")
+            subprocess.call(["pm2", "start", eco_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.call(["pm2", "save"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            launch = questionary.confirm(
+                "Launch now?",
+                default=True, style=CUSTOM_STYLE,
+            ).ask()
+
+            if launch:
+                self.console.print(f"\n  [bold cyan]Starting Minos {role} via PM2...[/]\n")
+                subprocess.call(["pm2", "restart", service_name, "--update-env"])
+                self.console.print()
+                self.console.print(f"  [green]{service_name} is running.[/]")
+                self.console.print(f"  [dim]  pm2 logs {service_name}   # view logs[/]")
+                self.console.print(f"  [dim]  pm2 status               # check status[/]")
+            else:
+                subprocess.call(["pm2", "stop", service_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.call(["pm2", "save"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self.console.print(f"\n  [green]{service_name} registered with PM2 (stopped).[/]")
+                self.console.print(f"  [dim]  pm2 start {service_name}   # start when ready[/]")
+                self.console.print(f"  [dim]  pm2 status                # check status[/]")
+        else:
+            run_cmd = f"python -m neurons.{role}"
+            self.console.print()
+            self.console.print(f"  Launch command: [bold cyan]{run_cmd}[/]")
+            self.console.print()
+
+            launch = questionary.confirm(
+                "Launch now?",
+                default=False, style=CUSTOM_STYLE,
+            ).ask()
+
+            if launch:
+                self.console.print(f"\n  [bold cyan]Starting Minos {role}...[/]\n")
+                os.chdir(BASE_DIR)
+                if pm == "systemd":
+                    service_name = f"minos-{role}"
+                    sys.exit(subprocess.call(["sudo", "systemctl", "start", service_name]))
+                else:
+                    # Direct launch
+                    needs_sg = (
+                        shutil.which("sg")
+                        and "docker" not in os.getgroups().__str__()
+                        and subprocess.run(["docker", "info"], capture_output=True).returncode != 0
+                    )
+                    if needs_sg:
+                        cmd_str = f"{sys.executable} -m neurons.{role}"
+                        sys.exit(subprocess.call(["sg", "docker", "-c", cmd_str]))
+                    else:
+                        sys.exit(subprocess.call([sys.executable, "-m", f"neurons.{role}"]))
+
+            self.console.print(f"\n  To start later:")
+            self.console.print(f"  [dim]  cd {BASE_DIR}[/]")
+            self.console.print(f"  [dim]  source .venv/bin/activate[/]")
+            self.console.print(f"  [dim]  {run_cmd}[/]")
+            self.console.print()
+            self.console.print(f"  [dim]  If Docker gives a permission error, run: newgrp docker[/]")
 
         return StepResult()
 
@@ -1361,7 +1395,9 @@ WantedBy=multi-user.target
     autorestart: true,
     max_restarts: 10,
     restart_delay: 30000,
+    kill_timeout: 15000,
     log_date_format: "YYYY-MM-DD HH:mm:ss Z",
+    env: {{ PYTHONUNBUFFERED: "1" }},
   }}]
 }};
 """
