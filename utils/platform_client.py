@@ -553,6 +553,110 @@ class ValidatorPlatformClient(PlatformClient):
 
         return await retry_async(_do_request, max_retries=2)
 
+    async def get_assignment(
+        self,
+        round_id: str,
+    ) -> Dict[str, Any]:
+        """Get this validator's scoring assignment for a round (validator only).
+
+        The platform computes assignments from its own metagraph snapshot —
+        no metagraph data needs to be supplied by the validator.
+
+        Returns:
+            Dict containing:
+                - round_id: str
+                - validator_hotkey: str
+                - stake_rank: int
+                - total_validators: int
+                - primary_miner_hotkeys: List[str]   # score these first
+                - overlap_miner_hotkeys: List[str]   # shared with adjacent validator
+                - secondary_miner_hotkeys: List[str] # score if time allows
+                - scoring_deadline: str              # ISO datetime
+        """
+        path = "/v2/get-assignment"
+
+        async def _do_request():
+            body = self._auth_body(
+                "POST", path,
+                validator_hotkey=self.keypair.ss58_address,
+                round_id=round_id,
+            )
+
+            async with self._get_client() as client:
+                response = await client.post(path, json=body, headers=self._AUTH_HEADERS)
+
+                if response.status_code == 401:
+                    raise AuthenticationError("Invalid signature or validator not authorized")
+                if response.status_code == 404:
+                    raise PlatformClientError(f"Round or assignment not found: {response.text}")
+                if response.status_code == 409:
+                    raise PlatformClientError(f"Round not in scoring phase: {response.text}")
+                if response.status_code == 503:
+                    raise PlatformClientError(f"Assignment unavailable: {response.text}")
+                if response.status_code != 200:
+                    raise PlatformClientError(f"Failed to get assignment: {response.text}")
+
+                return response.json()
+
+        return await retry_async(_do_request, max_retries=3)
+
+    async def get_backfill_scores(
+        self,
+        round_id: str,
+        scored_miner_hotkeys: List[str],
+    ) -> Dict[str, Any]:
+        """Fetch scores for miners not personally covered this round (validator only).
+
+        Must be called after the scoring window has closed. The platform enforces
+        this gate (returns 425 Too Early if the window is still open).
+
+        Args:
+            round_id: The round to fetch backfill scores for.
+            scored_miner_hotkeys: Hotkeys this validator personally scored.
+
+        Returns:
+            Dict containing:
+                - backfill_scores: List of {miner_hotkey, combined_final,
+                                            primary_validator_hotkey, submitted_at}
+                - overlap_deltas: List of {miner_hotkey, your_score, peer_score,
+                                           delta, peer_validator_hotkey}
+                - unscored_miner_hotkeys: List[str]   # no score from any validator
+                - gap_count: int
+        """
+        path = "/v2/get-backfill-scores"
+
+        async def _do_request():
+            body = self._auth_body(
+                "POST", path,
+                validator_hotkey=self.keypair.ss58_address,
+                round_id=round_id,
+                scored_miner_hotkeys=scored_miner_hotkeys,
+            )
+
+            async with self._get_client() as client:
+                response = await client.post(
+                    path, json=body, headers=self._AUTH_HEADERS, timeout=60.0
+                )
+
+                if response.status_code == 401:
+                    raise AuthenticationError("Invalid signature or validator not authorized")
+                if response.status_code == 404:
+                    raise PlatformClientError("Round not found")
+                if response.status_code == 425:
+                    raise PlatformClientError(
+                        f"Scoring window still open (Too Early): {response.text}"
+                    )
+                if response.status_code == 503:
+                    raise PlatformClientError(
+                        f"Backfill unavailable: {response.text}"
+                    )
+                if response.status_code != 200:
+                    raise PlatformClientError(f"Failed to get backfill scores: {response.text}")
+
+                return response.json()
+
+        return await retry_async(_do_request, max_retries=2)
+
     async def submit_weight_history(
         self,
         round_id: str,

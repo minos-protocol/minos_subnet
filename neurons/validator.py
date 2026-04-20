@@ -16,7 +16,7 @@ import bittensor as bt
 import argparse
 import numpy as np
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 # Bittensor v9/v10 compatibility — v10 removed lowercase aliases
@@ -27,7 +27,7 @@ if not hasattr(bt, "wallet"):
 if not hasattr(bt, "config"):
     bt.config = bt.Config
 
-from base import GENOMICS_CONFIG, VALIDATOR_CONFIG, is_docker_available, BASE_DIR
+from base import GENOMICS_CONFIG, VALIDATOR_CONFIG, is_docker_available, require_docker, BASE_DIR
 from utils import (
     HappyScorer,
     ScoreTracker,
@@ -38,6 +38,7 @@ from utils.file_utils import compute_sha256
 from utils.file_utils import download_file_with_fallback
 from utils.path_utils import safe_round_dir_name
 from utils.platform_client import ValidatorPlatformClient, PlatformConfig, PlatformClientError
+from utils.subset_scoring import should_stop_secondary_scoring
 from templates import load_template
 from templates.tool_params import validate_round_id
 
@@ -64,6 +65,12 @@ class Validator:
         bt.logging.info("Setting up validator...")
         bt.logging.set_trace(self.config.logging.trace)
         bt.logging.set_debug(self.config.logging.debug)
+
+        try:
+            require_docker()
+        except RuntimeError as e:
+            bt.logging.error(str(e))
+            sys.exit(1)
 
         bt.logging.info(f"Loading wallet: {self.config.wallet.name}/{self.config.wallet.hotkey}")
         self.wallet = bt.wallet(config=self.config)
@@ -325,14 +332,50 @@ class Validator:
             return {"next_scoring_window_start": None}
 
     async def _score_round_submissions(self, round_id: str):
-        """Score all submissions for a single round."""
+        """Score submissions for a single round using subset-based assignment.
+
+        Flow:
+        1. Fetch scoring assignment from platform (primary range + secondary order).
+        2. Download shared BAM + truth VCF once.
+        3. Score primary miners in assignment order (no deadline pressure).
+        4. Score secondary miners until 3 min before scoring deadline.
+        5. After deadline, fetch backfill scores for gap miners from platform.
+        6. Feed backfill scores into ScoreTracker, then record_round + set weights.
+        """
         rid_check = validate_round_id(round_id)
         if not rid_check["valid"]:
             bt.logging.error(f"_score_round_submissions: invalid round_id '{round_id}': {rid_check['error']}")
             return
 
         try:
-            # 2. Get all submissions for this round (includes presigned URLs)
+            # --- Step 1: Fetch assignment from platform ---
+            assignment = None
+            primary_hotkeys = set()
+            secondary_hotkeys_ordered = []
+            scoring_deadline = None
+
+            try:
+                assignment = await self.platform_client.get_assignment(round_id)
+                primary_hotkeys = set(assignment.get("primary_miner_hotkeys", []))
+                secondary_hotkeys_ordered = assignment.get("secondary_miner_hotkeys", [])
+                deadline_str = assignment.get("scoring_deadline")
+                if deadline_str:
+                    scoring_deadline = datetime.fromisoformat(
+                        deadline_str.replace("Z", "+00:00")
+                    )
+                bt.logging.info(
+                    f"Round {round_id}: assignment received — "
+                    f"primary={len(primary_hotkeys)} miners, "
+                    f"secondary={len(secondary_hotkeys_ordered)} miners"
+                )
+            except PlatformClientError as e:
+                bt.logging.warning(
+                    f"Round {round_id}: failed to get assignment ({e}). "
+                    f"Falling back to scoring all miners."
+                )
+                # Graceful fallback: score all miners as before (e.g. single-validator setup)
+
+            # --- Step 2: Get all submissions + download shared files ---
             round_data = await self.platform_client.get_round_submissions(round_id)
 
             submissions = round_data.get("submissions", [])
@@ -342,7 +385,6 @@ class Validator:
                 bt.logging.info(f"Round {round_id}: no submissions")
                 return
 
-            # 3. Download BAM and truth VCF, verify reference exists
             download_result = self._download_round_files(round_id, round_data)
             if download_result is None:
                 return
@@ -355,11 +397,11 @@ class Validator:
             ref_sdf_path = download_result["ref_sdf_path"]
             truth_bed_path = download_result["truth_bed_path"]
 
-            # 4. For each submission, run their tool config and score
-            scored_hotkeys = []  # Track which miners were scored this round
-            submission_times = {}  # hotkey -> submitted_at epoch for tiebreaking
+            # --- Step 3 & 4: Order submissions and score ---
+            scored_hotkeys = []
+            submission_times = {}
 
-            # Restart recovery: get miners already scored by this validator
+            # Restart recovery: restore already-scored miners
             already_scored = round_data.get("scored_miners") or {}
             if already_scored:
                 print(f"   Restart recovery: {len(already_scored)} miners already scored, skipping", flush=True)
@@ -369,7 +411,32 @@ class Validator:
                     scored_hotkeys.append(hotkey)
                     bt.logging.info(f"Restored score for {hotkey[:16]}...: combined_final={combined_final}")
 
-            for sub in submissions:
+            # Build ordered list: primary submissions first, then secondary
+            secondary_subs = []
+            if primary_hotkeys:
+                secondary_order_map = {hk: i for i, hk in enumerate(secondary_hotkeys_ordered)}
+                primary_subs = [s for s in submissions if s.get("miner_hotkey") in primary_hotkeys]
+                secondary_subs = [s for s in submissions if s.get("miner_hotkey") not in primary_hotkeys]
+                secondary_subs.sort(
+                    key=lambda s: secondary_order_map.get(s.get("miner_hotkey", ""), 999999)
+                )
+                ordered_subs = primary_subs + secondary_subs
+            else:
+                # No assignment (fallback mode) — score all in original order
+                ordered_subs = submissions
+
+            for sub in ordered_subs:
+                miner_hotkey = sub.get("miner_hotkey", "")
+                is_secondary = bool(primary_hotkeys) and miner_hotkey not in primary_hotkeys
+
+                # Stop secondary scoring when approaching deadline
+                if is_secondary and should_stop_secondary_scoring(scoring_deadline, buffer_seconds=180):
+                    bt.logging.info(
+                        f"Round {round_id}: approaching deadline — "
+                        f"stopping secondary scoring, {len(secondary_subs)} secondary miners remaining"
+                    )
+                    break
+
                 await self._score_single_miner(
                     round_id, sub, already_scored, work_dir, bam_path,
                     ref_path, ref_sdf_path, truth_bed_path, truth_vcf_path,
@@ -377,8 +444,10 @@ class Validator:
                     mutations_vcf_path=mutations_vcf_path,
                 )
 
-            # 9-10. Record round, set weights, cleanup
-            await self._finalize_round_scores(round_id, scored_hotkeys, submission_times)
+            # --- Steps 5 & 6: Backfill + finalize ---
+            await self._finalize_round_scores(
+                round_id, scored_hotkeys, submission_times, scoring_deadline
+            )
 
         except Exception as e:
             bt.logging.error(f"Error scoring round {round_id}: {e}")
@@ -691,14 +760,107 @@ class Validator:
             self.score_tracker.update(miner_hotkey, 0.0)
             scored_hotkeys.append(miner_hotkey)
 
-    async def _finalize_round_scores(self, round_id, scored_hotkeys, submission_times):
-        """Record round participation, set weights, and log completion."""
-        # 9. Record round participation for eligibility tracking
-        if scored_hotkeys:
-            self.score_tracker.record_round(round_id, scored_hotkeys)
-            bt.logging.info(f"Round {round_id}: recorded participation for {len(scored_hotkeys)} miners")
+    async def _finalize_round_scores(
+        self,
+        round_id: str,
+        scored_hotkeys: list,
+        submission_times: dict,
+        scoring_deadline=None,
+    ):
+        """Backfill gap miners from platform, record participation, then set weights.
 
-        # 10. Compute winner-takes-all weights and set on chain
+        Order matters:
+        1. Wait for scoring window to close (commit-then-reveal gate).
+        2. Fetch backfill scores for miners not personally covered.
+        3. Feed each backfill score into ScoreTracker.update().
+        4. Call record_round() ONCE with the complete set (personal + backfill).
+        5. Set chain weights from the full EMA state.
+        """
+        # --- Step 1: Wait for scoring window to close ---
+        if scoring_deadline is not None:
+            now = datetime.now(timezone.utc)
+            # Ensure deadline is tz-aware
+            if scoring_deadline.tzinfo is None:
+                scoring_deadline = scoring_deadline.replace(tzinfo=timezone.utc)
+            wait_secs = (scoring_deadline - now).total_seconds()
+            if wait_secs > 0:
+                bt.logging.info(
+                    f"Round {round_id}: waiting {wait_secs:.0f}s for scoring window to close "
+                    f"before fetching backfill scores"
+                )
+                await asyncio.sleep(wait_secs + 5)
+
+        # --- Step 2: Fetch backfill scores from platform ---
+        # Build the complete set of hotkeys (personal + backfill) before calling
+        # record_round() so decay is applied correctly to truly absent miners only.
+        all_scored_hotkeys = list(dict.fromkeys(scored_hotkeys))  # deduplicated, ordered
+
+        if self.platform_client:
+            try:
+                backfill_response = await self.platform_client.get_backfill_scores(
+                    round_id=round_id,
+                    scored_miner_hotkeys=all_scored_hotkeys,
+                )
+
+                backfill_scores = backfill_response.get("backfill_scores", [])
+                overlap_deltas = backfill_response.get("overlap_deltas", [])
+                unscored = backfill_response.get("unscored_miner_hotkeys", [])
+
+                # --- Step 3: Feed backfill into ScoreTracker ---
+                for entry in backfill_scores:
+                    hk = entry.get("miner_hotkey")
+                    combined_final = entry.get("combined_final", 0.0)
+                    if hk and hk not in set(all_scored_hotkeys):
+                        self.score_tracker.update(hk, combined_final)
+                        all_scored_hotkeys.append(hk)
+                        # Capture submitted_at for tiebreaking
+                        submitted_at = entry.get("submitted_at")
+                        if submitted_at and hk not in submission_times:
+                            try:
+                                submission_times[hk] = datetime.fromisoformat(
+                                    submitted_at.replace("Z", "+00:00")
+                                ).timestamp()
+                            except (ValueError, TypeError):
+                                submission_times[hk] = float("inf")
+
+                        source = entry.get("primary_validator_hotkey", "?")
+                        bt.logging.info(
+                            f"Backfilled {hk[:16]}...: combined_final={combined_final:.4f} "
+                            f"(from {source[:16]}...)"
+                        )
+
+                if backfill_scores:
+                    bt.logging.info(
+                        f"Round {round_id}: backfilled {len(backfill_scores)} miners, "
+                        f"{len(unscored)} miners had no score from any validator"
+                    )
+
+                # Log overlap integrity warnings
+                for delta_entry in overlap_deltas:
+                    delta = delta_entry.get("delta")
+                    if delta is not None and delta > 0.05:
+                        bt.logging.warning(
+                            f"Overlap integrity warning: miner {delta_entry.get('miner_hotkey', '')[:16]}... "
+                            f"delta={delta:.4f} vs peer {delta_entry.get('peer_validator_hotkey', '')[:16]}..."
+                        )
+
+            except PlatformClientError as e:
+                bt.logging.warning(
+                    f"Round {round_id}: backfill fetch failed ({e}). "
+                    f"Proceeding with partial scores — unscored miners will decay normally."
+                )
+
+        # --- Step 4: Record round with COMPLETE hotkey set ---
+        # This must happen after backfill so decay is only applied to miners
+        # with genuinely no score this round (not just ones we didn't cover).
+        if all_scored_hotkeys:
+            self.score_tracker.record_round(round_id, all_scored_hotkeys)
+            bt.logging.info(
+                f"Round {round_id}: recorded participation for {len(all_scored_hotkeys)} miners "
+                f"({len(scored_hotkeys)} personal + {len(all_scored_hotkeys) - len(scored_hotkeys)} backfill)"
+            )
+
+        # --- Step 5: Set chain weights ---
         await self._set_weights_after_round(round_id, submission_times)
 
         print(f"\n   Round {round_id} scoring complete", flush=True)
