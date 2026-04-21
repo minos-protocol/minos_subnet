@@ -13,6 +13,16 @@ fail() { echo -e "  ${RED}[FAIL]${NC} $1"; FAIL=$((FAIL+1)); }
 
 ROLE="${1:---miner}"
 
+# Resolve project root and activate venv if available
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+PYTHON="python3"
+if [[ -f "$PROJECT_DIR/.venv/bin/python3" ]]; then
+    PYTHON="$PROJECT_DIR/.venv/bin/python3"
+elif [[ -f "$PROJECT_DIR/.venv/bin/python" ]]; then
+    PYTHON="$PROJECT_DIR/.venv/bin/python"
+fi
+
 echo "=================================="
 echo "  Minos SN107 — Setup Verification"
 echo "  Role: ${ROLE#--}"
@@ -21,15 +31,15 @@ echo ""
 
 # --- Python ---
 echo "Python:"
-if command -v python3 &>/dev/null; then
-    pass "python3 $(python3 --version 2>&1 | awk '{print $2}')"
+if [[ -x "$PYTHON" ]] || command -v "$PYTHON" &>/dev/null; then
+    pass "$PYTHON ($($PYTHON --version 2>&1 | awk '{print $2}'))"
 else
     fail "python3 not found"
 fi
 
 for pkg in bittensor pysam boto3 dotenv; do
-    if python3 -c "import ${pkg}" 2>/dev/null; then
-        pass "python3 -c 'import ${pkg}'"
+    if $PYTHON -c "import ${pkg}" 2>/dev/null; then
+        pass "$PYTHON -c 'import ${pkg}'"
     else
         pip_name="${pkg}"
         [[ "$pkg" == "dotenv" ]] && pip_name="python-dotenv"

@@ -213,10 +213,16 @@ DEMO_PID=""
 # Clean up any previous log
 rm -f "$DEMO_LOG"
 
+# Resolve venv Python
+PYTHON="python3"
+if [[ -f "$VANET_DIR/.venv/bin/python3" ]]; then
+    PYTHON="$VANET_DIR/.venv/bin/python3"
+fi
+
 # Run the miner in the background, capturing output
 (
     cd "$VANET_DIR"
-    python3 -m neurons.miner 2>&1
+    $PYTHON -m neurons.miner 2>&1
 ) > "$DEMO_LOG" 2>&1 &
 DEMO_PID=$!
 

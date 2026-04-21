@@ -137,7 +137,7 @@ minos_subnet/
 | CPU/RAM (Validator) | ≥8 cores / 32 GB RAM | hap.py scoring benefits from cores |
 | CPU/RAM (Miner) | ≥4 cores / 8–16 GB RAM | 8 GB for BCFtools/FreeBayes, 16 GB for DeepVariant |
 | Disk | ≥60 GB (miner) / ≥100 GB (validator) | Reference data ~9 GB + temporary files |
-| Docker | 24.0+ | Required for GATK, hap.py, bcftools |
+| Docker | 20.10+ (24.0+ recommended) | Required for GATK, hap.py, bcftools |
 | Python | 3.10+ | We test on 3.12 |
 | Bittensor | Latest pip install | Provides wallet/subtensor/dendrite APIs |
 
@@ -149,8 +149,9 @@ minos_subnet/
 git clone https://github.com/minos-protocol/minos_subnet.git
 cd minos_subnet
 bash install.sh          # First-time: full setup (venv, deps, Docker, reference data, wallet)
-bash start-miner.sh      # Start as miner
-bash start-validator.sh  # Start as validator
+bash start-miner.sh      # Start as miner (choose one)
+# OR
+bash start-validator.sh  # Start as validator (choose one)
 ```
 
 The `start-*.sh` scripts handle wallet setup on first run — no manual `.env` editing needed. Run with `--help` to see all options, or `--setup` to re-run the setup wizard. If you already ran `install.sh` before, running it again will only update dependencies and download any new reference data (use `--fresh` to redo everything).
@@ -216,15 +217,17 @@ cp .env.validator.example .env # for validators
 docker pull broadinstitute/gatk:4.5.0.0
 docker pull google/deepvariant:1.5.0
 docker pull staphb/freebayes:1.3.7
-docker pull genonet/hap-py:0.3.15
+docker pull genonet/hap-py@sha256:03acabe84bbfba35f5a7234129d524c563f5657e1f21150a2ea2797f8e6d05f2
 docker pull quay.io/biocontainers/bcftools:1.20--h8b25389_0
 docker pull quay.io/biocontainers/samtools:1.20--h50ea8bc_0
 ```
 
-#### 4. Download Reference Data
+> **Note:** The hap.py image is pinned by SHA256 digest for reproducible scoring. The tag `genonet/hap-py:0.3.15` points to the same image but the digest is what validators use internally.
+
+#### 4. Run Setup Wizard
 
 ```bash
-# Downloads from our public S3 bucket (see base/s3_manifest.json for URLs)
+# Interactive wizard: configures wallet, downloads reference data, sets up .env
 python setup.py
 ```
 
@@ -370,12 +373,15 @@ Validators run each miner's tool config and score the resulting VCF from that ag
 
 ### EMA Weight Tracking
 
-Scores are smoothed over time using Exponential Moving Average:
+The raw AdvancedScorer output (0–100) is normalized to a 0–1 scale before feeding into the EMA. Scores are smoothed over time using Exponential Moving Average:
 
 ```python
+# AdvancedScorer returns 0-100, normalized to 0-1 for EMA
+combined_final = advanced_score / 100.0
 # EMA starts at 0; first round yields 10% of first score
-ema = (1 - alpha) * ema + alpha * raw_score
+ema = (1 - alpha) * ema + alpha * combined_final
 # alpha = 0.1 (10% weight on new scores)
+# Example: raw score 85/100 → combined_final 0.85 → EMA ~0.085 after first round
 ```
 
 ### Weight Distribution
@@ -405,11 +411,16 @@ In the warmup phase, miners with scores within 0.5% of each other are tiebroken 
 ### Logs
 
 ```bash
-# Validator logs
+# PM2 (recommended)
+pm2 logs minos-miner
+pm2 logs minos-validator
+
+# systemd (if using systemd service)
+journalctl -u minos-miner -f
 journalctl -u minos-validator -f
 
-# Miner logs
-journalctl -u minos-miner -f
+# Direct (if running manually)
+# Output streams to terminal
 ```
 
 ### Health Checks

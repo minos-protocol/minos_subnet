@@ -27,11 +27,12 @@ Validators compare your VCF output against a truth VCF using **hap.py** (the GA4
 
 ### EMA Smoothing and Winner-Takes-All
 
-Your per-round score is smoothed with an exponential moving average (alpha = 0.1). This means:
+The AdvancedScorer outputs a raw score on a 0–100 scale. This is normalized to 0–1 before feeding into the EMA (so a raw score of 85/100 becomes 0.85 in EMA). Your EMA is smoothed with alpha = 0.1:
 
 - A single bad round does not destroy you, but persistent low scores will drag your EMA down.
 - It takes roughly 10 rounds for the EMA to mostly reflect your current performance.
 - Missing rounds applies a decay factor of 0.95 per missed round to your EMA.
+- When reading logs: `Score: 85.00/100  EMA: 0.8500` — the score is 0–100, the EMA is 0–1.
 
 **Warmup phase** (until any miner has participated in 10+ rounds): rewards are split among the top 3 miners by EMA — 50% to 1st, 30% to 2nd, 20% to 3rd.
 

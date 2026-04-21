@@ -4,7 +4,7 @@ This folder contains all the genomics processing tools used by miners and valida
 
 ## Overview
 
-The utils folder is organized into 6 focused modules:
+The utils folder is organized into 7 focused modules:
 
 ```text
 utils/
@@ -12,6 +12,7 @@ utils/
 ├── weight_tracking.py    # Tracks miner performance over time
 ├── file_utils.py         # Downloads and manages data files
 ├── platform_client.py    # Platform API client for miners/validators
+├── subset_scoring.py     # Subset scoring helpers (assignments, deadlines)
 ├── config_loader.py      # Config file loading for miner templates
 └── path_utils.py         # Safe filesystem paths for round directories
 ```

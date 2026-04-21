@@ -2,6 +2,8 @@
 
 This document describes the custom `genonet/hap-py:0.3.15` Docker image used for VCF benchmarking in the validator scoring pipeline.
 
+> **Note:** The validator code pins this image by SHA256 digest (`genonet/hap-py@sha256:03acabe84bb...`) for reproducible scoring. The tag `:0.3.15` points to the same image and is used in this doc for readability.
+
 ---
 
 ## Why a Custom Image?

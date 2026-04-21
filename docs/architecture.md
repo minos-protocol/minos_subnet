@@ -8,7 +8,7 @@ Minos is a Bittensor subnet (SN107) that creates a decentralised market for geno
 
 Genomic variant calling accuracy is critical for real-world genomics, yet benchmarking is fragmented and untrustworthy. Minos turns this into a continuous, incentivized benchmarking network:
 
-- **Miners** run any variant-calling pipeline they choose (GATK, DeepVariant, FreeBayes, BCFtools, or custom) and earn rewards proportional to their accuracy.
+- **Miners** run variant-calling pipelines (GATK, DeepVariant, FreeBayes, or BCFtools) and earn rewards proportional to their accuracy.
 - **Validators** re-run miner configurations against private hold-out data and score results with hap.py — no trust required.
 - **The platform** generates synthetic benchmark BAMs (GIAB + HelixForge-inserted mutations) and coordinates rounds.
 
@@ -90,7 +90,7 @@ All API calls are authenticated via canonical request signing. Each request incl
 | `gatk` | `broadinstitute/gatk:4.5.0.0` |
 | `deepvariant` | `google/deepvariant:1.5.0` |
 | `freebayes` | `staphb/freebayes:1.3.7` |
-| `bcftools` | `quay.io/biocontainers/bcftools:1.20` |
+| `bcftools` | `quay.io/biocontainers/bcftools:1.20--h8b25389_0` |
 
 Miners tune quality parameters via `configs/<tool>.conf`. Infrastructure parameters (`threads`, `memory_gb`, `timeout`, `ref_build`, `num_threads`) are stripped before submission and cannot influence scoring.
 
