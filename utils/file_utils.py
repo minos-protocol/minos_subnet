@@ -17,6 +17,12 @@ except ImportError:
     HAS_BOTO3 = False
     logger.warning("boto3 not installed - S3 features disabled")
 
+# Cloudflare R2's public bucket (used as the reference-data origin) returns 403
+# Forbidden for the default `Python-urllib/*` User-Agent as part of its bot
+# protection. Set an explicit UA on every request so the redirect from
+# api.theminos.ai/reference/* lands cleanly on the R2 origin.
+USER_AGENT = "minos-installer/0.1 (+https://github.com/minos-protocol/minos_subnet)"
+
 try:
     from tqdm import tqdm
     HAS_TQDM = True
@@ -66,6 +72,7 @@ def download_file(
 
         request = urllib.request.Request(url)
         request.add_header('Accept-Encoding', 'identity')
+        request.add_header('User-Agent', USER_AGENT)
 
         with urllib.request.urlopen(request) as response:
             total = int(response.headers.get('Content-Length', 0)) or file_size or 0
@@ -217,6 +224,7 @@ def _get_remote_file_size(url: str) -> Optional[int]:
     """Get file size from remote URL via HEAD request."""
     try:
         request = urllib.request.Request(url, method='HEAD')
+        request.add_header('User-Agent', USER_AGENT)
         with urllib.request.urlopen(request, timeout=10) as response:
             content_length = response.headers.get('Content-Length')
             return int(content_length) if content_length else None
