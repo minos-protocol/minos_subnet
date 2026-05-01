@@ -113,10 +113,11 @@ A validator uses miners config file and selected hyperparameters to run the vari
 
 3. **Backfill and Update Weights**
    - After scoring window closes, fetch peer scores for miners not personally covered
-   - Track scores with EMA (exponential moving average)
-   - Winner-takes-all: best eligible miner gets 100% weight
-   - Submit weights to Bittensor blockchain
-   - Submit scores to platform for aggregation
+   - Track personal and backfilled scores with EMA (exponential moving average)
+   - Record round participation once with the complete personal + backfilled hotkey set
+   - Compute warmup split or winner-takes-all weights from EMA
+   - Submit weight history to the platform for aggregation/dashboarding
+   - Submit weights to Bittensor blockchain only when the validator hotkey is registered
 
 ### Running the Validator
 
@@ -217,9 +218,9 @@ python -m neurons.validator
 
 Weights are assigned in two phases:
 
-**Warmup** (until any miner has scored in ≥10 rounds): reward is split among the top 3 miners by EMA score — 50% to 1st, 30% to 2nd, 20% to 3rd. Scores within 0.5% of each other are tiebroken by earliest submission time.
+**Warmup** (before any miner has scored in ≥10 rounds): reward is split among the top 3 active miners with positive EMA — 50% to 1st, 30% to 2nd, 20% to 3rd, renormalized if fewer than three qualify. Scores within 0.5% of each other are tiebroken by earliest submission time.
 
-**Normal** (once any miner reaches eligibility): the single top-performing eligible miner by EMA receives 100% of the weight. Eligibility requires scoring in at least 10 of the last 20 rounds. Absent miners' EMA decays each round they miss (×0.95). Tiebreaker: earliest submission timestamp (applied only at floating-point tolerance).
+**Normal** (once any miner reaches eligibility): the single top-performing eligible miner by EMA receives 100% of the weight. Eligibility requires scoring in at least 10 of the last 20 rounds; ineligible miners receive 0 weight in normal mode. Absent miners' EMA decays each round they miss (×0.95). Tiebreaker: earliest submission timestamp (applied only at floating-point tolerance).
 
 ## Requirements
 

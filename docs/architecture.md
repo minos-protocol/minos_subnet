@@ -51,9 +51,9 @@ Key design choice: **miners submit configs, not VCFs**. Validators independently
 | Benchmark BAM | GIAB donors (HG001-HG007) 100-300× per chromosome, downsampled | Public (via platform presigned URL) |
 | Truth VCF | GIAB + HelixForge-inserted synthetic mutations | Validators only (presigned URL, round-scoped) |
 | Mutations-only VCF | Synthetic mutations only (no GIAB variants) | Validators only (primary scoring scope) |
-| Confident BED | GIAB high-confidence regions per chromosome | Validators only (fallback scoring scope) |
+| Confident BED | GIAB high-confidence regions per chromosome | Validators only (legacy GIAB-scoring support) |
 
-Synthetic mutations are injected by the platform using HelixForge into known positions. Validators score miner output against the **mutations-only VCF** (synthetic variants only) as the primary evaluation scope. The confident BED path serves as a fallback when the mutations-only VCF is unavailable.
+Synthetic mutations are injected by the platform using HelixForge into known positions. Validators require the **mutations-only VCF** (synthetic variants only) for current production scoring; if the platform does not provide it, the validator skips the round instead of falling back to GIAB/BED-only scoring. The confident BED path remains in the code for legacy GIAB-only scoring support.
 
 ---
 
@@ -107,26 +107,35 @@ while True:
     for round in rounds:
         assignment = get_assignment(round)      # primary + secondary miner lists
         submissions = get_submissions(round)    # miner configs + presigned BAM/truth URLs
-        download_bam_and_truth(round)           # cached; skipped if SHA256 matches
+        download_round_files(round)             # BAM, truth VCF, mutations VCF; SHA256-verified
 
         # Per-job thread/memory and total concurrency are auto-tuned from
         # host CPU/RAM (see auto_scoring_config). Primaries run as a barrier;
         # secondaries are skipped if they'd start within 3 min of the deadline.
         with bounded_concurrency(N=auto):
-            score_in_parallel(assignment.primary)
+            for miner in score_in_parallel(assignment.primary):
+                submit_score(miner)             # per-miner score + artifact pointers
+                update_ema(miner.hotkey, miner.combined_final)
             if not approaching_deadline():
-                score_in_parallel(assignment.secondary)
+                for miner in score_in_parallel(assignment.secondary):
+                    submit_score(miner)
+                    update_ema(miner.hotkey, miner.combined_final)
 
-        # After scoring window closes: fetch peer scores for gap miners
+        # After scoring window closes: fetch peer scores for gap miners,
+        # then record participation once using personal + backfilled hotkeys.
         backfill = get_backfill_scores(round)   # commit-then-reveal
         for entry in backfill:
             update_ema(entry.hotkey, entry.score)
+        record_round(personal_hotkeys + backfill_hotkeys)
 
-        set_weights_on_chain()                  # winner-takes-all by EMA
+        weights = compute_weights()             # warmup split or winner-takes-all
+        submit_weight_history(weights)          # platform dashboard/audit
+        if registered_on_subnet:
+            set_weights_on_chain(weights)       # Bittensor chain write
     sleep(query_interval)
 ```
 
-Each `score_in_parallel(miners)` runs each miner's tool in its own Docker container concurrently (bounded by the auto-tuned semaphore), then scores the resulting VCF with hap.py and updates the EMA.
+Each `score_in_parallel(miners)` starts each miner's tool in its own Docker container under the auto-tuned semaphore, then scores the resulting VCF with hap.py and updates/submits that miner's score. The platform weight-history submission happens for registered and unregistered validators; on-chain `set_weights` only runs when the validator hotkey is registered on the subnet.
 
 If the platform does not support assignments (e.g. single-validator testnet), the validator scores all miners concurrently in a single batch.
 
@@ -148,7 +157,7 @@ SNP/INDEL weighting is truth-count-proportional (fallback: 70/30).
 - Each scored round updates each miner's EMA: `ema = α × score + (1−α) × ema` (α = 0.1); EMA starts at 0 so the first round yields 10% of the first score
 - Miners must participate in ≥ 10 of the last 20 rounds to be eligible for weights
 - Missed rounds decay the EMA by 0.95× per missed round
-- **Warmup phase** (before any miner reaches 10 rounds): reward split 50/30/20 among the top 3 active miners by EMA score; tiebreak by earliest config submission time
+- **Warmup phase** (before any miner reaches 10 rounds): reward split 50/30/20 among the top 3 active miners with positive EMA; the split is renormalized if fewer than three qualify; tiebreak by earliest config submission time
 - **Normal phase** (once any miner reaches eligibility): the eligible miner with the highest EMA receives **100% of the weight** on-chain; tiebreak by earliest config submission time
 - Miners below the participation threshold receive 0 weight
 

@@ -32,11 +32,11 @@ The AdvancedScorer outputs a raw score on a 0–100 scale. This is normalized to
 - A single bad round does not destroy you, but persistent low scores will drag your EMA down.
 - It takes roughly 10 rounds for the EMA to mostly reflect your current performance.
 - Missing rounds applies a decay factor of 0.95 per missed round to your EMA.
-- When reading logs: `Score: 85.00/100  EMA: 0.8500` — the score is 0–100, the EMA is 0–1.
+- When reading logs: `Score: 85.00/100  EMA: 0.0850` is a typical first-round result with alpha = 0.1. The score is 0–100; the EMA is 0–1 and moves gradually.
 
-**Warmup phase** (until any miner has participated in 10+ rounds): rewards are split among the top 3 miners by EMA — 50% to 1st, 30% to 2nd, 20% to 3rd.
+**Warmup phase** (until any miner has participated in 10+ rounds): rewards are split among the top 3 active miners by EMA — 50% to 1st, 30% to 2nd, 20% to 3rd, renormalized if fewer than three active miners have positive EMA.
 
-**Normal phase** (after warmup): **winner-takes-all** — the miner with the highest EMA gets 100% of emissions for that validator. Second place gets nothing.
+**Normal phase** (after warmup): **winner-takes-all** among eligible miners — the eligible miner with the highest EMA gets 100% of emissions for that validator. Ineligible miners and second place get 0.
 
 Consistency matters as much as peak performance.
 

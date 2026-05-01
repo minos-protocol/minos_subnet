@@ -278,12 +278,13 @@ python -m neurons.validator \
 
 ### Validator Workflow
 
-1. **Fetch Rounds**: Poll platform for scoring rounds with prepared mutated BAMs
-2. **Download BAM**: Download mutated BAM from platform via presigned URL
-3. **Run Miner Tools**: Execute each miner's variant calling config via templates
-4. **Scoring**: Validate generated variant call file (VCFs) with hap.py against truth data provided by the platform
-5. **Submit Scores**: Report scores back to platform
-6. **Weight Update**: Set weights on-chain via Bittensor
+1. **Fetch Rounds and Assignment**: Poll platform for scoring rounds and this validator's primary/secondary miner assignment
+2. **Download Round Data**: Download the mutated BAM, merged truth VCF, and mutations-only VCF from platform presigned URLs
+3. **Run Miner Tools**: Execute assigned miners' variant-calling configs via templates, scoring primaries first and secondaries only while enough time remains
+4. **Scoring**: Validate each generated VCF with hap.py against the platform truth data, then compute the AdvancedScorer result
+5. **Submit Scores**: Report each per-miner score and audit artifact pointers back to the platform
+6. **Backfill and Record Round**: After the scoring window closes, fetch peer scores for miners not personally covered and record complete participation
+7. **Weight Update**: Submit weight history to the platform, then set on-chain weights if the validator is registered
 
 ### Validator Parallelism
 
@@ -432,9 +433,9 @@ ema = (1 - alpha) * ema + alpha * combined_final
 
 Weights are assigned in two phases:
 
-**Warmup** (until any miner has scored in ≥10 rounds): reward is split among the top 3 miners by EMA score — 50% to 1st, 30% to 2nd, 20% to 3rd. We want to do this to incentivise participation while the network bootstraps at the beginning.
+**Warmup** (before any miner has reached eligibility): reward is split among the top 3 active miners by EMA score — 50% to 1st, 30% to 2nd, 20% to 3rd. If fewer than three active miners have positive EMA, the split is renormalized across the active positive-score set.
 
-**Normal** (once any miner reaches eligibility): the single top-performing miner by EMA receives 100% of the weight. Eligibility requires scoring in at least 10 of the last 20 rounds. Absent miners' EMA decays each round they miss (×0.95), preventing stale scores from holding weight indefinitely.
+**Normal** (once any miner reaches eligibility): the single top-performing eligible miner by EMA receives 100% of the weight. Eligibility requires scoring in at least 10 of the last 20 rounds. Miners below the participation threshold receive 0 weight in normal mode. Absent miners' EMA decays each round they miss (×0.95), preventing stale scores from holding weight indefinitely.
 
 In the warmup phase, miners with scores within 0.5% of each other are tiebroken by earliest config submission time. In the normal phase, tiebreaks only apply when EMA scores are essentially identical (floating-point tolerance).
 
@@ -455,7 +456,7 @@ In the warmup phase, miners with scores within 0.5% of each other are tiebroken 
 | Round skipped, "<10min left"  | Submitted too late                         | Miner needs ≥10 min remaining to start a round. Check clock skew (`timedatectl`) and platform connectivity speed |
 | Reference download stuck/slow | Platform redirect or transient network     | Setup retries once automatically. If it still fails, re-run `bash install.sh --update-only`                      |
 | Validator: "no scoring rounds"| Round still in submission window           | Validators only score AFTER the submission window closes. Wait for the next tempo boundary                       |
-| Earning 0 weight as miner     | Not yet eligible (warmup phase)            | Need >=10 of last 20 rounds participated. See [tuning_guide](docs/tuning_guide.md) "Why is my weight 0?"         |
+| Earning 0 weight as miner     | Not eligible yet, or eligible but not the top EMA miner | Need >=10 of last 20 rounds participated, then a higher EMA than competitors. See [tuning_guide](docs/tuning_guide.md) |
 
 ### Logs
 

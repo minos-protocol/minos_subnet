@@ -175,19 +175,28 @@ await client.submit_score(
 ```text
 1. ValidatorPlatformClient.get_scoring_rounds()
    |
-2. ValidatorPlatformClient.get_round_submissions()
-   download_file_verified() -> fetch BAM + truth data
+2. ValidatorPlatformClient.get_assignment()
+   ValidatorPlatformClient.get_round_submissions()
+   download_file_with_fallback() -> fetch BAM, truth VCF, mutations VCF
    |
 3. load_template() -> template.variant_call()
-   (Run miner's variant calling config)
+   (Run assigned miner's variant calling config)
    |
 4. HappyScorer.score_vcf()
    AdvancedScorer.compute_advanced_score()
    |
-5. ScoreTracker.update()
-   ScoreTracker.get_winner_takes_all_weights()
+5. ValidatorPlatformClient.submit_score()
+   upload audit VCFs + optional variant-results pointer
    |
-6. Submit to blockchain + ValidatorPlatformClient.submit_score()
+6. ScoreTracker.update()
+   |
+7. After scoring deadline:
+   ValidatorPlatformClient.get_backfill_scores()
+   ScoreTracker.record_round(personal + backfilled hotkeys)
+   |
+8. ScoreTracker.get_winner_takes_all_weights()
+   ValidatorPlatformClient.submit_weight_history()
+   set_weights() on Bittensor if validator is registered
 ```
 
 ### Miner Workflow
