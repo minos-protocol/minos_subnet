@@ -14,7 +14,9 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from utils.scoring import (
+    generate_challenge_region_bed,
     generate_synthetic_regions_bed,
+    parse_region_overcall_metrics,
     parse_happy_vcf_assessed_metrics,
     HappyScorer,
     subset_bed,
@@ -162,6 +164,30 @@ class TestGenerateSyntheticRegionsBed:
 
 
 # ---------------------------------------------------------------------------
+# TestGenerateChallengeRegionBed
+# ---------------------------------------------------------------------------
+
+class TestGenerateChallengeRegionBed:
+    """Tests for generate_challenge_region_bed."""
+
+    def test_valid_region(self, tmp_path):
+        bed = tmp_path / "challenge.bed"
+
+        result = generate_challenge_region_bed("chr20:20822504-25822504", str(bed))
+
+        assert result is True
+        assert _read_bed(bed) == [("chr20", 20822503, 25822504)]
+
+    def test_invalid_region(self, tmp_path):
+        bed = tmp_path / "challenge.bed"
+
+        result = generate_challenge_region_bed("chr20", str(bed))
+
+        assert result is False
+        assert not bed.exists()
+
+
+# ---------------------------------------------------------------------------
 # TestSubsetBed
 # ---------------------------------------------------------------------------
 
@@ -258,6 +284,72 @@ class TestParseHappyVcfAssessedMetrics:
         """Non-existent file returns None."""
         result = parse_happy_vcf_assessed_metrics(str(tmp_path / "nonexistent.vcf.gz"))
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# TestParseRegionOvercallMetrics
+# ---------------------------------------------------------------------------
+
+class TestParseRegionOvercallMetrics:
+    """Tests for parse_region_overcall_metrics."""
+
+    def test_counts_full_region_query_fps_without_penalty_below_gate(self, tmp_path):
+        vcf = tmp_path / "happy_output.vcf.gz"
+        _write_happy_vcf(vcf, [
+            "chr20\t10000100\t.\tA\tG\t50\tPASS\t.\tBD:BVT\tTP:SNP\tFP:SNP\n",
+            "chr20\t10000200\t.\tA\tAT\t50\tPASS\t.\tBD:BVT\tTP:INDEL\tFP:INDEL\n",
+            "chr20\t10000300\t.\tC\tT\t50\tPASS\t.\tBD:BVT\tTP:SNP\tTP:SNP\n",
+            "chr20\t10000400\t.\tG\tA\t50\tPASS\t.\tBD:BVT\tTP:SNP\tUNK:SNP\n",
+        ])
+
+        result = parse_region_overcall_metrics(
+            str(vcf),
+            synthetic_truth_total=10,
+            synthetic_snp_truth_total=8,
+        )
+
+        assert result is not None
+        assert result["region_fp_snp"] == 1
+        assert result["region_fp_indel"] == 1
+        assert result["region_fp_total"] == 2
+        assert result["fp_per_target"] == pytest.approx(0.2)
+        assert result["snp_fp_per_target"] == pytest.approx(0.125)
+        assert result["overcall_penalty"] == 0.0
+
+    def test_penalty_requires_total_and_snp_gates(self, tmp_path):
+        vcf = tmp_path / "happy_output.vcf.gz"
+        _write_happy_vcf(vcf, [
+            "chr20\t10000100\t.\tA\tG\t50\tPASS\t.\tBD:BVT\tTP:SNP\tFP:SNP\n",
+        ] * 12)
+
+        result = parse_region_overcall_metrics(
+            str(vcf),
+            synthetic_truth_total=1,
+            synthetic_snp_truth_total=1,
+        )
+
+        assert result is not None
+        assert result["region_fp_total"] == 12
+        assert result["fp_per_target"] == pytest.approx(12.0)
+        assert result["snp_fp_per_target"] == pytest.approx(12.0)
+        assert result["overcall_penalty"] == pytest.approx(8.0)
+
+    def test_no_penalty_when_snp_gate_not_met(self, tmp_path):
+        vcf = tmp_path / "happy_output.vcf.gz"
+        _write_happy_vcf(vcf, [
+            "chr20\t10000100\t.\tA\tAT\t50\tPASS\t.\tBD:BVT\tTP:INDEL\tFP:INDEL\n",
+        ] * 12)
+
+        result = parse_region_overcall_metrics(
+            str(vcf),
+            synthetic_truth_total=1,
+            synthetic_snp_truth_total=1,
+        )
+
+        assert result is not None
+        assert result["fp_per_target"] == pytest.approx(12.0)
+        assert result["snp_fp_per_target"] == 0.0
+        assert result["overcall_penalty"] == 0.0
 
 
 # ---------------------------------------------------------------------------

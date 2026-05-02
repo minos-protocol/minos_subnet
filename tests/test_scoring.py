@@ -111,6 +111,16 @@ class TestComputeAdvancedScore:
         # Should be a good but not perfect score
         assert score > 50.0
 
+    def test_overcall_penalty_subtracted(self, sample_happy_metrics):
+        """Overcall guardrail penalty should be subtracted from final score."""
+        base_score = AdvancedScorer.compute_advanced_score(sample_happy_metrics)
+        metrics = dict(sample_happy_metrics)
+        metrics["overcall_penalty"] = 12.5
+
+        penalized_score = AdvancedScorer.compute_advanced_score(metrics)
+
+        assert penalized_score == pytest.approx(max(0.0, base_score - 12.5))
+
     def test_snp_only_truth_weighting(self):
         """When truth_total_indel=0, weighting should only use SNP F1."""
         metrics = {
