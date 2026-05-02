@@ -19,6 +19,8 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
+from neurons import __SPEC_VERSION__
+
 # Bittensor v9/v10 compatibility — v10 removed lowercase aliases
 if not hasattr(bt, "subtensor"):
     bt.subtensor = bt.Subtensor
@@ -101,7 +103,7 @@ class Validator:
     def __init__(self, config=None):
         self.config = config or self.get_config()
 
-        bt.logging.info("Setting up validator...")
+        bt.logging.info(f"Setting up validator with spec version: {__SPEC_VERSION__}")
         bt.logging.set_trace(self.config.logging.trace)
         bt.logging.set_debug(self.config.logging.debug)
 
@@ -1336,6 +1338,7 @@ class Validator:
                 weights=weights,
                 wait_for_finalization=False,
                 wait_for_inclusion=True,
+                version_key=__SPEC_VERSION__,
             )
         except Exception as e:
             error_str = str(e)
