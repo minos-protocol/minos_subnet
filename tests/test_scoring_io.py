@@ -441,8 +441,4 @@ class TestHappyScorerCsvParsing:
                 reference_sdf=str(sdf_dir),
             )
 
-        expected_zero = scorer._get_zero_scores()
-        assert result == expected_zero
-        assert result["f1_snp"] == 0.0
-        assert result["f1_indel"] == 0.0
-        assert result["weighted_f1"] == 0.0
+        assert result is None

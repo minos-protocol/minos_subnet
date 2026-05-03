@@ -825,6 +825,12 @@ class Validator:
                 happy_output_s3_key=happy_output_s3_key,
             )
 
+            if metrics is None:
+                print("   Scoring failed; submitted score 0.0", flush=True)
+                self.score_tracker.update(miner_hotkey, 0.0)
+                scored_hotkeys.append(miner_hotkey)
+                return
+
             # 8. Parse and submit variant-level results (non-blocking).
             # The validator gzips the per-variant breakdown locally, uploads
             # it via /v2/get-upload-url (R2 -> Hippius -> AWS cascade decided

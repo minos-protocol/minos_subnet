@@ -266,6 +266,9 @@ def compute_synthetic_only_metrics(happy_vcf_path: str, mutations_vcf_path: str,
 
         logger.info(f"Loaded {len(target_snps)} target SNPs and "
                      f"{len(target_indel_positions)} target INDELs from {mutations_path.name}")
+        if not target_snps and not target_indel_positions:
+            logger.error(f"No target mutations found in {mutations_path.name}")
+            return None
 
         counts = {
             'tp_snp': 0, 'fp_snp': 0, 'fn_snp': 0,
@@ -545,7 +548,7 @@ class HappyScorer:
     def score_vcf(self, truth_vcf: str, query_vcf: str,
                   reference_fasta: str = None, confident_bed: str = None,
                   region: str = None, reference_sdf: str = None,
-                  mutations_vcf: str = None) -> Dict[str, float]:
+                  mutations_vcf: str = None) -> Optional[Dict[str, float]]:
         """Run hap.py and return precision/recall/F1 metrics.
 
         Args:
@@ -644,6 +647,9 @@ class HappyScorer:
                     truth_vcf = sliced_truth_vcf
                     logger.info(f"Using sliced truth VCF: {truth_vcf.name}")
                 else:
+                    if mutations_vcf:
+                        logger.error("Failed to slice truth VCF for synthetic scoring; failing closed")
+                        return self._get_zero_scores()
                     logger.warning(f"Failed to slice truth VCF, using full chromosome VCF")
 
             # With mutations_vcf, assess the full challenge region so overcalls are
@@ -656,7 +662,8 @@ class HappyScorer:
                     use_bed = True
                     logger.info(f"Scoring full challenge region for overcall guardrail")
                 else:
-                    logger.warning("Could not generate challenge region BED, scoring full region")
+                    logger.error("Could not generate challenge region BED for overcall guardrail; failing closed")
+                    return self._get_zero_scores()
             else:
                 synthetic_bed = output_dir / f"synthetic_regions_{unique_suffix}.bed"
                 if generate_synthetic_regions_bed(str(truth_vcf), str(synthetic_bed)):
@@ -889,17 +896,9 @@ class HappyScorer:
             logger.debug(traceback.format_exc())
             return self._get_zero_scores()
 
-    def _get_zero_scores(self) -> Dict[str, float]:
-        """Return zero scores structure."""
-        return {
-            'f1_snp': 0.0,
-            'f1_indel': 0.0,
-            'precision_snp': 0.0,
-            'recall_snp': 0.0,
-            'precision_indel': 0.0,
-            'recall_indel': 0.0,
-            'weighted_f1': 0.0
-        }
+    def _get_zero_scores(self) -> Optional[Dict[str, float]]:
+        """Fail closed so the validator submits explicit combined_final=0.0."""
+        return None
 
 
 class AdvancedScorer:
@@ -966,11 +965,10 @@ class AdvancedScorer:
 
         # Component 1: Core F1 (60% weight) - truth-weighted F1 with emphasis
         total_truth = truth_total_snp + truth_total_indel
-        if total_truth > 0:
-            weighted_f1 = (f1_snp * truth_total_snp + f1_indel * truth_total_indel) / total_truth
-        else:
-            # Fallback to simple weighting if truth totals not available
-            weighted_f1 = 0.7 * f1_snp + 0.3 * f1_indel
+        if total_truth <= 0:
+            logger.error("AdvancedScorer missing truth totals; returning zero score")
+            return 0.0
+        weighted_f1 = (f1_snp * truth_total_snp + f1_indel * truth_total_indel) / total_truth
         core_component = AdvancedScorer.emphasis(weighted_f1, gamma=0.5)
 
         # Component 2: Completeness (15% weight) - recall + coverage
