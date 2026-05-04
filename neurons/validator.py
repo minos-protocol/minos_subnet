@@ -3,6 +3,7 @@
 import sys
 import os
 import gzip
+import math
 import shutil
 import traceback
 import subprocess
@@ -462,8 +463,13 @@ class Validator:
             if already_scored:
                 print(f"   Restart recovery: {len(already_scored)} miners already scored, skipping", flush=True)
                 for hotkey, score_info in already_scored.items():
-                    combined_final = score_info.get("combined_final", 0.0)
-                    self.score_tracker.update(hotkey, combined_final if combined_final is not None else 0.0)
+                    combined_final = score_info.get("combined_final")
+                    if combined_final is None:
+                        bt.logging.warning(
+                            f"Skipping restored score for {hotkey[:16]}...: missing AdvancedScorer combined_final"
+                        )
+                        continue
+                    self.score_tracker.update(hotkey, combined_final)
                     scored_hotkeys.append(hotkey)
                     bt.logging.info(f"Restored score for {hotkey[:16]}...: combined_final={combined_final}")
 
@@ -819,6 +825,12 @@ class Validator:
                 happy_output_s3_key=happy_output_s3_key,
             )
 
+            if metrics is None:
+                print("   Scoring failed; submitted score 0.0", flush=True)
+                self.score_tracker.update(miner_hotkey, 0.0)
+                scored_hotkeys.append(miner_hotkey)
+                return
+
             # 8. Parse and submit variant-level results (non-blocking).
             # The validator gzips the per-variant breakdown locally, uploads
             # it via /v2/get-upload-url (R2 -> Hippius -> AWS cascade decided
@@ -904,7 +916,12 @@ class Validator:
                 # --- Step 3: Feed backfill into ScoreTracker ---
                 for entry in backfill_scores:
                     hk = entry.get("miner_hotkey")
-                    combined_final = entry.get("combined_final", 0.0)
+                    combined_final = entry.get("combined_final")
+                    if combined_final is None:
+                        bt.logging.warning(
+                            f"Skipping backfill for {hk[:16] if hk else '?'}...: missing AdvancedScorer combined_final"
+                        )
+                        continue
                     if hk and hk not in set(all_scored_hotkeys):
                         self.score_tracker.update(hk, combined_final)
                         all_scored_hotkeys.append(hk)
@@ -1033,6 +1050,45 @@ class Validator:
         Returns:
             Dict with score_id on success, None on failure.
         """
+        def _json_safe_float(value):
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(number):
+                return None
+            return number
+
+        def _build_advanced_metrics_payload(
+            source_metrics: dict,
+            advanced_score: float,
+            combined_final: float,
+            snp_final: float,
+            indel_final: float,
+        ) -> dict:
+            payload = {
+                "scorer": "Advanced",
+                "score_schema_version": "0.1.1",
+                "scoring_status": "scored",
+                "advanced_score": advanced_score,
+                "combined_final": combined_final,
+                "snp_final": snp_final,
+                "indel_final": indel_final,
+            }
+
+            for key, value in (source_metrics or {}).items():
+                number = _json_safe_float(value)
+                if number is not None:
+                    payload[key] = number
+
+            # Keep the canonical aliases explicit even if source_metrics had
+            # missing or non-finite values.
+            payload["advanced_score"] = advanced_score
+            payload["combined_final"] = combined_final
+            payload["snp_final"] = snp_final
+            payload["indel_final"] = indel_final
+            return payload
+
         try:
             if metrics is None:
                 # Failed run - submit zeros
@@ -1040,7 +1096,28 @@ class Validator:
                     round_id=round_id,
                     miner_hotkey=miner_hotkey,
                     snp_f1=0.0,
+                    snp_precision=0.0,
+                    snp_recall=0.0,
+                    snp_tp=0,
+                    snp_fp=0,
+                    snp_fn=0,
                     indel_f1=0.0,
+                    indel_precision=0.0,
+                    indel_recall=0.0,
+                    indel_tp=0,
+                    indel_fp=0,
+                    indel_fn=0,
+                    additional_metrics={
+                        "scorer": "Advanced",
+                        "score_schema_version": "0.1.1",
+                        "scoring_status": "failed",
+                        "advanced_score": 0.0,
+                        "combined_final": 0.0,
+                        "snp_final": 0.0,
+                        "indel_final": 0.0,
+                        "weighted_f1": 0.0,
+                        "overcall_penalty": 0.0,
+                    },
                     validation_runtime_seconds=validation_runtime
                 )
             else:
@@ -1069,15 +1146,13 @@ class Validator:
                     indel_fn=metrics.get("fn_indel"),
                     ti_tv_ratio=metrics.get("titv_query_snp"),
                     het_hom_ratio=metrics.get("hethom_query_snp"),
-                    additional_metrics={
-                        "scorer": "Advanced",
-                        "weighted_f1": metrics.get("weighted_f1"),
-                        "frac_na_snp": metrics.get("frac_na_snp"),
-                        "frac_na_indel": metrics.get("frac_na_indel"),
-                        "snp_final": snp_final,
-                        "indel_final": indel_final,
-                        "combined_final": combined_final,
-                    },
+                    additional_metrics=_build_advanced_metrics_payload(
+                        metrics,
+                        advanced_score,
+                        combined_final,
+                        snp_final,
+                        indel_final,
+                    ),
                     validation_runtime_seconds=validation_runtime,
                     output_vcf_s3_key=output_vcf_s3_key,
                     output_vcf_sha256=output_vcf_sha256,
@@ -1111,10 +1186,18 @@ class Validator:
 
             # Apply burn split: scale miners to (1 - burn_rate), give burn the
             # rest. Falls through to 100% burn if no miner has weight.
-            burn_rate = GENOMICS_CONFIG.get("burn_rate", 0.0) or 0.0
+            # burn_rate from platform if available, else BURN_RATE env.
+            network_cfg = await self.platform_client.get_network_config()
+            if network_cfg and "burn_rate" in network_cfg:
+                burn_rate = float(network_cfg["burn_rate"])
+                burn_uid = int(network_cfg.get("burn_uid", 0))
+            else:
+                burn_rate = float(GENOMICS_CONFIG.get("burn_rate", 0.9))
+                burn_uid = 0
+            burn_rate = max(0.0, min(1.0, burn_rate))
             burn_hotkey = ""
-            if burn_rate > 0 and len(self.metagraph.hotkeys) > 0:
-                burn_hotkey = self.metagraph.hotkeys[0]
+            if burn_rate > 0 and len(self.metagraph.hotkeys) > burn_uid:
+                burn_hotkey = self.metagraph.hotkeys[burn_uid]
                 if sum(weights.values()) > 0:
                     scale = 1.0 - burn_rate
                     for hk in list(weights.keys()):
@@ -1122,7 +1205,7 @@ class Validator:
                     weights[burn_hotkey] = burn_rate
                 else:
                     weights[burn_hotkey] = 1.0
-                bt.logging.info(f"burn {burn_rate * 100:.0f}% -> uid 0 ({burn_hotkey[:12]}...)")
+                bt.logging.info(f"burn {burn_rate * 100:.0f}% -> uid {burn_uid} ({burn_hotkey[:12]}...)")
 
             # Log weight distribution (mode-aware)
             stats = self.score_tracker.get_stats()

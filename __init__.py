@@ -6,4 +6,4 @@ Miners run GATK, DeepVariant, FreeBayes, or BCFtools to call variants;
 validators score results with hap.py.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"

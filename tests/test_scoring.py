@@ -111,6 +111,16 @@ class TestComputeAdvancedScore:
         # Should be a good but not perfect score
         assert score > 50.0
 
+    def test_overcall_penalty_subtracted(self, sample_happy_metrics):
+        """Overcall guardrail penalty should be subtracted from final score."""
+        base_score = AdvancedScorer.compute_advanced_score(sample_happy_metrics)
+        metrics = dict(sample_happy_metrics)
+        metrics["overcall_penalty"] = 12.5
+
+        penalized_score = AdvancedScorer.compute_advanced_score(metrics)
+
+        assert penalized_score == pytest.approx(max(0.0, base_score - 12.5))
+
     def test_snp_only_truth_weighting(self):
         """When truth_total_indel=0, weighting should only use SNP F1."""
         metrics = {
@@ -132,8 +142,8 @@ class TestComputeAdvancedScore:
         # The indel F1 of 0.50 should NOT drag the score down
         assert score > 60.0
 
-    def test_no_truth_totals_fallback_weighting(self):
-        """When both truth totals are 0, should fall back to 0.7*snp + 0.3*indel."""
+    def test_no_truth_totals_fail_closed(self):
+        """When both truth totals are 0, AdvancedScorer should fail closed."""
         metrics = {
             'f1_snp': 0.90,
             'f1_indel': 0.80,
@@ -149,13 +159,7 @@ class TestComputeAdvancedScore:
             'frac_na_indel': 0.0,
         }
         score = AdvancedScorer.compute_advanced_score(metrics)
-        # Fallback weighted_f1 = 0.7*0.9 + 0.3*0.8 = 0.87
-        # core_component = emphasis(0.87, 0.5)
-        expected_weighted_f1 = 0.7 * 0.90 + 0.3 * 0.80
-        expected_core = AdvancedScorer.emphasis(expected_weighted_f1, gamma=0.5)
-        # Just verify the score is reasonable and reflects that core component
-        assert score > 40.0
-        assert score <= 100.0
+        assert score == 0.0
 
     def test_high_f1_high_fp_penalized(self):
         """High F1 but many false positives should penalize the FP component."""
@@ -367,21 +371,8 @@ class TestComputeAdvancedScore:
 class TestHappyScorerZeroScores:
     """Tests for HappyScorer._get_zero_scores()."""
 
-    def test_zero_scores_expected_keys(self):
-        """_get_zero_scores should return the expected set of keys."""
+    def test_zero_scores_returns_failed_sentinel(self):
+        """_get_zero_scores should fail closed and let the validator submit 0."""
         scorer = HappyScorer()
         result = scorer._get_zero_scores()
-        expected_keys = {
-            'f1_snp', 'f1_indel',
-            'precision_snp', 'recall_snp',
-            'precision_indel', 'recall_indel',
-            'weighted_f1',
-        }
-        assert set(result.keys()) == expected_keys
-
-    def test_zero_scores_all_zero(self):
-        """All values in _get_zero_scores should be 0.0."""
-        scorer = HappyScorer()
-        result = scorer._get_zero_scores()
-        for key, value in result.items():
-            assert value == 0.0, f"Expected 0.0 for key '{key}', got {value}"
+        assert result is None

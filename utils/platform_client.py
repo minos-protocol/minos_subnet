@@ -134,6 +134,18 @@ class PlatformClient:
         except Exception:
             return False
 
+    async def get_network_config(self) -> Optional[Dict[str, Any]]:
+        """Fetch network reward params (burn_rate, burn_uid). Returns None on
+        any error so the caller can fall back to env defaults."""
+        try:
+            async with self._get_client() as client:
+                response = await client.get("/scoring/network-config")
+                if response.status_code == 200:
+                    return response.json()
+                return None
+        except Exception:
+            return None
+
 
 class MinerPlatformClient(PlatformClient):
     """Platform client for miners."""

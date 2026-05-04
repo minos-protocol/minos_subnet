@@ -208,6 +208,32 @@ def generate_synthetic_regions_bed(truth_vcf: str, output_bed: str, padding: int
         return False
 
 
+def generate_challenge_region_bed(region: str, output_bed: str) -> bool:
+    """Create a BED file covering the full challenge region."""
+    try:
+        region_check = validate_region(region)
+        if not region_check["valid"]:
+            logger.error(f"Invalid challenge region '{region}': {region_check['error']}")
+            return False
+
+        chrom, coords = region.split(":")
+        start_str, end_str = coords.split("-")
+        start = int(start_str.replace(",", ""))
+        end = int(end_str.replace(",", ""))
+
+        output_path = Path(output_bed)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, 'w') as f:
+            f.write(f"{chrom}\t{max(0, start - 1)}\t{end}\n")
+
+        logger.info(f"Generated full challenge region BED: {region}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to generate challenge region BED: {e}")
+        return False
+
+
 def compute_synthetic_only_metrics(happy_vcf_path: str, mutations_vcf_path: str,
                                     position_tolerance: int = 10) -> Optional[Dict[str, float]]:
     """Filter hap.py results to only count variants matching the mutations VCF.
@@ -240,6 +266,9 @@ def compute_synthetic_only_metrics(happy_vcf_path: str, mutations_vcf_path: str,
 
         logger.info(f"Loaded {len(target_snps)} target SNPs and "
                      f"{len(target_indel_positions)} target INDELs from {mutations_path.name}")
+        if not target_snps and not target_indel_positions:
+            logger.error(f"No target mutations found in {mutations_path.name}")
+            return None
 
         counts = {
             'tp_snp': 0, 'fp_snp': 0, 'fn_snp': 0,
@@ -313,6 +342,68 @@ def compute_synthetic_only_metrics(happy_vcf_path: str, mutations_vcf_path: str,
     except Exception as e:
         logger.error(f"Failed to compute filtered metrics: {e}")
         logger.debug(traceback.format_exc())
+        return None
+
+
+def parse_region_overcall_metrics(happy_vcf_path: str,
+                                  synthetic_truth_total: float,
+                                  synthetic_snp_truth_total: float) -> Optional[Dict[str, float]]:
+    """Count full-region query false positives for the overcall guardrail."""
+    try:
+        vcf_path = Path(happy_vcf_path)
+        if not vcf_path.exists():
+            logger.warning(f"hap.py VCF not found: {vcf_path}")
+            return None
+
+        counts = {
+            'region_fp_snp': 0,
+            'region_fp_indel': 0,
+        }
+
+        opener = gzip.open if str(vcf_path).endswith('.gz') else open
+        with opener(vcf_path, 'rt') as f:
+            for line in f:
+                if line.startswith('#'):
+                    continue
+                fields = line.strip().split('\t')
+                if len(fields) < 11:
+                    continue
+
+                fmt_keys = fields[8].split(':')
+                fmt_query = dict(zip(fmt_keys, fields[10].split(':')))
+                bd_query = fmt_query.get('BD', '.')
+                bvt_query = fmt_query.get('BVT', '.')
+
+                if bd_query == 'FP':
+                    if bvt_query == 'SNP':
+                        counts['region_fp_snp'] += 1
+                    elif bvt_query == 'INDEL':
+                        counts['region_fp_indel'] += 1
+
+        region_fp_total = counts['region_fp_snp'] + counts['region_fp_indel']
+        fp_per_target = region_fp_total / max(float(synthetic_truth_total), 1.0)
+        snp_fp_per_target = counts['region_fp_snp'] / max(float(synthetic_snp_truth_total), 1.0)
+        if fp_per_target > 10.0 and snp_fp_per_target > 6.0:
+            overcall_penalty = min(45.0, (fp_per_target - 10.0) * 4.0)
+        else:
+            overcall_penalty = 0.0
+
+        logger.info(f"Overcall guardrail: region_fp={region_fp_total}, "
+                    f"fp_per_target={fp_per_target:.2f}, "
+                    f"snp_fp_per_target={snp_fp_per_target:.2f}, "
+                    f"penalty={overcall_penalty:.2f}")
+
+        return {
+            'region_fp_snp': float(counts['region_fp_snp']),
+            'region_fp_indel': float(counts['region_fp_indel']),
+            'region_fp_total': float(region_fp_total),
+            'fp_per_target': fp_per_target,
+            'snp_fp_per_target': snp_fp_per_target,
+            'overcall_penalty': overcall_penalty,
+        }
+
+    except Exception as e:
+        logger.warning(f"Failed to parse region overcall metrics: {e}")
         return None
 
 
@@ -457,7 +548,7 @@ class HappyScorer:
     def score_vcf(self, truth_vcf: str, query_vcf: str,
                   reference_fasta: str = None, confident_bed: str = None,
                   region: str = None, reference_sdf: str = None,
-                  mutations_vcf: str = None) -> Dict[str, float]:
+                  mutations_vcf: str = None) -> Optional[Dict[str, float]]:
         """Run hap.py and return precision/recall/F1 metrics.
 
         Args:
@@ -556,17 +647,31 @@ class HappyScorer:
                     truth_vcf = sliced_truth_vcf
                     logger.info(f"Using sliced truth VCF: {truth_vcf.name}")
                 else:
+                    if mutations_vcf:
+                        logger.error("Failed to slice truth VCF for synthetic scoring; failing closed")
+                        return self._get_zero_scores()
                     logger.warning(f"Failed to slice truth VCF, using full chromosome VCF")
 
-            # Restrict scoring to synthetic mutation regions only
-            # This focuses hap.py on injected mutations, ignoring GIAB "free answers"
-            synthetic_bed = output_dir / f"synthetic_regions_{unique_suffix}.bed"
-            if generate_synthetic_regions_bed(str(truth_vcf), str(synthetic_bed)):
-                bed_path = synthetic_bed
-                use_bed = True
-                logger.info(f"Scoring restricted to synthetic mutation regions")
+            # With mutations_vcf, assess the full challenge region so overcalls are
+            # classified as FP instead of UNK. Synthetic scoring below still uses
+            # mutations_vcf to restrict TP/FN scoring to injected targets.
+            if mutations_vcf and region:
+                challenge_bed = output_dir / f"challenge_region_{region_slug}_{unique_suffix}.bed"
+                if generate_challenge_region_bed(region, str(challenge_bed)):
+                    bed_path = challenge_bed
+                    use_bed = True
+                    logger.info(f"Scoring full challenge region for overcall guardrail")
+                else:
+                    logger.error("Could not generate challenge region BED for overcall guardrail; failing closed")
+                    return self._get_zero_scores()
             else:
-                logger.warning("Could not generate synthetic regions BED, scoring full region")
+                synthetic_bed = output_dir / f"synthetic_regions_{unique_suffix}.bed"
+                if generate_synthetic_regions_bed(str(truth_vcf), str(synthetic_bed)):
+                    bed_path = synthetic_bed
+                    use_bed = True
+                    logger.info(f"Scoring restricted to synthetic mutation regions")
+                else:
+                    logger.warning("Could not generate synthetic regions BED, scoring full region")
 
             # Use miner's VCF as-is without normalization
             # We score the exact output the miner provides - no modifications
@@ -762,6 +867,17 @@ class HappyScorer:
                         logger.error("Failed to compute filtered metrics from hap.py output")
                         return self._get_zero_scores()
                     happy_results.update(synthetic_metrics)
+                    synthetic_truth_total = (
+                        synthetic_metrics.get('truth_total_snp', 0.0) +
+                        synthetic_metrics.get('truth_total_indel', 0.0)
+                    )
+                    overcall_metrics = parse_region_overcall_metrics(
+                        str(happy_vcf),
+                        synthetic_truth_total,
+                        synthetic_metrics.get('truth_total_snp', 0.0)
+                    )
+                    if overcall_metrics:
+                        happy_results.update(overcall_metrics)
                     logger.info(f"Filtered metrics: SNP F1={synthetic_metrics['f1_snp']:.3f}, "
                                 f"INDEL F1={synthetic_metrics['f1_indel']:.3f}")
 
@@ -780,17 +896,9 @@ class HappyScorer:
             logger.debug(traceback.format_exc())
             return self._get_zero_scores()
 
-    def _get_zero_scores(self) -> Dict[str, float]:
-        """Return zero scores structure."""
-        return {
-            'f1_snp': 0.0,
-            'f1_indel': 0.0,
-            'precision_snp': 0.0,
-            'recall_snp': 0.0,
-            'precision_indel': 0.0,
-            'recall_indel': 0.0,
-            'weighted_f1': 0.0
-        }
+    def _get_zero_scores(self) -> Optional[Dict[str, float]]:
+        """Fail closed so the validator submits explicit combined_final=0.0."""
+        return None
 
 
 class AdvancedScorer:
@@ -857,11 +965,10 @@ class AdvancedScorer:
 
         # Component 1: Core F1 (60% weight) - truth-weighted F1 with emphasis
         total_truth = truth_total_snp + truth_total_indel
-        if total_truth > 0:
-            weighted_f1 = (f1_snp * truth_total_snp + f1_indel * truth_total_indel) / total_truth
-        else:
-            # Fallback to simple weighting if truth totals not available
-            weighted_f1 = 0.7 * f1_snp + 0.3 * f1_indel
+        if total_truth <= 0:
+            logger.error("AdvancedScorer missing truth totals; returning zero score")
+            return 0.0
+        weighted_f1 = (f1_snp * truth_total_snp + f1_indel * truth_total_indel) / total_truth
         core_component = AdvancedScorer.emphasis(weighted_f1, gamma=0.5)
 
         # Component 2: Completeness (15% weight) - recall + coverage
@@ -916,7 +1023,8 @@ class AdvancedScorer:
             0.10 * quality_component
         )
 
-        return final_score
+        overcall_penalty = metrics.get('overcall_penalty', 0.0)
+        return max(0.0, final_score - overcall_penalty)
 
 
 def parse_happy_vcf(vcf_path: str, truth_vcf_path: str = None) -> List[Dict[str, Any]]:
