@@ -222,6 +222,10 @@ class WizardState:
     docker_images_pulled: List[str] = field(default_factory=list)
     reference_data_ready: bool = False
     process_management: str = "none"
+    # Demo-miner branch: pipeline test only, no wallet/registration needed.
+    # When True the wizard skips Wallet Configuration entirely and writes a
+    # .env without WALLET_* (the miner uses an ephemeral keypair via --demo).
+    is_demo: bool = False
 
 
 # ── Wizard ────────────────────────────────────────────────────────────────────
@@ -315,6 +319,7 @@ class SetupWizard:
             choices=[
                 questionary.Choice("Miner     -- Run variant callers, earn TAO", value="miner"),
                 questionary.Choice("Validator  -- Score miners, set weights", value="validator"),
+                questionary.Choice("Demo miner -- Test the pipeline only (no wallet, no TAO)", value="demo-miner"),
             ],
             style=CUSTOM_STYLE,
         ).ask()
@@ -322,8 +327,23 @@ class SetupWizard:
         if role is None:
             return None
 
-        self.state.role = role
-        self.console.print(f"  Selected: [bold green]{role.capitalize()}[/]")
+        if role == "demo-miner":
+            # Demo branch reuses all the miner steps (template, Docker images,
+            # reference data, env, process mgmt) but skips wallet setup and
+            # writes a MINER_DEMO=true env so start-miner.sh routes to the
+            # platform's /v2/demo/* sandbox.
+            self.state.role = "miner"
+            self.state.is_demo = True
+            self.state.wallet_name = "demo"
+            self.state.wallet_hotkey = "demo"
+            self.console.print("  Selected: [bold green]Miner (demo mode)[/]")
+            self.console.print(
+                "  [dim]No wallet will be created; the miner uses an ephemeral "
+                "keypair against /v2/demo/* — no TAO, no scoring.[/]"
+            )
+        else:
+            self.state.role = role
+            self.console.print(f"  Selected: [bold green]{role.capitalize()}[/]")
         return StepResult()
 
     # ── Step 2: System check ──────────────────────────────────────────────
@@ -493,6 +513,12 @@ class SetupWizard:
     # ── Step 4: Wallet ────────────────────────────────────────────────────
 
     def step_wallet(self) -> StepResult:
+        if self.state.is_demo:
+            self.console.print(
+                "  [dim]Demo mode: skipping wallet setup — the miner will use an "
+                "ephemeral keypair generated per process.[/]"
+            )
+            return StepResult(skipped=True)
         # List existing wallets
         wallets = self._list_wallets()
         if wallets:
@@ -656,14 +682,27 @@ class SetupWizard:
 
     def step_docker_images(self, force_pull: bool = False, assume_yes: bool = False) -> StepResult:
         if self.state.role == "miner":
-            # Pull all template images so the miner can switch tools without re-running setup.
             seen: set = set()
             needed = []
-            for imgs in MINER_DOCKER_IMAGES.values():
-                for img in imgs:
+            if self.state.is_demo:
+                # Demo only runs one template per process — no reason to
+                # pull the other tools' images (saves ~5 GB of bandwidth
+                # for a pipeline smoke test).
+                template_images = MINER_DOCKER_IMAGES.get(self.state.template, [])
+                for img in template_images:
                     if img not in seen:
                         seen.add(img)
                         needed.append(img)
+                self.console.print(
+                    f"  [dim]Demo mode: pulling images for {self.state.template} only.[/]"
+                )
+            else:
+                # Pull all template images so the miner can switch tools without re-running setup.
+                for imgs in MINER_DOCKER_IMAGES.values():
+                    for img in imgs:
+                        if img not in seen:
+                            seen.add(img)
+                            needed.append(img)
         else:
             needed = VALIDATOR_DOCKER_IMAGES
 
@@ -836,6 +875,17 @@ class SetupWizard:
 
         files = MINER_DATA_FILES if self.state.role == "miner" else VALIDATOR_DATA_FILES
 
+        # Demo mode only ever scores against the static chr20 demo BAM
+        # (see DEMO_REGION in platform .env.example). Downloading 22
+        # chromosomes' worth of reference data for a pipeline smoke test
+        # would burn ~3.9 GB of bandwidth and disk for no reason.
+        if self.state.is_demo:
+            files = [f for f in files if "/chr20/" in f["local"]]
+            self.console.print(
+                "  [dim]Demo mode: restricting reference data to chr20 "
+                f"({len(files)} files).[/]"
+            )
+
         existing = []
         to_download = []
         for f in files:
@@ -958,27 +1008,34 @@ class SetupWizard:
         env = {
             "NETUID": str(NETUID),
             "NETWORK": NETWORK,
-            "WALLET_NAME": self.state.wallet_name,
-            "WALLET_HOTKEY": self.state.wallet_hotkey,
             "PLATFORM_URL": PLATFORM_URL,
             "PLATFORM_TIMEOUT": "60",
             "STORAGE_PRIMARY_BACKEND": "hippius",
         }
+        if not self.state.is_demo:
+            env["WALLET_NAME"] = self.state.wallet_name
+            env["WALLET_HOTKEY"] = self.state.wallet_hotkey
 
         if self.state.role == "miner":
             env["MINER_TEMPLATE"] = self.state.template
 
+        if self.state.is_demo:
+            # start-miner.sh checks MINER_DEMO; the miner --demo flag also
+            # reads this env var. Both paths end up routing to /v2/demo/*.
+            env["MINER_DEMO"] = "true"
+
         # Build .env content
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        role_label = "Miner (demo)" if self.state.is_demo else self.state.role.capitalize()
         lines = [
-            f"# Minos {self.state.role.capitalize()} Configuration",
+            f"# Minos {role_label} Configuration",
             f"# Generated by setup wizard on {ts}",
             "",
         ]
 
         sections = [
             ("Bittensor", ["NETUID", "NETWORK", "WALLET_NAME", "WALLET_HOTKEY"]),
-            ("Miner", ["MINER_TEMPLATE"]),
+            ("Miner", ["MINER_TEMPLATE", "MINER_DEMO"]),
             ("Platform", ["PLATFORM_URL", "PLATFORM_TIMEOUT"]),
             ("Storage", ["STORAGE_PRIMARY_BACKEND"]),
         ]
@@ -1075,7 +1132,8 @@ class SetupWizard:
         table.add_column("Setting", style="bold white", width=22)
         table.add_column("Value", style="green")
 
-        table.add_row("Role", role.capitalize())
+        role_display = "Miner (demo mode)" if self.state.is_demo else role.capitalize()
+        table.add_row("Role", role_display)
         table.add_row("System", f"{self.state.os_name} ({self.state.arch})")
         table.add_row("Python", self.state.python_version)
         table.add_row("Docker", self.state.docker_version)
@@ -1083,9 +1141,13 @@ class SetupWizard:
         if self.state.ram_gb > 0:
             table.add_row("RAM", f"{self.state.ram_gb:.0f} GB")
         table.add_row("", "")
-        table.add_row("Wallet", f"{self.state.wallet_name} / {self.state.wallet_hotkey}")
-        reg_text = "[green]Yes[/]" if self.state.wallet_registered else "[yellow]No[/]"
-        table.add_row(f"Registered (SN{NETUID})", reg_text)
+        if self.state.is_demo:
+            table.add_row("Wallet", "[dim]none (ephemeral keypair)[/]")
+            table.add_row(f"Registered (SN{NETUID})", "[dim]N/A (demo)[/]")
+        else:
+            table.add_row("Wallet", f"{self.state.wallet_name} / {self.state.wallet_hotkey}")
+            reg_text = "[green]Yes[/]" if self.state.wallet_registered else "[yellow]No[/]"
+            table.add_row(f"Registered (SN{NETUID})", reg_text)
         if role == "miner":
             table.add_row("Template", self.state.template.upper())
         n_pulled = len(self.state.docker_images_pulled)
@@ -1105,13 +1167,26 @@ class SetupWizard:
 
         # Warnings
         warnings = []
-        if not self.state.wallet_registered:
+        if self.state.is_demo:
+            self.console.print()
+            self.console.print(
+                "  [bold green]Demo mode:[/] launch with [bold]bash start-miner.sh --demo[/] "
+                "(or [bold]MINER_DEMO=true[/] in .env)."
+            )
+            self.console.print(
+                "  [dim]When ready to mine for real, register a hotkey on subnet "
+                f"{NETUID} and re-run setup as 'Miner'.[/]"
+            )
+        elif not self.state.wallet_registered:
             warnings.append(
                 f"btcli subnets register --netuid {NETUID} "
                 f"--wallet-name {self.state.wallet_name} --wallet-hotkey {self.state.wallet_hotkey}"
             )
             self.console.print()
-            self.console.print("  [dim]Demo mode active — you can launch and test without registering.[/]")
+            self.console.print(
+                "  [dim]Not registered yet — to test the pipeline first without "
+                "registering, re-run setup and choose 'Demo miner'.[/]"
+            )
         if n_pulled < n_needed:
             warnings.append("Some Docker images are not pulled yet")
         if not self.state.reference_data_ready:
@@ -1592,20 +1667,36 @@ if __name__ == "__main__":
 
     if "--update-data-only" in sys.argv:
         # Non-interactive: refresh configured Docker images and reference data.
+        # Restore is_demo + selected template from .env so demo installs don't
+        # silently bloat back to all-chromosomes + all-templates on update.
         env_path = BASE_DIR / ".env"
+        env_vars: Dict[str, str] = {}
         if env_path.exists():
             with open(env_path) as f:
                 for line in f:
-                    if line.strip().startswith("MINER_TEMPLATE"):
-                        wizard.state.role = "miner"
-                        break
-                else:
-                    # No MINER_TEMPLATE means validator (or not set)
-                    wizard.state.role = "validator"
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#") or "=" not in stripped:
+                        continue
+                    key, _, value = stripped.partition("=")
+                    env_vars[key.strip()] = value.strip()
+
+        if "MINER_TEMPLATE" in env_vars:
+            wizard.state.role = "miner"
+            template = env_vars["MINER_TEMPLATE"].lower()
+            if template in ("gatk", "deepvariant", "bcftools"):
+                wizard.state.template = template
+        elif env_vars:
+            wizard.state.role = "validator"
         else:
             wizard.state.role = "validator"  # download all (superset)
 
-        print(f"\n  Updating {wizard.state.role} Docker images and reference data...\n")
+        # Truthy MINER_DEMO → narrow reference data to chr20 + docker images
+        # to the chosen template only (mirrors the wizard's Demo-miner branch).
+        if env_vars.get("MINER_DEMO", "").strip().lower() in ("1", "true", "yes", "on"):
+            wizard.state.is_demo = True
+
+        scope = "demo " if wizard.state.is_demo else ""
+        print(f"\n  Updating {scope}{wizard.state.role} Docker images and reference data...\n")
         wizard.step_docker_images(force_pull=True, assume_yes=True)
         print("\n  Checking reference data...\n")
         wizard.step_reference_data(assume_yes=True)

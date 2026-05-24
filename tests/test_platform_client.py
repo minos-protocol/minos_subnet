@@ -347,3 +347,115 @@ class TestExceptions:
         assert issubclass(AuthenticationError, PlatformClientError)
         err = AuthenticationError("bad sig")
         assert isinstance(err, PlatformClientError)
+
+
+# ---------------------------------------------------------------------------
+# Demo mode path routing
+# ---------------------------------------------------------------------------
+
+class TestDemoModeRouting:
+    """MinerPlatformClient(demo=True) routes to /v2/demo/* endpoints.
+
+    Live (demo=False, the default) preserves the original /v2/* paths so
+    existing callers see no behavior change. Path selection happens at the
+    method call site via the ``_round_status_path`` / ``_submit_path``
+    properties; since the canonical signature includes the path, a demo
+    request is cryptographically distinct from a live request even when
+    the body is otherwise identical.
+    """
+
+    def _make_client(self, demo: bool) -> MinerPlatformClient:
+        return MinerPlatformClient(_keypair(), _https_config(), demo=demo)
+
+    def test_default_is_live(self):
+        client = MinerPlatformClient(_keypair(), _https_config())
+        assert client.demo is False
+        assert client._round_status_path == "/v2/round-status"
+        assert client._submit_path == "/v2/submit-config"
+
+    def test_demo_flag_flips_paths(self):
+        client = self._make_client(demo=True)
+        assert client.demo is True
+        assert client._round_status_path == "/v2/demo/round-status"
+        assert client._submit_path == "/v2/demo/submit-result"
+
+    @staticmethod
+    def _mock_http(response_payload):
+        """Build an AsyncMock httpx client that returns the given JSON payload."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = response_payload
+
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(return_value=mock_response)
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+        return mock_http
+
+    @pytest.mark.asyncio
+    async def test_get_round_status_posts_to_live_path_when_not_demo(self):
+        client = self._make_client(demo=False)
+        with patch.object(client, "_get_client") as mock_get:
+            mock_get.return_value = self._mock_http({"has_active_round": False})
+            await client.get_round_status()
+            posted_path = mock_get.return_value.post.call_args.args[0]
+            assert posted_path == "/v2/round-status"
+
+    @pytest.mark.asyncio
+    async def test_get_round_status_posts_to_demo_path_when_demo(self):
+        client = self._make_client(demo=True)
+        with patch.object(client, "_get_client") as mock_get:
+            mock_get.return_value = self._mock_http({"has_active_round": False})
+            await client.get_round_status()
+            posted_path = mock_get.return_value.post.call_args.args[0]
+            assert posted_path == "/v2/demo/round-status"
+
+    @pytest.mark.asyncio
+    async def test_submit_config_posts_to_live_path_when_not_demo(self):
+        client = self._make_client(demo=False)
+        with patch.object(client, "_get_client") as mock_get:
+            mock_get.return_value = self._mock_http({"success": True, "submission_id": "x"})
+            await client.submit_config("round1", "gatk", {})
+            posted_path = mock_get.return_value.post.call_args.args[0]
+            assert posted_path == "/v2/submit-config"
+
+    @pytest.mark.asyncio
+    async def test_submit_config_posts_to_demo_path_when_demo(self):
+        client = self._make_client(demo=True)
+        with patch.object(client, "_get_client") as mock_get:
+            mock_get.return_value = self._mock_http(
+                {"success": True, "submission_id": "demo", "is_demo": True}
+            )
+            await client.submit_config("round1", "gatk", {})
+            posted_path = mock_get.return_value.post.call_args.args[0]
+            assert posted_path == "/v2/demo/submit-result"
+
+    @pytest.mark.asyncio
+    async def test_demo_signature_is_bound_to_demo_path(self):
+        """Same body, demo vs live → different signatures (path-bound auth).
+
+        Guarantees a captured live-mode signature can't be replayed against
+        a demo endpoint and vice versa.
+        """
+        live = self._make_client(demo=False)
+        demo = self._make_client(demo=True)
+        captured = {}
+
+        async def _capture(client, label):
+            with patch.object(client, "_get_client") as mock_get:
+                mock_get.return_value = self._mock_http({"has_active_round": False})
+                await client.get_round_status()
+                body = mock_get.return_value.post.call_args.kwargs.get("json") or {}
+                captured[label] = (
+                    mock_get.return_value.post.call_args.args[0],
+                    body.get("signature"),
+                )
+
+        await _capture(live, "live")
+        await _capture(demo, "demo")
+
+        live_path, live_sig = captured["live"]
+        demo_path, demo_sig = captured["demo"]
+        assert live_path != demo_path
+        assert live_sig and demo_sig
+        assert live_sig != demo_sig, "demo + live must produce distinct signatures"

@@ -84,10 +84,10 @@ echo -e "  This script runs a ${CYAN}single demo round${NC} end-to-end so you ca
 echo -e "  confirm that your miner setup works before going live."
 echo ""
 echo -e "  What will happen:"
-echo -e "    1. Verify prerequisites (Docker, Python packages, wallet)"
-echo -e "    2. Start the miner in demo mode (no registration required)"
-echo -e "    3. The miner connects to ${CYAN}https://api.theminos.ai${NC}"
-echo -e "    4. It downloads a BAM file and runs your variant caller"
+echo -e "    1. Verify prerequisites (Docker, Python packages)"
+echo -e "    2. Start the miner with ${CYAN}--demo${NC} — no wallet needed, no chain conn."
+echo -e "    3. The miner connects to ${CYAN}https://api.theminos.ai/v2/demo/*${NC}"
+echo -e "    4. It downloads a sandbox BAM and runs your variant caller"
 echo -e "    5. Results are displayed here with a score estimate"
 echo ""
 echo -e "  ${YELLOW}Estimated time: 3-30 minutes${NC} (depends on your machine and"
@@ -219,10 +219,14 @@ if [[ -f "$PROJECT_DIR/.venv/bin/python3" ]]; then
     PYTHON="$PROJECT_DIR/.venv/bin/python3"
 fi
 
-# Run the miner in the background, capturing output
+# Run the miner in the background, capturing output. --demo routes the
+# client to /v2/demo/* (no wallet required, no chain connection) so the
+# script works even if the user hasn't run setup.py / has no registered
+# hotkey. Demo path is sandboxed: no submissions are persisted, no TAO
+# is earned — purely a pipeline-test loop.
 (
     cd "$PROJECT_DIR"
-    $PYTHON -m neurons.miner 2>&1
+    $PYTHON -m neurons.miner --demo 2>&1
 ) > "$DEMO_LOG" 2>&1 &
 DEMO_PID=$!
 

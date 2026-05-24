@@ -4,6 +4,7 @@ import sys
 import os
 import gzip
 import json
+import secrets
 import shutil
 import traceback
 import threading
@@ -13,9 +14,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import time
-from typing import Dict, Any
+from typing import Any, Dict, Optional
 import asyncio
 import bittensor as bt
+from bittensor_wallet import Keypair
 import argparse
 import subprocess
 from dotenv import load_dotenv
@@ -67,30 +69,50 @@ class Miner:
             bt.logging.error(str(e))
             sys.exit(1)
 
-        self.wallet = bt.wallet(config=self.config)
-        bt.logging.info(f"Wallet loaded: {self.wallet.hotkey.ss58_address}")
+        self.demo = bool(getattr(self.config, "demo", False))
 
-        bt.logging.info(f"Connecting to network: {self.config.subtensor.network}")
-        self.subtensor = bt.subtensor(config=self.config)
-
-        bt.logging.info(f"Loading metagraph for netuid: {self.config.netuid}")
-        self.metagraph = self.subtensor.metagraph(self.config.netuid)
-        bt.logging.info(f"Metagraph loaded: {len(self.metagraph.hotkeys)} neurons")
-
-        self.is_registered = self.wallet.hotkey.ss58_address in self.metagraph.hotkeys
-        if self.is_registered:
-            self.my_subnet_uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
-            bt.logging.info(f"Miner registered with UID: {self.my_subnet_uid}")
-        else:
+        if self.demo:
+            # Ephemeral keypair: no real wallet needed, no on-chain check.
+            # Random URI keeps the ss58 unique per process so demo-side
+            # rate-limit / log keys don't collide across local restarts.
+            self.wallet = None
+            self.keypair = Keypair.create_from_uri(f"//demo-{secrets.token_hex(4)}")
+            self.subtensor = None
+            self.metagraph = None
+            self.is_registered = False
             self.my_subnet_uid = None
-            bt.logging.warning(
-                "Miner not registered on subnet 107. "
-                "Register with: btcli subnets register --netuid 107 --wallet.name miner --wallet.hotkey default"
-            )
+            self.hotkey_ss58 = self.keypair.ss58_address
             bt.logging.info(
-                "Running in DEMO MODE — you can test variant calling without registration. "
-                "To participate in live rounds and earn TAO, register first."
+                f"DEMO MODE — using ephemeral keypair {self.hotkey_ss58[:16]}... "
+                "(no chain connection, no wallet required)"
             )
+        else:
+            self.wallet = bt.wallet(config=self.config)
+            self.keypair = self.wallet.hotkey
+            self.hotkey_ss58 = self.keypair.ss58_address
+            bt.logging.info(f"Wallet loaded: {self.hotkey_ss58}")
+
+            bt.logging.info(f"Connecting to network: {self.config.subtensor.network}")
+            self.subtensor = bt.subtensor(config=self.config)
+
+            bt.logging.info(f"Loading metagraph for netuid: {self.config.netuid}")
+            self.metagraph = self.subtensor.metagraph(self.config.netuid)
+            bt.logging.info(f"Metagraph loaded: {len(self.metagraph.hotkeys)} neurons")
+
+            self.is_registered = self.hotkey_ss58 in self.metagraph.hotkeys
+            if self.is_registered:
+                self.my_subnet_uid = self.metagraph.hotkeys.index(self.hotkey_ss58)
+                bt.logging.info(f"Miner registered with UID: {self.my_subnet_uid}")
+            else:
+                self.my_subnet_uid = None
+                bt.logging.warning(
+                    "Miner not registered on subnet 107. "
+                    "Register with: btcli subnets register --netuid 107 --wallet.name miner --wallet.hotkey default"
+                )
+                bt.logging.info(
+                    "To test your pipeline without registering, restart with --demo "
+                    "(uses an ephemeral keypair against the platform's sandboxed demo round)."
+                )
 
         self.setup_variant_caller()
         self.setup_platform_client()
@@ -135,10 +157,12 @@ class Miner:
                 timeout=float(os.getenv("PLATFORM_TIMEOUT", "60"))
             )
             self.platform_client = MinerPlatformClient(
-                keypair=self.wallet.hotkey,
-                config=config
+                keypair=self.keypair,
+                config=config,
+                demo=self.demo,
             )
-            bt.logging.info(f"Platform client initialized: {platform_url}")
+            mode_label = "demo" if self.demo else "live"
+            bt.logging.info(f"Platform client initialized ({mode_label}): {platform_url}")
         except Exception as e:
             bt.logging.error(f"Failed to initialize platform client: {e}")
             sys.exit(1)
@@ -178,6 +202,17 @@ class Miner:
             default=MINER_CONFIG.get("default_caller", "gatk"),
             help="Variant calling template",
         )
+        parser.add_argument(
+            "--demo",
+            action="store_true",
+            default=False,
+            help=(
+                "Run in demo mode: skips chain (no subtensor/metagraph), "
+                "uses an ephemeral keypair, and routes to the platform's "
+                "/v2/demo/* sandbox so a new operator can prove their "
+                "pipeline works without registering on the subnet."
+            ),
+        )
 
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
@@ -194,6 +229,9 @@ class Miner:
             config.wallet.name = os.getenv("WALLET_NAME")
         if os.getenv("WALLET_HOTKEY"):
             config.wallet.hotkey = os.getenv("WALLET_HOTKEY")
+        # MINER_DEMO=1/true/yes opts in via env (PM2 / systemd convenience)
+        if os.getenv("MINER_DEMO", "").strip().lower() in ("1", "true", "yes", "on"):
+            config.demo = True
 
         return config
 
@@ -271,6 +309,12 @@ class Miner:
         Returns:
             True if participated in a round, False otherwise
         """
+        # Pre-bind so the PlatformClientError handler below can reference it
+        # safely if get_round_status() itself raises (e.g. transport error
+        # before round_data is even built). Without this, a server-side
+        # "demo mode" 4xx in the get_round_status path triggers a NameError
+        # that masks the original PlatformClientError.
+        round_id: Optional[str] = None
         try:
             # Get current round status
             round_data = await self.platform_client.get_round_status()
@@ -332,8 +376,11 @@ class Miner:
 
             # Run variant calling (or reuse existing results)
             output_dir = bam_path.parent
-            # In demo mode, always re-run variant calling so users can test their tools
-            is_demo = round_id.startswith("2026-01-01T00:00:00")
+            # In demo mode, always re-run variant calling so users can test their tools.
+            # Detected by either the explicit --demo flag OR the static demo round_id
+            # prefix (covers legacy PLATFORM_MODE=demo deployments that don't go
+            # through the /v2/demo/* namespace).
+            is_demo = self.demo or round_id.startswith("2026-01-01T00:00:00")
             variant_count, elapsed = await self._run_variant_calling(bam_path, region, tool_config, output_dir, force_rerun=is_demo)
 
             # Submit config to platform
@@ -518,8 +565,27 @@ class Miner:
             self.submitted_rounds.add(round_id)
             submission_id = result.get("submission_id", "unknown")
             print(f"   Config submitted successfully", flush=True)
-            print(f"   Submission ID: {submission_id[:16]}...", flush=True)
+            print(f"   Submission ID: {str(submission_id)[:16]}...", flush=True)
             bt.logging.info(f"Round {round_id[:8]}... submitted: {variant_count} variants")
+
+            # /v2/demo/submit-result returns is_demo=true on success. Surface
+            # the friendly DEMO COMPLETE banner so a new operator sees a
+            # clear "your pipeline works" signal instead of just a generic
+            # "submitted" log. Polling keeps running but submitted_rounds
+            # dedupes — subsequent loops will skip until process restart.
+            if result.get("is_demo"):
+                print(f"\n{'='*60}", flush=True)
+                print(f"   DEMO COMPLETE", flush=True)
+                print(f"   Variant calling finished successfully!", flush=True)
+                print(f"   Your system is ready to mine on Subnet 107.", flush=True)
+                print(f"", flush=True)
+                print(f"   Submission was accepted by the demo sandbox — nothing", flush=True)
+                print(f"   is persisted, no score is computed, no TAO is earned.", flush=True)
+                print(f"   Register your hotkey on subnet 107 to participate in", flush=True)
+                print(f"   live rounds:", flush=True)
+                print(f"     btcli subnets register --netuid 107 \\", flush=True)
+                print(f"       --wallet.name <name> --wallet.hotkey <hotkey>", flush=True)
+                print(f"{'='*60}", flush=True)
 
             # Cleanup old rounds from tracking (keep last 10)
             if len(self.submitted_rounds) > 10:
@@ -601,12 +667,16 @@ class Miner:
         bt.logging.info("Starting miner...")
 
         print(f"\n{'='*60}", flush=True)
-        print(f"MINOS MINER", flush=True)
+        print(f"MINOS MINER" + ("  [DEMO MODE]" if self.demo else ""), flush=True)
         print(f"{'='*60}", flush=True)
-        print(f"   Hotkey: {self.wallet.hotkey.ss58_address[:16]}...", flush=True)
-        print(f"   UID: {self.my_subnet_uid}", flush=True)
-        print(f"   Network: {self.config.subtensor.network}", flush=True)
-        print(f"   Netuid: {self.config.netuid}", flush=True)
+        print(f"   Hotkey: {self.hotkey_ss58[:16]}...", flush=True)
+        if self.demo:
+            print(f"   Mode: demo (ephemeral keypair, /v2/demo/* sandbox)", flush=True)
+            print(f"   No chain connection, no TAO earned", flush=True)
+        else:
+            print(f"   UID: {self.my_subnet_uid}", flush=True)
+            print(f"   Network: {self.config.subtensor.network}", flush=True)
+            print(f"   Netuid: {self.config.netuid}", flush=True)
         print(f"   Variant Caller: {self.variant_caller}", flush=True)
         print(f"   Config: configs/{self.variant_caller}.conf", flush=True)
         print(f"   Docker: {'Available' if is_docker_available() else 'Not Available'}", flush=True)
@@ -649,8 +719,8 @@ class Miner:
                 await asyncio.sleep(poll_interval)
                 sync_count += 1
 
-                # Sync metagraph every 2 minutes
-                if sync_count % 4 == 0:
+                # Sync metagraph every 2 minutes (skipped in demo — no chain conn)
+                if sync_count % 4 == 0 and self.metagraph is not None:
                     self.metagraph.sync(subtensor=self.subtensor)
 
                 # Heartbeat every 5 minutes

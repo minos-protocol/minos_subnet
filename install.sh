@@ -392,6 +392,85 @@ install_deps() {
     ok "All dependencies installed."
 }
 
+# --- Node.js (prerequisite for PM2) ---
+#
+# Fresh Ubuntu cloud images don't ship Node/npm, and the distro's apt
+# nodejs is too old (Ubuntu 22.04 → Node 12; pm2 needs ≥16). NodeSource
+# is the official upstream-managed apt repo that ships current LTS for
+# all supported Ubuntu/Debian releases. macOS gets node via Homebrew.
+
+install_node() {
+    header "Node.js (for PM2)"
+
+    if command -v node &>/dev/null; then
+        local major
+        major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+        if [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 18 )); then
+            ok "Node $(node -v) (npm $(npm -v 2>/dev/null || echo '?'))"
+            return
+        fi
+        warn "Node $(node -v) is too old for current PM2; will upgrade."
+    fi
+
+    # Node install is best-effort — PM2 is optional, and an existing miner
+    # running `update_only` shouldn't have their dependency upgrade aborted
+    # just because the network blocked NodeSource. Every command below uses
+    # ||true / explicit guards so set -eo pipefail can't crash the outer
+    # install path mid-step.
+    local nodelog="/tmp/minos-node-install.log"
+    : > "$nodelog"
+
+    case "$PKG_MANAGER" in
+        apt)
+            info "Adding NodeSource repo for Node 20.x (current LTS)..."
+            if ! sudo apt-get install -y -qq curl ca-certificates gnupg >>"$nodelog" 2>&1; then
+                warn "Failed to install NodeSource prereqs (curl/gpg). See $nodelog. Skipping Node install."
+                return
+            fi
+            if curl -fsSL https://deb.nodesource.com/setup_20.x 2>>"$nodelog" | sudo -E bash - >>"$nodelog" 2>&1; then
+                if ! sudo apt-get install -y nodejs >>"$nodelog" 2>&1; then
+                    warn "apt-get install nodejs failed. Last log lines:"
+                    tail -5 "$nodelog" | sed 's/^/    /' >&2
+                    return
+                fi
+            else
+                warn "NodeSource setup_20.x failed (network/proxy/sudo). Last lines:"
+                tail -5 "$nodelog" | sed 's/^/    /' >&2
+                warn "Falling back to distro nodejs (may be too old for PM2)."
+                sudo apt-get install -y nodejs npm >>"$nodelog" 2>&1 \
+                    || warn "Distro nodejs install also failed. See $nodelog."
+            fi
+            ;;
+        dnf|yum)
+            info "Adding NodeSource repo for Node 20.x..."
+            if curl -fsSL https://rpm.nodesource.com/setup_20.x 2>>"$nodelog" | sudo -E bash - >>"$nodelog" 2>&1; then
+                sudo "$PKG_MANAGER" install -y nodejs >>"$nodelog" 2>&1 \
+                    || { warn "nodejs install failed (see $nodelog)"; return; }
+            else
+                warn "NodeSource setup failed; falling back to distro nodejs."
+                sudo "$PKG_MANAGER" install -y nodejs npm >>"$nodelog" 2>&1 \
+                    || warn "Distro nodejs install failed (see $nodelog)"
+            fi
+            ;;
+        brew)
+            if ! brew install node >>"$nodelog" 2>&1; then
+                warn "brew install node failed. Last log lines:"
+                tail -5 "$nodelog" | sed 's/^/    /' >&2
+            fi
+            ;;
+        *)
+            warn "Unknown package manager '${PKG_MANAGER:-?}'; install Node 18+ manually then re-run install.sh"
+            return
+            ;;
+    esac
+
+    if command -v node &>/dev/null; then
+        ok "Node $(node -v) installed"
+    else
+        warn "Node install did not produce a 'node' binary on PATH (see $nodelog). PM2 will be skipped."
+    fi
+}
+
 # --- PM2 (when npm is available) ---
 
 install_pm2() {
@@ -403,16 +482,40 @@ install_pm2() {
     fi
 
     if ! command -v npm &>/dev/null; then
-        warn "npm not found — skipping PM2. Install Node.js, then run: npm install -g pm2"
+        warn "npm still missing after install_node — skipping PM2."
         return
     fi
 
-    info "Installing PM2 (npm install -g pm2)..."
-    if npm install -g pm2; then
-        ok "PM2 installed"
+    # Snap-installed Node writes its global prefix to a read-only location;
+    # NodeSource installs to /usr/lib/node_modules (root-owned). Either way
+    # `npm install -g` needs sudo unless npm's prefix is user-writable
+    # (nvm, ~/.local prefix, etc.). Detecting writability is cheaper and
+    # more accurate than guessing from `whoami`.
+    local prefix_dir cmd
+    prefix_dir="$(npm config get prefix 2>/dev/null)/lib/node_modules"
+    if [[ -w "$prefix_dir" ]] || [[ "$(id -u)" == "0" ]]; then
+        cmd="npm install -g pm2"
     else
-        warn "PM2 install failed. Fix npm global install permissions or network, then run: npm install -g pm2"
+        cmd="sudo -E npm install -g pm2"
     fi
+
+    local log="/tmp/minos-pm2-install.log"
+    local try
+    for try in 1 2 3; do
+        info "Installing PM2 (attempt $try/3): $cmd"
+        if $cmd >"$log" 2>&1; then
+            ok "PM2 installed ($(pm2 -v 2>/dev/null || echo ok))"
+            return
+        fi
+        warn "PM2 install attempt $try failed (see $log for npm output)"
+        if (( try < 3 )); then
+            sleep $((try * 5))
+        fi
+    done
+    warn "PM2 install failed after 3 tries. To debug:"
+    warn "  cat $log"
+    warn "  $cmd          # run manually"
+    warn "PM2 is optional — the miner/validator runs fine without it."
 }
 
 # --- Launch wizard ---
@@ -460,6 +563,7 @@ update_only() {
     pip install -r "$SCRIPT_DIR/requirements.txt" -q
     ok "Dependencies up to date"
 
+    install_node
     install_pm2
 
     # Run migration + reference data download via setup.py --update-only
@@ -506,6 +610,7 @@ main() {
     check_docker
     setup_venv
     install_deps
+    install_node
     install_pm2
     launch_wizard
 }

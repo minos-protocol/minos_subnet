@@ -196,10 +196,26 @@ class PlatformClient:
 class MinerPlatformClient(PlatformClient):
     """Platform client for miners."""
 
-    def __init__(self, keypair: Keypair, config: PlatformConfig):
+    def __init__(self, keypair: Keypair, config: PlatformConfig, demo: bool = False):
         super().__init__(config)
         self.keypair = keypair
         self.miner_id: Optional[str] = None
+        # Demo mode routes round-status + submit to the /v2/demo/* namespace
+        # on the platform — sandboxed onboarding path that accepts ephemeral
+        # keypairs and never writes to the live submissions DB.
+        self.demo = demo
+
+    @property
+    def _round_status_path(self) -> str:
+        return "/v2/demo/round-status" if self.demo else "/v2/round-status"
+
+    @property
+    def _submit_path(self) -> str:
+        # /v2/demo/submit-result returns {success, submission_id, message,
+        # is_demo: true} — same shape as /v2/submit-config's response so
+        # the caller's success handling is unchanged. The is_demo flag is
+        # the signal for the miner to print its DEMO COMPLETE banner.
+        return "/v2/demo/submit-result" if self.demo else "/v2/submit-config"
 
     # =========================================================================
     # Round-Based API Methods
@@ -225,7 +241,7 @@ class MinerPlatformClient(PlatformClient):
                 - downsampled_coverage: Optional[int]
                 - time_remaining_seconds: Optional[int]
         """
-        path = "/v2/round-status"
+        path = self._round_status_path
 
         async def _do_request():
             body = self._auth_body("POST", path, hotkey=self.keypair.ss58_address)
@@ -275,7 +291,7 @@ class MinerPlatformClient(PlatformClient):
         _INFRA_PARAMS = {"threads", "memory_gb", "timeout", "ref_build", "num_threads"}
         safe_config = {k: v for k, v in tool_config.items() if k not in _INFRA_PARAMS}
 
-        path = "/v2/submit-config"
+        path = self._submit_path
 
         async def _do_request():
             body = self._auth_body(

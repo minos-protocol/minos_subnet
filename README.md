@@ -158,7 +158,20 @@ bash start-validator.sh  # Start as validator (choose one)
 
 The `start-*.sh` scripts handle wallet setup on first run — no manual `.env` editing needed. Run with `--help` to see all options, or `--setup` to re-run the setup wizard. If you already ran `install.sh` before, running it again will only update dependencies and download any new reference data (use `--fresh` to redo everything).
 
-The platform is in **demo mode** — you can run the miner immediately to test your pipeline without registering on the subnet. Register when you're ready to earn alpha.
+### Try mining without registering
+
+Want to verify your variant-calling pipeline works before bonding TAO or registering a hotkey? Run the miner with **`--demo`**:
+
+```bash
+bash start-miner.sh --demo            # ephemeral keypair, no wallet needed
+# or, with PM2 / systemd:
+MINER_DEMO=true bash start-miner.sh   # equivalent — env var works the same as --flag
+bash pm2-miner.sh --demo              # PM2 launcher with the flag
+```
+
+In demo mode the miner skips the chain entirely, generates an ephemeral keypair, downloads a static sandbox BAM from the platform's `/v2/demo/*` endpoints, runs your variant caller, and submits the result for acknowledgement. **Nothing is persisted, no score is computed, no TAO is earned** — it's purely a pipeline smoke test. When it prints `DEMO COMPLETE`, you know your Docker setup, reference data, variant caller, and platform connectivity all work end-to-end.
+
+**Switching from demo to live**: the demo run creates a template `.env` with `MINER_DEMO=true` and placeholder `WALLET_NAME=default` / `WALLET_HOTKEY=default`. To switch to real mining: edit `.env` to set your real wallet name/hotkey, change `MINER_DEMO=true` → `MINER_DEMO=false` (or delete the line), and re-run `bash start-miner.sh`. Alternatively, run `bash start-miner.sh --setup` to redo the wallet wizard.
 
 **MinosVM:** If using the MinosVM Docker image, everything is pre-installed. Just SSH in and run `bash start-miner.sh` or `bash start-validator.sh`.
 

@@ -17,6 +17,9 @@ module.exports = {
       log_date_format: "YYYY-MM-DD HH:mm:ss Z",
       env: {
         PYTHONUNBUFFERED: "1",
+        // Uncomment to run against the platform /v2/demo/* sandbox
+        // (ephemeral keypair, no wallet/registration, no TAO earned):
+        //   MINER_DEMO: "true",
       },
     },
   ],
