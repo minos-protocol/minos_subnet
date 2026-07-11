@@ -322,6 +322,81 @@ class MinerPlatformClient(PlatformClient):
 
         return await retry_async(_do_request, max_retries=2)
 
+    # =========================================================================
+    # Practice-mode API (self-scoring sandbox). Separate namespace from the
+    # live round + demo paths. The platform 404s these unless practice mode
+    # is enabled server-side, so they degrade cleanly on a deployment that
+    # hasn't turned the feature on. Uses the same v2 canonical auth as the
+    # other miner calls; an ephemeral keypair is accepted (like demo).
+    # =========================================================================
+
+    async def list_practice_samples(self) -> Dict[str, Any]:
+        """Fetch the practice-sample menu (metadata only, no file URLs).
+
+        Returns:
+            Dict with a "samples" list, each entry containing sample_id,
+            chromosome, region, num_mutations.
+
+        Raises:
+            PlatformClientError on 404 (practice mode not enabled on this
+            deployment) or any non-200.
+        """
+        path = "/v2/practice/list-samples"
+
+        async def _do_request():
+            body = self._auth_body("POST", path, hotkey=self.keypair.ss58_address)
+            async with self._get_client() as client:
+                response = await client.post(path, json=body, headers=self._AUTH_HEADERS)
+                if response.status_code == 401:
+                    raise AuthenticationError("Invalid signature")
+                if response.status_code == 404:
+                    raise PlatformClientError(
+                        "Practice mode is not enabled on this platform deployment."
+                    )
+                if response.status_code != 200:
+                    raise PlatformClientError(f"Failed to list practice samples: {response.text}")
+                return response.json()
+
+        return await retry_async(_do_request, max_retries=2)
+
+    async def get_practice_sample(self, sample_id: str) -> Dict[str, Any]:
+        """Fetch one practice sample's presigned BAM + truth + mutations URLs.
+
+        Args:
+            sample_id: id from list_practice_samples().
+
+        Returns:
+            Dict with metadata + presigned URLs (bam_presigned_url and
+            _backup, truth_vcf_presigned_url*, mutations_vcf_presigned_url*),
+            plus bam_sha256 / truth_vcf_sha256 when configured.
+
+        Raises:
+            PlatformClientError on 404 (unknown sample_id, or practice mode
+            not enabled) or any non-200.
+        """
+        path = "/v2/practice/get-sample"
+
+        async def _do_request():
+            body = self._auth_body(
+                "POST", path,
+                hotkey=self.keypair.ss58_address,
+                sample_id=sample_id,
+            )
+            async with self._get_client() as client:
+                response = await client.post(path, json=body, headers=self._AUTH_HEADERS)
+                if response.status_code == 401:
+                    raise AuthenticationError("Invalid signature")
+                if response.status_code == 404:
+                    raise PlatformClientError(
+                        f"Practice sample '{sample_id}' not found "
+                        "(unknown id, or practice mode not enabled)."
+                    )
+                if response.status_code != 200:
+                    raise PlatformClientError(f"Failed to get practice sample: {response.text}")
+                return response.json()
+
+        return await retry_async(_do_request, max_retries=2)
+
 
 class ValidatorPlatformClient(PlatformClient):
     """Platform client for validators."""

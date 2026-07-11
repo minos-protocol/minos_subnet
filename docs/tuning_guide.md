@@ -143,7 +143,9 @@ The FP rate penalty ramps steeply once you exceed the dynamic threshold. If your
 
 ### Step 5: Test Locally First
 
-Use demo mode to run test jobs locally before committing to live rounds. A bad config can cost the current round and may fail to count toward eligibility if it produces no valid positive score.
+Use **demo mode** (`--demo`) for a one-shot check before committing to live rounds — it downloads a single fixed, fully-answered sample (BAM + truth), runs your variant caller, and prints the exact score a validator would compute.
+
+To score against **any** sample (not just the fixed demo one), use **practice mode** (`--practice`): pick from a menu of fully-answered chr20/chr21 samples and compare configs before going live. A bad config can cost the current round and may fail to count toward eligibility if it produces no valid positive score.
 
 ### The Core Tradeoff
 

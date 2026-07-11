@@ -430,16 +430,16 @@ class SetupWizard:
         if role == "demo-miner":
             # Demo branch reuses all the miner steps (template, Docker images,
             # reference data, env, process mgmt) but skips wallet setup and
-            # writes a MINER_DEMO=true env so start-miner.sh routes to the
-            # platform's /v2/demo/* sandbox.
+            # writes a MINER_DEMO=true env so start-miner.sh runs the one-shot
+            # self-scorer (--practice pinned to a fixed sample) with no wallet.
             self.state.role = "miner"
             self.state.is_demo = True
             self.state.wallet_name = "demo"
             self.state.wallet_hotkey = "demo"
-            self.console.print("  [green]✓[/] Role: [bold green]Demo miner[/] — test the pipeline only")
+            self.console.print("  [green]✓[/] Role: [bold green]Demo miner[/] — score your config on a fixed sample")
             self.console.print(
-                "  [dim]No wallet will be created; the miner uses an ephemeral "
-                "keypair against /v2/demo/* — no TAO, no scoring.[/]"
+                "  [dim]No wallet required. Downloads a fully-answered sample, "
+                "runs your config, and prints the score a validator would give it.[/]"
             )
         else:
             self.state.role = role
@@ -1036,7 +1036,7 @@ class SetupWizard:
 
         files = MINER_DATA_FILES if self.state.role == "miner" else VALIDATOR_DATA_FILES
 
-        # Demo mode only ever scores against the static chr20 demo BAM
+        # Demo mode only ever runs the caller against a single chr20 demo BAM
         # (see DEMO_REGION in platform .env.example). Downloading 22
         # chromosomes' worth of reference data for a pipeline smoke test
         # would burn ~3.9 GB of bandwidth and disk for no reason.
@@ -1186,8 +1186,9 @@ class SetupWizard:
             env["MINER_TEMPLATE"] = self.state.template
 
         if self.state.is_demo:
-            # start-miner.sh checks MINER_DEMO; the miner --demo flag also
-            # reads this env var. Both paths end up routing to /v2/demo/*.
+            # start-miner.sh treats MINER_DEMO=true as demo intent and runs the
+            # one-shot self-scorer (--practice pinned to a fixed sample), same
+            # as the --demo flag.
             env["MINER_DEMO"] = "true"
 
         # Build .env content
@@ -1870,8 +1871,16 @@ if __name__ == "__main__":
 
         # Truthy MINER_DEMO narrows reference data to chr20 and Docker images
         # to the chosen template only, matching the wizard's demo-miner branch.
-        if env_vars.get("MINER_DEMO", "").strip().lower() in ("1", "true", "yes", "on"):
+        # Read from the .env FILE first, then fall back to the process env /
+        # a --demo argv flag so a fresh-box `bash start-miner.sh --demo` (which
+        # runs this before any .env exists) still gets the narrow chr20 scope.
+        _demo_env = env_vars.get("MINER_DEMO", "") or os.environ.get("MINER_DEMO", "")
+        if _demo_env.strip().lower() in ("1", "true", "yes", "on") or "--demo" in sys.argv:
             wizard.state.is_demo = True
+            # With no .env at all, role would default to 'validator' (superset)
+            # above; a demo run only needs the miner scope, so correct it here.
+            if not env_vars:
+                wizard.state.role = "miner"
 
         scope = "demo " if wizard.state.is_demo else ""
         print(f"\n  Updating {scope}{wizard.state.role} Docker images and reference data...\n")

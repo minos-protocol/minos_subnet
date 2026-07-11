@@ -168,18 +168,31 @@ The installer automatically installs required runtime pieces where supported, in
 
 ### Try mining without registering
 
-Want to verify your variant-calling pipeline works before bonding TAO or registering a hotkey? Run the miner with **`--demo`**:
+Want to verify your variant-calling pipeline works — and see the score it earns — before bonding TAO or registering a hotkey? Run the miner with **`--demo`**:
 
 ```bash
 bash start-miner.sh --demo            # ephemeral keypair, no wallet needed
-# or, with PM2 / systemd:
-MINER_DEMO=true bash start-miner.sh   # equivalent — env var works the same as --flag
-bash pm2-miner.sh --demo              # PM2 launcher with the flag
+# or equivalently, via the env var:
+MINER_DEMO=true bash start-miner.sh   # env var works the same as --flag
 ```
 
-In demo mode the miner skips the chain entirely, generates an ephemeral keypair, downloads a static sandbox BAM from the platform's `/v2/demo/*` endpoints, runs your variant caller, and submits the result for acknowledgement. **Nothing is persisted, no score is computed, no TAO is earned** — it's purely a pipeline smoke test. When it prints `DEMO COMPLETE`, you know your Docker setup, reference data, variant caller, and platform connectivity all work end-to-end.
+> `--demo` is a one-shot foreground run — it scores once and exits. Run it directly, not under PM2 (which is for the long-running live miner).
 
-**Switching from demo to live**: the demo run creates a template `.env` with `MINER_DEMO=true` and placeholder `WALLET_NAME=default` / `WALLET_HOTKEY=default`. To switch to real mining: edit `.env` to set your real wallet name/hotkey, change `MINER_DEMO=true` → `MINER_DEMO=false` (or delete the line), and re-run `bash start-miner.sh`. Alternatively, run `bash start-miner.sh --setup` to redo the wallet wizard.
+`--demo` is a one-shot onboarding run: it skips the chain entirely, downloads a single fixed, fully-answered sample (BAM + truth), runs your variant caller, and prints the **exact score a validator would compute** — so you confirm your Docker setup, reference data, variant caller, and platform connectivity all work end-to-end *and* see the number your config gets. Nothing is persisted on-chain and no TAO is earned. (The sample is fixed for a repeatable first run; use `--practice` below to score against any sample.)
+
+**Switching from demo to live**: `--demo` needs no wallet and writes nothing. When you're ready to mine for real, run `bash start-miner.sh` (or `bash start-miner.sh --setup`) and follow the wizard to set your wallet and register your hotkey on subnet 107.
+
+### Score your config against any sample (practice mode)
+
+`--demo` scores one fixed sample; **`--practice`** lets you score against **any** of the fully-answered chr20/chr21 samples — pick from a menu, run your config, and see the **exact score a validator would compute** — no chain, no wallet, no live round at risk:
+
+```bash
+bash start-miner.sh --practice                                   # interactive: pick a sample, see your score
+bash start-miner.sh --practice --config configs/gatk.conf        # score a specific config
+bash start-miner.sh --practice --config configs/gatk.conf --sample-id <sample-id>   # skip the picker
+```
+
+Both `--demo` and `--practice` download truth on purpose so you can iterate offline: compare configs, tune, and only deploy to a live round once you're happy with the score. Neither touches the chain or earns TAO.
 
 **MinosVM:** If using the MinosVM image, everything is pre-installed. Just SSH in and run:
 
