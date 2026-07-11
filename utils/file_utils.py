@@ -17,10 +17,10 @@ except ImportError:
     HAS_BOTO3 = False
     logger.warning("boto3 not installed - S3 features disabled")
 
-# Cloudflare R2's public bucket (used as the reference-data origin) returns 403
-# Forbidden for the default `Python-urllib/*` User-Agent as part of its bot
-# protection. Set an explicit UA on every request so the redirect from
-# api.theminos.ai/reference/* lands cleanly on the R2 origin.
+# The public reference-data origin (behind api.theminos.ai/reference/*) returns
+# 403 Forbidden for the default `Python-urllib/*` User-Agent as part of its bot
+# protection. Set an explicit UA on every request so those downloads (and the
+# presigned URLs served for BAMs) land cleanly instead of being bot-blocked.
 USER_AGENT = "minos-installer/0.1 (+https://github.com/minos-protocol/minos_subnet)"
 
 try:

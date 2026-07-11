@@ -1,38 +1,33 @@
 #!/usr/bin/env bash
-# Start or restart the miner under PM2 (wraps start-miner.sh).
+# Start or restart the LIVE miner under PM2 (wraps start-miner.sh).
 #
 # Usage:
 #   bash pm2-miner.sh          # live mode (uses .env wallet)
-#   bash pm2-miner.sh --demo   # demo sandbox (no wallet, ephemeral keypair)
 #
-# --demo here just exports MINER_DEMO=true before PM2 takes over; the
-# Python miner reads the env var at startup. To make demo mode persist
-# across restarts add MINER_DEMO=true to your .env instead.
+# PM2 is for the long-running live miner only. Demo/practice are one-shot
+# scoring tools that run once and exit — run those in the foreground
+# (`bash start-miner.sh --demo` / `--practice`), NOT under a process
+# supervisor, which would restart-loop them.
 set -euo pipefail
 cd "$(dirname "$0")"
-
-DEMO=false
 
 usage() {
   cat <<'EOF'
 Usage: bash pm2-miner.sh [OPTIONS]
 
+Runs the LIVE miner under PM2. For a one-shot scored test run without a
+wallet, use: bash start-miner.sh --demo  (or --practice).
+
 Options:
-  --demo       Run the miner under PM2 in demo mode.
   --help, -h   Show this help.
 
 Examples:
   bash pm2-miner.sh
-  bash pm2-miner.sh --demo
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --demo)
-      DEMO=true
-      shift
-      ;;
     --help|-h)
       usage
       exit 0
@@ -56,11 +51,6 @@ if ! command -v pm2 &>/dev/null; then
   echo "The installer repairs Node/npm, installs PM2, and reports any PATH fix needed." >&2
   echo "Manual fallback: npm install -g pm2" >&2
   exit 1
-fi
-
-if [[ "$DEMO" == "true" ]]; then
-  echo "Launching minos-miner under PM2 in DEMO mode (MINER_DEMO=true)"
-  export MINER_DEMO=true
 fi
 
 if pm2 describe minos-miner &>/dev/null; then

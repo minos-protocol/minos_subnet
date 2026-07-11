@@ -15,6 +15,9 @@ FLAG_WALLET_HOTKEY=""
 FLAG_MINER_TEMPLATE=""
 FLAG_STORAGE=""
 FLAG_DEMO=false
+FLAG_PRACTICE=false
+FLAG_PRACTICE_CONFIG=""
+FLAG_PRACTICE_SAMPLE_ID=""
 FLAG_SETUP_DITTO=false
 FLAG_SETUP_AI_ASSISTANT=false
 RUN_SETUP=false
@@ -28,8 +31,15 @@ show_help() {
     echo "  --wallet-hotkey <name>      Hotkey name"
     echo "  --miner-template <tool>     Variant caller: gatk, deepvariant, bcftools"
     echo "  --storage <backend>         Fetch order: hippius (default) or aws_s3 (R2/AWS first)"
-    echo "  --demo                      Run against the platform's /v2/demo/* sandbox"
-    echo "                              (no wallet needed, no chain connection, no TAO earned)"
+    echo "  --demo                      Score your config on a fixed sample and see your"
+    echo "                              result (no wallet, no chain). A one-shot onboarding"
+    echo "                              run: download a fully-answered sample, run your"
+    echo "                              config, print the exact score a validator would give."
+    echo "  --practice                  Interactive practice mode: pick a fully-answered"
+    echo "                              sample, run your config, and see your score"
+    echo "                              (no wallet needed, no chain connection)"
+    echo "  --config <file>             [--practice] Config file to score (default configs/gatk.conf)"
+    echo "  --sample-id <id>            [--practice] Skip the picker; use this sample directly"
     echo "  --setup-ditto               Subscribe Ditto to the public @minos knowledge graph"
     echo "  --setup-ai-assistant        Open the Minos assistant setup menu"
     echo "  --setup                     Re-run interactive setup wizard"
@@ -38,7 +48,9 @@ show_help() {
     echo "Examples:"
     echo "  bash start-miner.sh                                    # First run: interactive setup"
     echo "  bash start-miner.sh --wallet-name miner --miner-template deepvariant"
-    echo "  bash start-miner.sh --demo                             # Test pipeline without registering"
+    echo "  bash start-miner.sh --demo                             # One-shot: score your config on a fixed sample (no wallet)"
+    echo "  bash start-miner.sh --practice                         # Interactive: pick a sample and score your config"
+    echo "  bash start-miner.sh --practice --config configs/gatk.conf --sample-id <sample-id>"
     echo "  bash start-miner.sh --setup-ditto                      # Add optional Ditto @minos knowledge"
     echo "  bash start-miner.sh --setup-ai-assistant               # Choose assistant setup; MinosVM offers OpenClaw/Hermes or skip"
     echo "  bash start-miner.sh --setup                            # Re-run setup wizard"
@@ -63,6 +75,9 @@ while [[ $# -gt 0 ]]; do
         --miner-template) require_value "$1" "${2:-}"; FLAG_MINER_TEMPLATE="$2"; shift 2 ;;
         --storage) require_value "$1" "${2:-}"; FLAG_STORAGE="$2"; shift 2 ;;
         --demo) FLAG_DEMO=true; shift ;;
+        --practice) FLAG_PRACTICE=true; shift ;;
+        --config) require_value "$1" "${2:-}"; FLAG_PRACTICE_CONFIG="$2"; shift 2 ;;
+        --sample-id) require_value "$1" "${2:-}"; FLAG_PRACTICE_SAMPLE_ID="$2"; shift 2 ;;
         --setup-ditto) FLAG_SETUP_DITTO=true; shift ;;
         --setup-ai-assistant) FLAG_SETUP_AI_ASSISTANT=true; shift ;;
         --setup) RUN_SETUP=true; shift ;;
@@ -191,10 +206,11 @@ ensure_runtime_assets() {
     fi
 }
 
-# --- Compute demo intent from flag AND env var (must happen BEFORE .env is
-# sourced, so MINER_DEMO from the parent shell environment is honored even
-# when there is no .env yet — e.g. `MINER_DEMO=true bash start-miner.sh` or
-# `bash pm2-miner.sh --demo` which exports MINER_DEMO before invoking us).
+# --- Compute demo intent from flag AND env var (must happen BEFORE the
+# practice/demo fast-path and before .env is sourced, so MINER_DEMO from the
+# parent shell environment is honored even when there is no .env yet — e.g.
+# `MINER_DEMO=true bash start-miner.sh` exports MINER_DEMO before we source
+# .env).
 # Portable lowercase (works on macOS bash 3.2 — ${VAR,,} is bash 4+).
 # Accepted values match the Python miner's env parser (1|true|yes|on).
 MINER_DEMO_LC="$(printf '%s' "${MINER_DEMO:-}" | tr '[:upper:]' '[:lower:]')"
@@ -204,6 +220,98 @@ if [ "$FLAG_DEMO" = true ] || [ "$MINER_DEMO_FLAG" = true ]; then
 else
     DEMO_INTENT=false
 fi
+
+# --- Practice / demo fast-path ------------------------------------------------
+# Both --practice and --demo are one-shot scoring tools: download a
+# fully-answered sample, run the user's config, and print the exact score a
+# validator would compute. They need the venv, Docker, reference data, and
+# PLATFORM_URL — but no wallet, no .env, and no chain. Short-circuit here so
+# none of the wallet/setup machinery below runs. Honors an .env for
+# PLATFORM_URL / MINER_TEMPLATE if one exists, but does not require it.
+#
+# The only difference: --demo is pinned to a single fixed sample (no picker),
+# so a brand-new operator gets a score in one command. --practice is
+# interactive (or takes --sample-id / --config to skip the menus).
+if [ "$FLAG_PRACTICE" = true ] || [ "$DEMO_INTENT" = true ]; then
+    if [ -f .env ]; then
+        set -a; source .env; set +a
+    fi
+    : "${PLATFORM_URL:=https://api.theminos.ai}"
+    export PLATFORM_URL
+    # --miner-template wins over .env / the gatk default so a caller can pick
+    # the tool to score with in one shot, e.g. --demo --miner-template deepvariant.
+    if [ -n "$FLAG_MINER_TEMPLATE" ]; then
+        case "$FLAG_MINER_TEMPLATE" in
+            gatk|deepvariant|bcftools) MINER_TEMPLATE="$FLAG_MINER_TEMPLATE" ;;
+            *)
+                echo -e "${RED}invalid --miner-template '$FLAG_MINER_TEMPLATE'. Choose gatk, deepvariant, or bcftools.${NC}"
+                exit 1
+                ;;
+        esac
+    fi
+    export MINER_TEMPLATE="${MINER_TEMPLATE:-gatk}"
+
+    # --demo is pinned to a chr20 sample, so on a fresh box it only needs the
+    # chr20 reference. Signal demo scope to setup.py (via ensure_runtime_assets)
+    # so it fetches chr20 (~60 MB) instead of the full validator superset. Only
+    # for --demo — --practice can pick a chr21 sample and needs the wider set.
+    if [ "$DEMO_INTENT" = true ] && [ "$FLAG_PRACTICE" != true ]; then
+        export MINER_DEMO=true
+    fi
+
+    ensure_runtime_assets
+
+    # Scoring uses hap.py/vcfeval, which needs the RTG SDF — a validator-only
+    # asset the normal miner data set omits. Fetch it directly for just the
+    # sample chromosomes (chr20/chr21) — ~50 MB total, vs the ~5 GB
+    # all-chromosome validator superset. The SDF files are public.
+    REF_BASE="${REF_S3_BASE:-https://api.theminos.ai/reference}"
+    SDF_FILES="done mainIndex nameIndex0 namedata0 namepointer0 progress seqdata0 seqpointer0 sequenceIndex0 summary.txt"
+    for chrom in chr20 chr21; do
+        sdf_dir="datasets/reference/$chrom/$chrom.sdf"
+        if [ -f "$sdf_dir/seqdata0" ]; then
+            continue
+        fi
+        echo -e "${YELLOW}Fetching RTG SDF for $chrom (needed to score)...${NC}"
+        mkdir -p "$sdf_dir"
+        for f in $SDF_FILES; do
+            if ! curl -fsSL "$REF_BASE/$chrom/$chrom.sdf/$f" -o "$sdf_dir/$f"; then
+                echo -e "${RED}Could not download SDF file $chrom/$f. Scoring will fail.${NC}"
+                rm -rf "$sdf_dir"
+                exit 1
+            fi
+        done
+    done
+
+    PRACTICE_ARGS=(--practice)
+    if [ "$DEMO_INTENT" = true ]; then
+        # --demo: one-shot score on a single fixed sample (no picker). The
+        # sample id is env-overridable so ops can rotate it without a code
+        # change; the default is a chr20 sample from the practice set.
+        DEMO_SAMPLE_ID="${DEMO_SAMPLE_ID:-d7b99f4a-061c-4202-8b12-2c1425bd4974}"
+        PRACTICE_ARGS+=(--sample_id "$DEMO_SAMPLE_ID")
+        PRACTICE_ARGS+=(--config "${FLAG_PRACTICE_CONFIG:-configs/${MINER_TEMPLATE}.conf}")
+        echo -e "${GREEN}Starting Minos Miner (${MINER_TEMPLATE}) in DEMO MODE...${NC}"
+        echo -e "${GREEN}  - no wallet required, no chain connection${NC}"
+        echo -e "${GREEN}  - scores your config on a fixed sample so you can verify${NC}"
+        echo -e "${GREEN}    your pipeline works and see the number a validator gives${NC}"
+    else
+        if [ -n "$FLAG_PRACTICE_CONFIG" ]; then
+            PRACTICE_ARGS+=(--config "$FLAG_PRACTICE_CONFIG")
+        fi
+        if [ -n "$FLAG_PRACTICE_SAMPLE_ID" ]; then
+            PRACTICE_ARGS+=(--sample_id "$FLAG_PRACTICE_SAMPLE_ID")
+        fi
+        echo -e "${GREEN}Starting Minos Miner (${MINER_TEMPLATE}) in PRACTICE MODE...${NC}"
+        echo -e "${GREEN}  - no wallet required, no chain connection${NC}"
+        echo -e "${GREEN}  - pick a sample, run your config, see your score${NC}"
+    fi
+    exec python -m neurons.miner "${PRACTICE_ARGS[@]}"
+fi
+
+# Past this point demo intent has already been handled (the fast-path above
+# exec's for any --demo / MINER_DEMO invocation), so DEMO_INTENT is false here
+# and the block below is the normal wallet/chain setup path.
 
 # --- Load existing .env defaults (if any) ---
 
@@ -335,8 +443,8 @@ fi
 # --- Interactive setup (first run or --setup) ---
 # Demo-mode launches never need this — the wallet wizard would prompt
 # for a hotkey the demo miner won't use. Skip when EITHER --demo is set
-# or MINER_DEMO is truthy in the env (covers pm2-miner.sh --demo and
-# direct `MINER_DEMO=true bash start-miner.sh` invocations).
+# or MINER_DEMO is truthy in the env. (In practice demo intent is already
+# handled by the fast-path far above, which exec's; this is belt-and-braces.)
 
 if { [ ! -f .env ] || [ "$RUN_SETUP" = true ]; } && [ "$DEMO_INTENT" = false ]; then
     if [ ! -t 0 ] || [ ! -t 1 ]; then
@@ -504,12 +612,17 @@ EOF
     set -a; source .env; set +a
 fi
 
+# Demo intent may only become visible AFTER .env is sourced (a persisted
+# MINER_DEMO=true with no --demo flag and nothing exported in the shell). The
+# top-of-script fast-path runs before .env is read, so re-check here: if demo
+# is set, re-exec through the fast-path with MINER_DEMO exported so it takes
+# the demo scoring path instead of falling through to LIVE mining below (which
+# would attempt the chain with a placeholder wallet).
 MINER_DEMO_LC="$(printf '%s' "${MINER_DEMO:-}" | tr '[:upper:]' '[:lower:]')"
 case "$MINER_DEMO_LC" in 1|true|yes|on) MINER_DEMO_FLAG=true ;; *) MINER_DEMO_FLAG=false ;; esac
-if [ "$FLAG_DEMO" = true ] || [ "$MINER_DEMO_FLAG" = true ]; then
-    DEMO_INTENT=true
-else
-    DEMO_INTENT=false
+if [ "$FLAG_DEMO" != true ] && [ "$MINER_DEMO_FLAG" = true ]; then
+    export MINER_DEMO
+    exec bash "$0" --demo
 fi
 
 if [ -f .env ] && [ -z "${MINER_TEMPLATE:-}" ]; then
@@ -520,22 +633,11 @@ fi
 ensure_runtime_assets
 maybe_prompt_ai_assistant
 
-# Portable lowercase (works on macOS bash 3.2 — ${VAR,,} is bash 4+).
-# Accepted values match the Python miner's env parser (1|true|yes|on) so
-# both layers agree on what flips demo mode.
-MINER_DEMO_LC="$(printf '%s' "${MINER_DEMO:-}" | tr '[:upper:]' '[:lower:]')"
-case "$MINER_DEMO_LC" in 1|true|yes|on) MINER_DEMO_FLAG=true ;; *) MINER_DEMO_FLAG=false ;; esac
-if [ "$FLAG_DEMO" = true ] || [ "$MINER_DEMO_FLAG" = true ]; then
-    echo -e "${YELLOW}Starting Minos Miner (${MINER_TEMPLATE:-gatk}) in DEMO MODE...${NC}"
-    echo -e "${YELLOW}  - no wallet required, no chain connection${NC}"
-    echo -e "${YELLOW}  - routes to platform /v2/demo/* sandbox${NC}"
-    echo -e "${YELLOW}  - submissions are accepted but not scored, no TAO earned${NC}"
-    python -m neurons.miner --demo
-else
-    echo -e "${GREEN}Starting Minos Miner (${MINER_TEMPLATE:-gatk})...${NC}"
-    python -m neurons.miner \
-        --netuid ${NETUID:-107} \
-        --subtensor.network finney \
-        --wallet.name ${WALLET_NAME:-default} \
-        --wallet.hotkey ${WALLET_HOTKEY:-default}
-fi
+# Live mining. (Demo intent — --demo / MINER_DEMO — is handled by the
+# practice/demo scoring fast-path above, which exec's and never returns here.)
+echo -e "${GREEN}Starting Minos Miner (${MINER_TEMPLATE:-gatk})...${NC}"
+python -m neurons.miner \
+    --netuid ${NETUID:-107} \
+    --subtensor.network finney \
+    --wallet.name ${WALLET_NAME:-default} \
+    --wallet.hotkey ${WALLET_HOTKEY:-default}

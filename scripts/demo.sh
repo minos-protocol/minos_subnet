@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # Minos Subnet 107 — Interactive Demo
-# Runs a single demo round end-to-end so a new miner can verify
-# that their variant-calling pipeline works before going live.
+# Runs a one-shot demo end-to-end so a new miner can verify their
+# variant-calling pipeline works — and see the score it earns — before
+# going live.
 #
 # What happens:
 #   1. Runs verify.sh to check prerequisites (Docker, Python, etc.)
 #   2. Ensures a .env file exists (creates a temporary demo one if not)
-#   3. Starts the miner, which connects to the platform in demo mode
-#   4. The miner downloads a BAM file, runs your chosen variant caller,
-#      and attempts to submit — the platform responds with "demo complete"
-#   5. This script inspects the output VCF and prints a summary
+#   3. Starts the miner with --demo (no wallet, no chain)
+#   4. The miner downloads a fixed, fully-answered sample (BAM + truth),
+#      runs your chosen variant caller, and self-scores it
+#   5. It prints the exact score a validator would give your config
 #
 # Usage: bash scripts/demo.sh [--template gatk|deepvariant|bcftools]
 #        Run from the minos_subnet/ directory.
@@ -48,7 +49,7 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             echo "Usage: bash scripts/demo.sh [--template gatk|deepvariant|bcftools]"
             echo ""
-            echo "Runs a single demo round to verify your miner setup."
+            echo "Runs a one-shot demo that scores your config to verify your miner setup."
             echo "If --template is not specified, the value from .env is used (default: gatk)."
             exit 0
             ;;
@@ -80,15 +81,15 @@ echo -e "${BOLD}================================================================
 echo -e "${BOLD}  Minos SN107 — Demo Round${NC}"
 echo -e "${BOLD}================================================================${NC}"
 echo ""
-echo -e "  This script runs a ${CYAN}single demo round${NC} end-to-end so you can"
-echo -e "  confirm that your miner setup works before going live."
+echo -e "  This script runs a ${CYAN}one-shot demo${NC} end-to-end so you can confirm"
+echo -e "  your miner setup works — and see its score — before going live."
 echo ""
 echo -e "  What will happen:"
 echo -e "    1. Verify prerequisites (Docker, Python packages)"
 echo -e "    2. Start the miner with ${CYAN}--demo${NC} — no wallet needed, no chain conn."
-echo -e "    3. The miner connects to ${CYAN}https://api.theminos.ai/v2/demo/*${NC}"
-echo -e "    4. It downloads a sandbox BAM and runs your variant caller"
-echo -e "    5. Results are displayed here with a score estimate"
+echo -e "    3. It downloads a fixed, fully-answered sample (BAM + truth)"
+echo -e "    4. It runs your variant caller on the sample"
+echo -e "    5. It prints the exact score a validator would give your config"
 echo ""
 echo -e "  ${YELLOW}Estimated time: 3-30 minutes${NC} (depends on your machine and"
 echo -e "  the variant caller — bcftools is fastest, DeepVariant slowest)"
@@ -99,7 +100,7 @@ echo ""
 # ---------------------------------------------------------------------------
 # Step 1: Run verify.sh
 # ---------------------------------------------------------------------------
-echo -e "${BOLD}--- Step 1/4: Verifying prerequisites ---${NC}"
+echo -e "${BOLD}--- Step 1/3: Verifying prerequisites ---${NC}"
 echo ""
 
 if [[ ! -f "$SCRIPT_DIR/verify.sh" ]]; then
@@ -120,7 +121,7 @@ echo ""
 # ---------------------------------------------------------------------------
 # Step 2: Ensure .env exists
 # ---------------------------------------------------------------------------
-echo -e "${BOLD}--- Step 2/4: Checking configuration ---${NC}"
+echo -e "${BOLD}--- Step 2/3: Checking configuration ---${NC}"
 echo ""
 
 CREATED_TEMP_ENV=false
@@ -186,217 +187,38 @@ trap cleanup EXIT
 # ---------------------------------------------------------------------------
 # Step 3: Run the miner and capture output
 # ---------------------------------------------------------------------------
-echo -e "${BOLD}--- Step 3/4: Running demo round ---${NC}"
+echo -e "${BOLD}--- Step 3/3: Scoring your config ---${NC}"
 echo ""
 echo -e "  Starting miner with template ${CYAN}$ACTIVE_TEMPLATE${NC}..."
-echo -e "  The miner will poll the platform for the demo round, download"
-echo -e "  a BAM file, and run variant calling inside Docker."
+echo -e "  The miner will download a fixed, fully-answered sample, run variant"
+echo -e "  calling inside Docker, and self-score the result against truth."
 echo ""
 echo -e "  ${YELLOW}You will see miner logs below. This may take several minutes.${NC}"
-echo -e "  ${YELLOW}The demo ends automatically after one round completes.${NC}"
+echo -e "  ${YELLOW}It ends automatically once your score is printed.${NC}"
 echo ""
 echo -e "  ---- miner output begin ----"
 echo ""
 
-# We run the miner and watch for the demo-complete signal.
-# The miner runs forever in a polling loop, so we need to kill it
-# once we see it has completed the demo round.
-#
-# Strategy: run the miner in background, tail its output, and kill it
-# once we see the "DEMO COMPLETE" or "demo mode" banner, or after
-# a timeout.
-
-DEMO_LOG="$PROJECT_DIR/.demo_output.log"
-DEMO_TIMEOUT=1800  # 30 minutes max
-DEMO_PID=""
-
-# Clean up any previous log
-rm -f "$DEMO_LOG"
-
-# Resolve venv Python
-PYTHON="python3"
-if [[ -f "$PROJECT_DIR/.venv/bin/python3" ]]; then
-    PYTHON="$PROJECT_DIR/.venv/bin/python3"
-fi
-
-# Run the miner in the background, capturing output. --demo routes the
-# client to /v2/demo/* (no wallet required, no chain connection) so the
-# script works even if the user hasn't run setup.py / has no registered
-# hotkey. Demo path is sandboxed: no submissions are persisted, no TAO
-# is earned — purely a pipeline-test loop.
+# Delegate to start-miner.sh --demo. That is the single place that prepares
+# everything scoring needs — Docker images, the chr20 reference, AND the RTG
+# SDF (required by vcfeval) — before exec'ing the one-shot scorer. Running the
+# miner directly here would skip the SDF fetch and fail on a fresh box.
+DEMO_RC=0
 (
     cd "$PROJECT_DIR"
-    $PYTHON -m neurons.miner --demo 2>&1
-) > "$DEMO_LOG" 2>&1 &
-DEMO_PID=$!
-
-# Also clean up child process on exit
-cleanup_all() {
-    if [[ -n "$DEMO_PID" ]] && kill -0 "$DEMO_PID" 2>/dev/null; then
-        kill "$DEMO_PID" 2>/dev/null || true
-        wait "$DEMO_PID" 2>/dev/null || true
-    fi
-    rm -f "$DEMO_LOG"
-    cleanup
-}
-trap cleanup_all EXIT
-
-# Follow the log in real time, watching for completion signals
-SECONDS_WAITED=0
-DEMO_COMPLETE=false
-LAST_LINE=0
-
-while [[ $SECONDS_WAITED -lt $DEMO_TIMEOUT ]]; do
-    # Check if miner process is still running
-    if ! kill -0 "$DEMO_PID" 2>/dev/null; then
-        # Process ended — print remaining output
-        if [[ -f "$DEMO_LOG" ]]; then
-            tail -n +$((LAST_LINE + 1)) "$DEMO_LOG" 2>/dev/null || true
-        fi
-        break
-    fi
-
-    # Print new lines from the log
-    if [[ -f "$DEMO_LOG" ]]; then
-        NEW_LINES=$(wc -l < "$DEMO_LOG" 2>/dev/null || echo 0)
-        if [[ "$NEW_LINES" -gt "$LAST_LINE" ]]; then
-            tail -n +$((LAST_LINE + 1)) "$DEMO_LOG" | head -n $((NEW_LINES - LAST_LINE))
-            LAST_LINE=$NEW_LINES
-        fi
-
-        # Check for demo completion signals
-        if grep -q "DEMO COMPLETE" "$DEMO_LOG" 2>/dev/null; then
-            DEMO_COMPLETE=true
-            sleep 2  # Let the miner finish printing
-            # Print any final lines
-            NEW_LINES=$(wc -l < "$DEMO_LOG" 2>/dev/null || echo 0)
-            if [[ "$NEW_LINES" -gt "$LAST_LINE" ]]; then
-                tail -n +$((LAST_LINE + 1)) "$DEMO_LOG" | head -n $((NEW_LINES - LAST_LINE))
-            fi
-            break
-        fi
-
-        # Also check for errors that indicate the round was processed
-        if grep -q "Total rounds participated: 1" "$DEMO_LOG" 2>/dev/null; then
-            DEMO_COMPLETE=true
-            sleep 2
-            NEW_LINES=$(wc -l < "$DEMO_LOG" 2>/dev/null || echo 0)
-            if [[ "$NEW_LINES" -gt "$LAST_LINE" ]]; then
-                tail -n +$((LAST_LINE + 1)) "$DEMO_LOG" | head -n $((NEW_LINES - LAST_LINE))
-            fi
-            break
-        fi
-    fi
-
-    sleep 2
-    SECONDS_WAITED=$((SECONDS_WAITED + 2))
-done
+    bash start-miner.sh --demo
+) || DEMO_RC=$?
 
 echo ""
 echo -e "  ---- miner output end ----"
 echo ""
 
-# Kill the miner if it is still running
-if [[ -n "$DEMO_PID" ]] && kill -0 "$DEMO_PID" 2>/dev/null; then
-    kill "$DEMO_PID" 2>/dev/null || true
-    wait "$DEMO_PID" 2>/dev/null || true
-fi
-
-# Check what happened
-if [[ $SECONDS_WAITED -ge $DEMO_TIMEOUT ]]; then
-    echo -e "  ${RED}[TIMEOUT]${NC} Demo did not complete within $((DEMO_TIMEOUT / 60)) minutes."
-    echo -e "  This might mean:"
-    echo -e "    - No demo round is currently active on the platform"
-    echo -e "    - Docker is slow to start on your machine"
-    echo -e "    - The variant caller hit an error"
-    echo ""
-    echo -e "  Check the full log: ${CYAN}$DEMO_LOG${NC}"
-    echo -e "  Or try running the miner directly:"
-    echo -e "    cd $PROJECT_DIR && bash start-miner.sh"
+if [[ $DEMO_RC -ne 0 ]]; then
+    echo -e "  ${RED}[FAIL]${NC} Demo run exited with an error (code $DEMO_RC)."
+    echo -e "  Check the output above for the cause (Docker, reference data, or"
+    echo -e "  variant-caller error). You can retry with:"
+    echo -e "    cd $PROJECT_DIR && bash start-miner.sh --demo"
     exit 1
-fi
-
-# ---------------------------------------------------------------------------
-# Step 4: Inspect results
-# ---------------------------------------------------------------------------
-echo -e "${BOLD}--- Step 4/4: Results summary ---${NC}"
-echo ""
-
-# Find the most recent output VCF in the working directory
-VCF_FILE=""
-ROUND_DIR=""
-
-# The miner writes output to output/<round_id>/output.vcf.gz
-if [[ -d "$PROJECT_DIR/output" ]]; then
-    # Find the newest output.vcf.gz
-    VCF_FILE=$(find "$PROJECT_DIR/output" -name "output.vcf.gz" -type f -newer "$DEMO_LOG" 2>/dev/null | head -1 || true)
-    if [[ -z "$VCF_FILE" ]]; then
-        # Fallback: find any output.vcf.gz, sorted by time
-        VCF_FILE=$(find "$PROJECT_DIR/output" -name "output.vcf.gz" -type f 2>/dev/null | xargs ls -t 2>/dev/null | head -1 || true)
-    fi
-fi
-
-if [[ -n "$VCF_FILE" && -f "$VCF_FILE" ]]; then
-    ROUND_DIR="$(dirname "$VCF_FILE")"
-    VCF_SIZE=$(du -h "$VCF_FILE" | cut -f1)
-
-    echo -e "  ${GREEN}[OK]${NC} Output VCF found: $VCF_FILE ($VCF_SIZE)"
-    echo ""
-
-    # Count variants
-    VARIANT_COUNT=0
-    SNP_COUNT=0
-    INDEL_COUNT=0
-
-    if command -v zcat &>/dev/null || command -v gzcat &>/dev/null; then
-        # macOS uses gzcat, Linux uses zcat
-        ZCAT="zcat"
-        if [[ "$(uname)" == "Darwin" ]]; then
-            ZCAT="gzcat"
-        fi
-
-        VARIANT_COUNT=$($ZCAT "$VCF_FILE" 2>/dev/null | grep -v "^#" | wc -l | tr -d ' ' || echo 0)
-
-        # Count SNPs vs INDELs (SNP = REF and ALT are both single chars)
-        SNP_COUNT=$($ZCAT "$VCF_FILE" 2>/dev/null | grep -v "^#" | awk 'length($4)==1 && length($5)==1' | wc -l | tr -d ' ' || echo 0)
-        INDEL_COUNT=$((VARIANT_COUNT - SNP_COUNT))
-
-        echo -e "  ${BOLD}Variant Summary:${NC}"
-        echo -e "    Total variants: ${CYAN}$VARIANT_COUNT${NC}"
-        echo -e "    SNPs:           ${CYAN}$SNP_COUNT${NC}"
-        echo -e "    INDELs:         ${CYAN}$INDEL_COUNT${NC}"
-        echo ""
-
-        # Show first 10 data lines
-        echo -e "  ${BOLD}First 10 variant calls:${NC}"
-        echo ""
-        $ZCAT "$VCF_FILE" 2>/dev/null | grep -v "^#" | head -10 | while IFS=$'\t' read -r CHROM POS ID REF ALT QUAL FILTER REST; do
-            # Determine variant type
-            if [[ ${#REF} -eq 1 && ${#ALT} -eq 1 ]]; then
-                VTYPE="SNP"
-            else
-                VTYPE="INDEL"
-            fi
-            printf "    %-6s %-12s %s>%s  QUAL=%-8s %s\n" "$CHROM" "$POS" "$REF" "$ALT" "$QUAL" "$VTYPE"
-        done
-        echo ""
-
-        if [[ $VARIANT_COUNT -gt 10 ]]; then
-            echo -e "    ... and $((VARIANT_COUNT - 10)) more variants"
-            echo ""
-        fi
-    else
-        echo -e "  ${YELLOW}[WARN]${NC} Cannot decompress VCF (zcat/gzcat not found)"
-        echo -e "  File exists at: $VCF_FILE"
-    fi
-else
-    if [[ "$DEMO_COMPLETE" == "true" ]]; then
-        echo -e "  ${YELLOW}[INFO]${NC} Demo round completed but no VCF file found."
-        echo -e "  The demo round may have been a connectivity-only test."
-    else
-        echo -e "  ${RED}[FAIL]${NC} No output VCF found. The variant caller may have failed."
-        echo -e "  Check the miner logs above for error messages."
-    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -466,11 +288,7 @@ echo -e "     Dashboard: ${CYAN}https://app.theminos.ai${NC}"
 echo ""
 echo -e "${BOLD}================================================================${NC}"
 
-if [[ "$DEMO_COMPLETE" == "true" ]]; then
-    echo -e "  ${GREEN}Demo completed successfully. Your miner is ready!${NC}"
-else
-    echo -e "  ${YELLOW}Demo finished (check output above for any issues).${NC}"
-fi
+echo -e "  ${GREEN}Demo completed successfully. Your miner is ready!${NC}"
 
 echo -e "${BOLD}================================================================${NC}"
 echo ""

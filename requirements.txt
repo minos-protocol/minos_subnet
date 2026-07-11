@@ -1,6 +1,9 @@
+# Install the CPU build of PyTorch by default (much smaller than the CUDA
+# build). For GPU, install torch from pytorch.org first, then run this file.
+--extra-index-url https://download.pytorch.org/whl/cpu
 bittensor>=9.12.2
 bittensor-cli>=9.5.0
-torch>=2.0.0
+torch>=2.0.0,<2.7.0
 numpy>=1.24.0
 pydantic>=2.0.0
 python-dotenv>=1.0.0

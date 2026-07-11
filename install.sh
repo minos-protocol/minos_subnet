@@ -606,7 +606,7 @@ install_deps() {
         exit 1
     fi
 
-    info "Installing Python dependencies (includes PyTorch ~2 GB; this may take 5-15 minutes)."
+    info "Installing Python dependencies (includes the CPU build of PyTorch ~200 MB; a few minutes)."
     if ! run_quiet "Upgrading pip" "/tmp/minos-pip-upgrade.log" pip install --upgrade pip -q; then
         fail "pip upgrade failed. Check /tmp/minos-pip-upgrade.log for details."
         exit 1

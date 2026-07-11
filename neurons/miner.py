@@ -4,6 +4,7 @@ import sys
 import os
 import gzip
 import json
+import re
 import secrets
 import shutil
 import traceback
@@ -111,7 +112,7 @@ class Miner:
                 )
                 bt.logging.info(
                     "To test your pipeline without registering, restart with --demo "
-                    "(uses an ephemeral keypair against the platform's sandboxed demo round)."
+                    "(a walletless one-shot that scores your config on a fixed sample)."
                 )
 
         self.setup_variant_caller()
@@ -207,11 +208,69 @@ class Miner:
             action="store_true",
             default=False,
             help=(
-                "Run in demo mode: skips chain (no subtensor/metagraph), "
-                "uses an ephemeral keypair, and routes to the platform's "
-                "/v2/demo/* sandbox so a new operator can prove their "
-                "pipeline works without registering on the subnet."
+                "One-shot onboarding self-score: no chain, no wallet. Downloads "
+                "a single fixed, fully-answered sample (BAM + truth), runs your "
+                "config, and prints the exact score a validator would compute — "
+                "so a new operator can verify their pipeline and see its score "
+                "without registering. Use --practice to score against any sample."
             ),
+        )
+        # --- Offline self-scoring (no chain, no platform) ---
+        # Runs the miner's config against a local BAM + truth and prints the
+        # EXACT combined_final a validator would compute. Requires only Docker
+        # (GATK + hap.py) and a local reference. Handled in main() before the
+        # full Miner (wallet/chain/platform) is ever constructed.
+        parser.add_argument(
+            "--score",
+            action="store_true",
+            default=False,
+            help=(
+                "Offline self-score: run your config against a local BAM + "
+                "truth VCF and print the exact validator score. No chain, no "
+                "platform, no wallet. Use with --bam/--truth/--region "
+                "(+optional --mutations/--config/--reference)."
+            ),
+        )
+        parser.add_argument(
+            "--practice",
+            action="store_true",
+            default=False,
+            help=(
+                "Interactive practice mode: pick a fully-answered chr20/chr21 "
+                "sample from the platform, download its BAM + truth + "
+                "mutations (reused if already downloaded), run your config, and "
+                "self-score with the validator scorer. No chain. Optionally "
+                "pass --config to score immediately, or --sample_id to skip "
+                "the picker."
+            ),
+        )
+        parser.add_argument(
+            "--sample_id", type=str, default=None,
+            help="[--practice] Skip the interactive picker and use this sample id directly.",
+        )
+        parser.add_argument("--bam", type=str, default=None, help="[--score] Path to input BAM.")
+        parser.add_argument("--truth", type=str, default=None, help="[--score] Path to truth VCF (.vcf.gz).")
+        parser.add_argument(
+            "--mutations", type=str, default=None,
+            help="[--score] Path to mutations-only VCF (.vcf.gz). Strongly recommended — the validator scores with it.",
+        )
+        parser.add_argument("--region", type=str, default=None, help="[--score] Region, e.g. chr20:45000000-50000000.")
+        parser.add_argument(
+            "--config", type=str, default=None,
+            help="[--score] Config file to score. A GATK .conf (same format as configs/gatk.conf) or a JSON "
+                 "of gatk_options. Defaults to configs/<tool>.conf.",
+        )
+        parser.add_argument(
+            "--reference", type=str, default=None,
+            help="[--score] Reference FASTA. Defaults to datasets/reference/<chrom>/<chrom>.fa.",
+        )
+        parser.add_argument(
+            "--confident_bed", type=str, default=None,
+            help="[--score] Optional confident-regions BED (matches the validator's confident_bed).",
+        )
+        parser.add_argument(
+            "--reference_sdf", type=str, default=None,
+            help="[--score] Optional RTG SDF for the reference (speeds up hap.py; built on the fly if omitted).",
         )
 
         bt.subtensor.add_args(parser)
@@ -423,6 +482,12 @@ class Miner:
             bam_url, bam_url_backup = bam_url_s3, bam_url_hip
             bam_index_url, bam_index_url_backup = bam_index_url_s3, bam_index_url_hip
 
+        # Never leave the primary slot None when only the backup is set:
+        # download_file_with_fallback dereferences the primary URL before its
+        # try/except, so a None primary would raise instead of falling back.
+        bam_url, bam_url_backup = _coalesce_urls(bam_url, bam_url_backup)
+        bam_index_url, bam_index_url_backup = _coalesce_urls(bam_index_url, bam_index_url_backup)
+
         if not bam_url and not bam_url_backup:
             bt.logging.error("Round has no BAM URL - cannot process")
             return None
@@ -451,11 +516,13 @@ class Miner:
         bam_index = Path(str(bam_path) + ".bai")
         if bam_index.exists():
             bam_index.unlink()
-        if bam_index_url or bam_index_url_backup:
+        if bam_index_url:
+            # _coalesce_urls above guarantees bam_index_url is set whenever any
+            # index URL (primary or backup) exists, so the fallback covers both.
             print(f"   Downloading BAM index...", flush=True)
             index_downloaded = download_file_with_fallback(
                 bam_index_url, bam_index, backup_url=bam_index_url_backup, show_progress=False
-            ) if bam_index_url else download_file_verified(bam_index_url_backup, bam_index, show_progress=False)
+            )
             if index_downloaded and index_downloaded.exists():
                 print(f"   BAM index downloaded", flush=True)
             else:
@@ -581,6 +648,12 @@ class Miner:
                 print(f"", flush=True)
                 print(f"   Submission was accepted by the demo sandbox — nothing", flush=True)
                 print(f"   is persisted, no score is computed, no TAO is earned.", flush=True)
+                print(f"", flush=True)
+                print(f"   To actually SCORE and improve your config, use practice", flush=True)
+                print(f"   mode — it serves fully-answered chr20/chr21 samples and", flush=True)
+                print(f"   scores your config with the exact validator scorer:", flush=True)
+                print(f"     python neurons/miner.py --practice --config configs/{self.variant_caller}.conf", flush=True)
+                print(f"", flush=True)
                 print(f"   Register your hotkey on subnet 107 to participate in", flush=True)
                 print(f"   live rounds:", flush=True)
                 print(f"     btcli subnets register --netuid 107 \\", flush=True)
@@ -744,9 +817,966 @@ class Miner:
         asyncio.run(self.run_async())
 
 
+# ---------------------------------------------------------------------------
+# Practice-mode UI helpers. Match the setup wizard's look (rich + questionary)
+# when the terminal is interactive, and degrade gracefully to plain text when
+# it isn't (piped input, non-TTY, or the libs are missing) so scripted runs
+# and --sample_id still work.
+# ---------------------------------------------------------------------------
+class _PracticeUI:
+    def __init__(self):
+        self.console = None
+        self.questionary = None
+        self.Panel = self.Table = self.Text = self.Align = None
+        # Interactive only when stdin AND stdout are real TTYs.
+        self.interactive = sys.stdin.isatty() and sys.stdout.isatty()
+        try:
+            from rich.console import Console
+            from rich.panel import Panel
+            from rich.table import Table
+            from rich.text import Text
+            from rich.align import Align
+            self.console = Console()
+            self.Panel, self.Table, self.Text, self.Align = Panel, Table, Text, Align
+        except Exception:
+            pass
+        try:
+            import questionary
+            from questionary import Style as QStyle
+            self.questionary = questionary
+            self._qstyle = QStyle([
+                ("qmark", "fg:cyan bold"),
+                ("question", "bold"),
+                ("answer", "fg:green bold"),
+                ("pointer", "fg:cyan bold"),
+                ("highlighted", "fg:cyan bold"),
+                ("selected", "fg:green"),
+            ])
+        except Exception:
+            self._qstyle = None
+
+    def banner(self, tool):
+        if self.console and self.Panel:
+            self.console.print()
+            self.console.print(self.Panel(
+                "[bold cyan]MINOS PRACTICE MODE[/]\n"
+                "[dim]Run your config on fully-answered samples and see the exact "
+                "score a validator would give.[/]\n"
+                f"[dim]Tool:[/] [bold green]{tool}[/]   [dim]•  no wallet, no chain[/]",
+                border_style="cyan", padding=(1, 2),
+            ))
+        else:
+            print(f"\n{'='*60}\n   PRACTICE MODE  ({tool})\n{'='*60}", flush=True)
+
+    async def select(self, message, choices, plain_prompt):
+        """choices: list of (label, value). Returns a value, or None to quit.
+        plain_prompt: fn(choices)->value for the non-interactive fallback.
+
+        Async because run_practice runs inside an event loop — questionary's
+        blocking .ask() calls asyncio.run() internally, which raises "cannot be
+        called from a running event loop". .ask_async() awaits on the loop we
+        already have.
+        """
+        if self.interactive and self.questionary:
+            qchoices = [self.questionary.Choice(label, value=val) for label, val in choices]
+            ans = await self.questionary.select(message, choices=qchoices, style=self._qstyle).ask_async()
+            return ans  # None if the user hit Ctrl-C / esc
+        return plain_prompt(choices)
+
+    async def confirm_tool(self, default_tool):
+        if self.interactive and self.questionary:
+            ans = await self.questionary.select(
+                f"Which tool should score your config?",
+                choices=[
+                    self.questionary.Choice(f"{default_tool}  (from your .env — recommended)", value=default_tool),
+                    *[self.questionary.Choice(t, value=t)
+                      for t in ("gatk", "deepvariant", "bcftools") if t != default_tool],
+                ],
+                style=self._qstyle,
+            ).ask_async()
+            return ans or default_tool
+        return default_tool
+
+    def info(self, msg):
+        if self.console:
+            self.console.print(f"   {msg}")
+        else:
+            print(f"   {msg}", flush=True)
+
+    def sample_table(self, samples, allow_all):
+        if self.console and self.Table:
+            t = self.Table(show_header=True, header_style="bold cyan", border_style="cyan", padding=(0, 1))
+            t.add_column("#", justify="right", style="bold")
+            t.add_column("Sample", style="bold white")
+            t.add_column("Chr")
+            t.add_column("Region")
+            t.add_column("Mutations", justify="right")
+            for i, s in enumerate(samples, 1):
+                t.add_row(str(i), s.get("sample_id", ""), s.get("chromosome", ""),
+                          s.get("region", ""), str(s.get("num_mutations", "")))
+            self.console.print(self.Panel(t, title="Practice samples", border_style="cyan", padding=(0, 1)))
+        else:
+            print("\n   Available practice samples:", flush=True)
+            for i, s in enumerate(samples, 1):
+                print(f"     {i}. {s.get('sample_id')}  [{s.get('chromosome')} {s.get('region')}]  "
+                      f"mutations={s.get('num_mutations')}", flush=True)
+            if allow_all:
+                print(f"     a. ALL — download every sample", flush=True)
+
+    def result_panel(self, metrics, advanced_score, combined_final, would_record, zero_input):
+        if not (self.console and self.Panel and self.Table):
+            # Plain fallback
+            print(f"\n{'='*60}\n   RESULT\n{'='*60}", flush=True)
+            print(f"   SNP    F1={metrics.get('f1_snp', 0):.4f}  recall={metrics.get('recall_snp', 0):.4f}  "
+                  f"prec={metrics.get('precision_snp', 0):.4f}  FP={metrics.get('fp_snp', 0)}", flush=True)
+            print(f"   INDEL  F1={metrics.get('f1_indel', 0):.4f}  recall={metrics.get('recall_indel', 0):.4f}  "
+                  f"prec={metrics.get('precision_indel', 0):.4f}  FP={metrics.get('fp_indel', 0)}", flush=True)
+            print(f"\n   ADVANCED SCORE:   {advanced_score:.4f} / 100", flush=True)
+            if would_record:
+                print(f"   COMBINED_FINAL:   {combined_final:.6f}   <-- what a validator records", flush=True)
+            elif zero_input:
+                print(f"   COMBINED_FINAL:   {combined_final:.6f}   <-- ZERO-INPUT: a validator discards this "
+                      f"(called nothing on-target).", flush=True)
+            else:
+                print(f"   COMBINED_FINAL:   {combined_final:.6f}   <-- out of range; a validator discards this.",
+                      flush=True)
+            print(f"{'='*60}\n", flush=True)
+            return
+
+        # Rich metrics table
+        t = self.Table(show_header=True, header_style="bold cyan", box=None, padding=(0, 2))
+        t.add_column("Type", style="bold white")
+        t.add_column("F1", justify="right")
+        t.add_column("Recall", justify="right")
+        t.add_column("Precision", justify="right")
+        t.add_column("FP", justify="right")
+        for label, k in (("SNP", "snp"), ("INDEL", "indel")):
+            f1 = metrics.get(f"f1_{k}", 0)
+            f1c = "green" if f1 >= 0.95 else "yellow" if f1 >= 0.80 else "red"
+            t.add_row(label, f"[{f1c}]{f1:.4f}[/]",
+                      f"{metrics.get(f'recall_{k}', 0):.4f}",
+                      f"{metrics.get(f'precision_{k}', 0):.4f}",
+                      str(metrics.get(f"fp_{k}", 0)))
+
+        # Big score line, color-banded
+        band = "green" if combined_final >= 0.90 else "yellow" if combined_final >= 0.70 else "red"
+        if would_record:
+            verdict = f"[bold {band}]COMBINED_FINAL  {combined_final:.6f}[/]\n[dim]This is exactly what a validator would record.[/]"
+            border = band
+        elif zero_input:
+            verdict = (f"[bold red]COMBINED_FINAL  {combined_final:.6f}[/]\n"
+                       "[red]ZERO-INPUT — a validator DISCARDS this.[/] "
+                       "[dim]Your config called nothing on-target; it earns no on-chain score.[/]")
+            border = "red"
+        else:
+            verdict = (f"[bold red]COMBINED_FINAL  {combined_final:.6f}[/]\n"
+                       "[red]Out of range — a validator discards this.[/]")
+            border = "red"
+
+        from rich.console import Group
+        body = Group(
+            t,
+            self.Text(""),
+            self.console.render_str(f"[dim]Advanced score:[/] [bold]{advanced_score:.4f}[/] / 100"),
+            self.Text(""),
+            self.console.render_str(verdict),
+        )
+        self.console.print()
+        self.console.print(self.Panel(body, title="Your score", border_style=border, padding=(1, 2)))
+        self.console.print()
+
+
+# Single shared UI instance for the process.
+_UI = _PracticeUI()
+
+
+def _load_config_for_scoring(config_path: Optional[str], tool: str) -> Dict[str, Any]:
+    """Load a config file into the {tool}_options dict the templates expect.
+
+    Accepts either a GATK-style `.conf` (key=value lines, same format as
+    configs/gatk.conf) or a JSON file. JSON may be either a bare options dict
+    ({"min_base_quality_score": 10, ...}) or a full config already wrapping
+    "<tool>_options". Falls back to configs/<tool>.conf when no path is given —
+    exactly the source the live miner submits from.
+    """
+    opts_key = f"{tool}_options"
+
+    if not config_path:
+        # Same path _get_tool_config() uses for a live submission.
+        return {opts_key: extract_tool_options(tool)}
+
+    p = Path(config_path)
+    if not p.exists():
+        raise FileNotFoundError(f"Config file not found: {p}")
+
+    text = p.read_text()
+    # Try JSON first (a leading brace is unambiguous vs. key=value .conf).
+    stripped = text.lstrip()
+    if stripped.startswith("{"):
+        data = json.loads(text)
+        if opts_key in data and isinstance(data[opts_key], dict):
+            return {opts_key: data[opts_key]}
+        # Bare options dict — strip any non-option scalars defensively.
+        return {opts_key: {k: v for k, v in data.items()
+                           if not isinstance(v, (dict, list))}}
+
+    # Otherwise parse as a .conf (key=value, # comments, blank lines).
+    options: Dict[str, Any] = {}
+    for line_num, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise ValueError(f"{p}:{line_num}: expected key=value, got: {raw!r}")
+        key, _, val = line.partition("=")
+        key, val = key.strip(), val.strip()
+        # Coerce to the same scalar types extract_tool_options produces.
+        if val.lower() in ("true", "false"):
+            options[key] = (val.lower() == "true")
+        else:
+            try:
+                options[key] = int(val)
+            except ValueError:
+                try:
+                    options[key] = float(val)
+                except ValueError:
+                    options[key] = val
+    return {opts_key: options}
+
+
+def run_offline_score(cfg) -> int:
+    """Score a config against a local BAM+truth, exactly as a validator would.
+
+    Pipeline mirrors validator._run_miner_tool -> HappyScorer.score_vcf ->
+    AdvancedScorer.compute_advanced_score -> /100 -> _valid_round_score. No
+    chain, no wallet, no platform. Returns a process exit code. The run+score
+    core is shared with --practice via _run_and_score().
+    """
+    tool = (getattr(cfg, "variant_caller", None) or os.getenv("MINER_TEMPLATE") or "gatk").lower()
+
+    # --- Validate required inputs ---
+    missing = [f for f in ("bam", "truth", "region") if not getattr(cfg, f, None)]
+    if missing:
+        print(f"ERROR: --score requires {', '.join('--' + m for m in missing)}", flush=True)
+        return 2
+
+    bam_path = Path(cfg.bam).resolve()
+    truth_path = Path(cfg.truth).resolve()
+    region = cfg.region
+    mutations_path = Path(cfg.mutations).resolve() if cfg.mutations else None
+
+    # Structurally validate the region before it is interpolated into the
+    # variant-caller/Docker command. Expected: <contig>:<start>-<end>.
+    if not re.match(r"^[A-Za-z0-9_.]+:\d+-\d+$", region or ""):
+        print(f"ERROR: --region must look like chr20:45000000-50000000 (got: {region!r})", flush=True)
+        return 2
+
+    if not bam_path.exists():
+        print(f"ERROR: BAM not found: {bam_path}", flush=True)
+        return 2
+    if not truth_path.exists():
+        print(f"ERROR: truth VCF not found: {truth_path}", flush=True)
+        return 2
+    if mutations_path and not mutations_path.exists():
+        print(f"ERROR: mutations VCF not found: {mutations_path}", flush=True)
+        return 2
+
+    try:
+        require_docker()
+    except RuntimeError as e:
+        print(f"ERROR: {e}", flush=True)
+        return 2
+
+    # --- Resolve reference (same convention as execute_template) ---
+    chrom = region.split(":")[0] if region else "chr20"
+    if cfg.reference:
+        ref_path = Path(cfg.reference).resolve()
+    else:
+        ref_path = BASE_DIR / "datasets" / "reference" / chrom / f"{chrom}.fa"
+        if not ref_path.exists():
+            legacy = BASE_DIR / "datasets" / "reference" / "chr20.fa"
+            if chrom == "chr20" and legacy.exists():
+                ref_path = legacy
+    if not ref_path.exists():
+        print(f"ERROR: reference not found: {ref_path}\n"
+              f"       Pass --reference, or place it at datasets/reference/{chrom}/{chrom}.fa", flush=True)
+        return 2
+
+    # --- Ensure indexes the template requires (.bai / .fai) ---
+    if not _ensure_bam_index(bam_path):
+        return 2
+    if not _ensure_fasta_index(ref_path):
+        return 2
+
+    # --- Load the config to score, wrapped as templates expect ---
+    try:
+        tool_config = _load_config_for_scoring(cfg.config, tool)
+    except (FileNotFoundError, ValueError, json.JSONDecodeError) as e:
+        print(f"ERROR: could not load config: {e}", flush=True)
+        return 2
+
+    opts = tool_config.get(f"{tool}_options", {})
+    print(f"\n{'='*60}", flush=True)
+    print(f"   OFFLINE SELF-SCORE  ({tool})", flush=True)
+    print(f"{'='*60}", flush=True)
+    print(f"   Region:    {region}", flush=True)
+    print(f"   BAM:       {bam_path.name}", flush=True)
+    print(f"   Truth:     {truth_path.name}", flush=True)
+    print(f"   Mutations: {mutations_path.name if mutations_path else '(none — score may differ from validator)'}", flush=True)
+    print(f"   Reference: {ref_path.name}", flush=True)
+    print(f"   Config:    {cfg.config or f'configs/{tool}.conf'}  ({len(opts)} params)", flush=True)
+
+    score = _run_and_score(
+        tool=tool,
+        tool_config=tool_config,
+        bam_path=bam_path,
+        ref_path=ref_path,
+        truth_path=truth_path,
+        mutations_path=mutations_path,
+        region=region,
+        confident_bed=cfg.confident_bed if cfg.confident_bed else None,
+        reference_sdf=cfg.reference_sdf if cfg.reference_sdf else None,
+    )
+    return 0 if score is not None else 1
+
+
+def _run_and_score(tool, tool_config, bam_path, ref_path, truth_path,
+                   mutations_path, region, confident_bed=None, reference_sdf=None):
+    """Run a config and score it exactly as a validator would.
+
+    Shared by --score and --practice. Runs the template, then scores with
+    HappyScorer + AdvancedScorer and prints the validator's combined_final
+    plus the component breakdown. Returns combined_final (float) on success,
+    or None on any failure (variant calling failed, no VCF, hap.py returned
+    no metrics).
+    """
+    from utils.scoring import HappyScorer, AdvancedScorer
+    from templates import load_template
+
+    # --- Run variant calling (validator._run_miner_tool equivalent) ---
+    out_dir = bam_path.parent / "score_run"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output_vcf = out_dir / "output.vcf.gz"
+
+    run_config = {
+        **tool_config,
+        "timeout": GENOMICS_CONFIG.get("variant_calling_timeout", 1800),
+        "threads": MINER_CONFIG.get("num_threads", 4),
+        "ref_build": "GRCh38",
+    }
+
+    print(f"\n   Running {tool.upper()}...", flush=True)
+    t0 = time.time()
+    template = load_template(tool)
+    result = template.variant_call(
+        bam_path=bam_path,
+        reference_path=ref_path,
+        output_vcf_path=output_vcf,
+        region=region,
+        config=run_config,
+    )
+    if not result.get("success"):
+        print(f"   ERROR: variant calling failed: {result.get('error', 'unknown')}", flush=True)
+        return None
+    variant_count = result.get("variant_count", 0)
+    print(f"   Variants called: {variant_count}  ({time.time() - t0:.0f}s)", flush=True)
+
+    query_vcf = output_vcf if output_vcf.exists() else None
+    if not query_vcf:
+        for ext in (".vcf.gz", ".vcf"):
+            alt = out_dir / f"output{ext}"
+            if alt.exists():
+                query_vcf = alt
+                break
+    if not query_vcf:
+        print("   ERROR: no output VCF produced", flush=True)
+        return None
+
+    # --- Resolve the RTG SDF (required by vcfeval for deterministic scoring) ---
+    # If not passed explicitly, look for it next to the reference using the same
+    # convention the validator uses: datasets/reference/<chrom>/<chrom>.sdf.
+    sdf_arg = reference_sdf
+    if not sdf_arg:
+        chrom = region.split(":")[0] if region else "chr20"
+        for cand in (
+            BASE_DIR / "datasets" / "reference" / chrom / f"{chrom}.sdf",
+            BASE_DIR / "datasets" / "reference" / f"{chrom}.sdf",
+            ref_path.parent / f"{chrom}.sdf",
+        ):
+            if cand.is_dir():
+                sdf_arg = str(cand)
+                break
+    if not sdf_arg:
+        chrom = region.split(":")[0] if region else "chr20"
+        print(f"   ERROR: RTG SDF not found for {chrom} (needed to score).", flush=True)
+        print(f"          Expected at datasets/reference/{chrom}/{chrom}.sdf — "
+              f"run practice via start-miner.sh, which fetches it.", flush=True)
+        return None
+
+    # --- Score exactly as the validator does ---
+    print(f"\n   Scoring with hap.py...", flush=True)
+    scorer = HappyScorer()
+    metrics = scorer.score_vcf(
+        truth_vcf=str(truth_path),
+        query_vcf=str(query_vcf),
+        reference_fasta=str(ref_path),
+        confident_bed=confident_bed,
+        region=region,
+        reference_sdf=sdf_arg,
+        mutations_vcf=str(mutations_path) if mutations_path else None,
+    )
+    if metrics is None:
+        print("   ERROR: hap.py returned no valid metrics", flush=True)
+        return None
+
+    advanced_score = AdvancedScorer.compute_advanced_score(metrics)
+    combined_final = advanced_score / 100.0
+
+    # Two guards match what a validator applies before recording a score:
+    #   1. combined_final must be a finite number in (0, 1].
+    #   2. a config that calls nothing on-target (SNP and indel F1 both 0) is
+    #      not a scorable result — it is discarded rather than recorded, so it
+    #      earns no on-chain score. Report that honestly instead of implying
+    #      the number would count.
+    valid_range = (isinstance(combined_final, float) and combined_final == combined_final
+                   and 0.0 < combined_final <= 1.0)
+    # Match the validator's empty-on-target discard EXACTLY (see the validator's
+    # _is_zero_input_advanced_fingerprint): both F1s zero AND the fused score in
+    # the all-zero band. Using only the F1s would over-report "discarded" for a
+    # zero-F1 config that still made calls (germline/FP) — the validator records
+    # those, so the local preview must not claim otherwise.
+    zero_input = (
+        (metrics.get("f1_snp") or 0.0) == 0.0
+        and (metrics.get("f1_indel") or 0.0) == 0.0
+        and 0.24999 <= combined_final <= 0.25001
+    )
+    would_record = valid_range and not zero_input
+
+    # --- Report (mirror the validator's component breakdown), styled ---
+    _UI.result_panel(metrics, advanced_score, combined_final, would_record, zero_input)
+    return combined_final
+
+
+def _ensure_bam_index(bam_path: Path) -> bool:
+    """Create a .bai next to the BAM if none exists (samtools via Docker)."""
+    if Path(f"{bam_path}.bai").exists() or bam_path.with_suffix(".bam.bai").exists():
+        return True
+    print(f"   Creating BAM index for {bam_path.name}...", flush=True)
+    try:
+        subprocess.run(
+            ["docker", "run", "--rm", "-v", f"{bam_path.parent}:/data",
+             "quay.io/biocontainers/samtools:1.20--h50ea8bc_0",
+             "samtools", "index", f"/data/{bam_path.name}"],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=600,
+        )
+        return Path(f"{bam_path}.bai").exists() or bam_path.with_suffix(".bam.bai").exists()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        print(f"   ERROR: failed to index BAM: {e}", flush=True)
+        return False
+
+
+def _ensure_fasta_index(ref_path: Path) -> bool:
+    """Create a .fai next to the reference if none exists (samtools via Docker)."""
+    if Path(f"{ref_path}.fai").exists():
+        return True
+    print(f"   Creating reference index for {ref_path.name}...", flush=True)
+    try:
+        subprocess.run(
+            ["docker", "run", "--rm", "-v", f"{ref_path.parent}:/data",
+             "quay.io/biocontainers/samtools:1.20--h50ea8bc_0",
+             "samtools", "faidx", f"/data/{ref_path.name}"],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=600,
+        )
+        return Path(f"{ref_path}.fai").exists()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        print(f"   ERROR: failed to index reference: {e}", flush=True)
+        return False
+
+
+def _resolve_reference_for(chrom: str) -> Optional[Path]:
+    """Locate the reference FASTA for a chromosome (same convention as
+    execute_template). Returns None if not present."""
+    ref_path = BASE_DIR / "datasets" / "reference" / chrom / f"{chrom}.fa"
+    if ref_path.exists():
+        return ref_path
+    legacy = BASE_DIR / "datasets" / "reference" / "chr20.fa"
+    if chrom == "chr20" and legacy.exists():
+        return legacy
+    return None
+
+
+def _coalesce_urls(primary, backup):
+    """Ensure the primary slot is never None when a usable URL exists.
+
+    download_file_with_fallback -> download_file does `url.startswith(...)`
+    BEFORE its try/except, so a None primary raises an uncaught AttributeError
+    instead of falling back. If primary is falsy, promote the backup into the
+    primary slot. Returns (primary, backup) with primary guaranteed non-None
+    whenever either input was set.
+    """
+    if not primary and backup:
+        return backup, None
+    return primary, backup
+
+
+def _reuse_ok(path: Path, expected_sha256) -> bool:
+    """Whether an already-on-disk file may be reused without re-downloading.
+
+    Requires the file to exist and be non-empty. When the sample carries a
+    sha256, the file must also match it — so a truncated file left by an
+    interrupted prior run is NOT silently reused (which would corrupt the
+    self-score). With no expected sha256, a non-empty file is accepted.
+    """
+    try:
+        if not path.exists() or path.stat().st_size == 0:
+            return False
+    except OSError:
+        return False
+    if expected_sha256:
+        try:
+            from utils.file_utils import compute_sha256
+            if compute_sha256(path) != expected_sha256:
+                print(f"   {path.name} on disk fails sha256 — will re-download.", flush=True)
+                return False
+        except Exception:
+            # If we can't verify, be safe and re-download.
+            return False
+    return True
+
+
+def _download_index_best_effort(url, backup, dest: Path) -> None:
+    """Download an index file (.bai/.tbi) if a URL slot exists; never raises.
+
+    Index files are optional (hap.py/samtools can rebuild them), so any
+    failure here is non-fatal. Coalesces the primary slot so a None primary
+    with a set backup doesn't crash download_file_with_fallback.
+    """
+    if not url and not backup:
+        return
+    primary, bkp = _coalesce_urls(url, backup)
+    try:
+        download_file_with_fallback(primary, dest, backup_url=bkp, show_progress=False)
+    except Exception as e:
+        bt.logging.debug(f"Index download for {dest.name} failed (non-fatal): {e}")
+
+
+def _download_practice_files(sample: dict) -> Optional[dict]:
+    """Download a practice sample's BAM + truth + mutations, reusing any
+    already-downloaded files. Returns paths dict, or None on failure.
+
+    Files land in datasets/practice/<sample_id>/. Uses the primary URL the
+    platform returns, with the backup URL as fallback — same ordering as the
+    round path.
+    """
+    from utils.path_utils import safe_round_dir_name
+
+    sample_id = sample["sample_id"]
+    out_dir = BASE_DIR / "datasets" / "practice" / safe_round_dir_name(sample_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    _prefer_hippius = os.getenv("STORAGE_PRIMARY_BACKEND", "hippius").lower() != "aws_s3"
+
+    bam_path = out_dir / "input.bam"
+    truth_path = out_dir / "truth.vcf.gz"
+    mutations_path = out_dir / "mutations.vcf.gz"
+
+    # --- BAM (required) ---
+    # Reuse only if the BAM is non-empty (+ sha256 match when provided) AND its
+    # index is present — a truncated BAM or a missing index forces a redownload.
+    _bam_indexed = (Path(f"{bam_path}.bai").exists()
+                    or bam_path.with_suffix(".bam.bai").exists())
+    if _reuse_ok(bam_path, sample.get("bam_sha256")) and _bam_indexed:
+        print(f"   BAM already downloaded — reusing {bam_path.name}", flush=True)
+    else:
+        # The platform returns a primary URL and a backup URL. Use the primary
+        # by default; swap to the backup as primary only when the operator sets
+        # STORAGE_PRIMARY_BACKEND (same knob the round path honors).
+        if _prefer_hippius:
+            bam_url = sample.get("bam_presigned_url_backup") or sample.get("bam_presigned_url")
+            bam_backup = sample.get("bam_presigned_url")
+        else:
+            bam_url = sample.get("bam_presigned_url")
+            bam_backup = sample.get("bam_presigned_url_backup")
+        if not bam_url and not bam_backup:
+            print("   ERROR: sample has no BAM URL", flush=True)
+            return None
+        print(f"   Downloading BAM...", flush=True)
+        primary, backup = _coalesce_urls(bam_url, bam_backup)
+        got = download_file_with_fallback(
+            primary, bam_path, backup_url=backup,
+            expected_sha256=sample.get("bam_sha256"), show_progress=True,
+        )
+        if not got or not got.exists():
+            print("   ERROR: failed to download BAM", flush=True)
+            return None
+        # BAM index — best-effort; hap.py/GATK need it, but we can build it
+        # locally if the download slot is absent or fails.
+        bam_index = Path(str(bam_path) + ".bai")
+        _download_index_best_effort(
+            sample.get("bam_index_presigned_url"),
+            sample.get("bam_index_presigned_url_backup"),
+            bam_index,
+        )
+        if not bam_index.exists():
+            if not _ensure_bam_index(bam_path):
+                return None
+
+    # --- Truth VCF (required) ---
+    # Reuse only if the file is non-empty AND (when the sample carries a
+    # sha256) matches it — a truncated file from an interrupted prior run must
+    # NOT be silently reused, or the self-score is wrong.
+    if _reuse_ok(truth_path, sample.get("truth_vcf_sha256")):
+        print(f"   Truth already downloaded — reusing {truth_path.name}", flush=True)
+    else:
+        truth_url = sample.get("truth_vcf_presigned_url")
+        truth_backup = sample.get("truth_vcf_presigned_url_backup")
+        if not truth_url and not truth_backup:
+            print("   ERROR: sample has no truth VCF URL", flush=True)
+            return None
+        print(f"   Downloading truth VCF...", flush=True)
+        primary, backup = _coalesce_urls(truth_url, truth_backup)
+        got = download_file_with_fallback(
+            primary, truth_path, backup_url=backup,
+            expected_sha256=sample.get("truth_vcf_sha256"), show_progress=True,
+        )
+        if not got or not got.exists():
+            print("   ERROR: failed to download truth VCF", flush=True)
+            return None
+        # Truth index (.tbi) — nice to have; hap.py can build it if absent
+        _download_index_best_effort(
+            sample.get("truth_vcf_index_presigned_url"),
+            sample.get("truth_vcf_index_presigned_url_backup"),
+            Path(str(truth_path) + ".tbi"),
+        )
+
+    # --- Mutations VCF (optional but strongly recommended) ---
+    # Verify its sha256 like the BAM and truth — the validator downloads the
+    # mutations VCF with the same checksum, and it defines the scoring scope,
+    # so a corrupt copy would silently change the score.
+    have_mutations = False
+    if _reuse_ok(mutations_path, sample.get("mutations_vcf_sha256")):
+        print(f"   Mutations already downloaded — reusing {mutations_path.name}", flush=True)
+        have_mutations = True
+    else:
+        mut_url = sample.get("mutations_vcf_presigned_url")
+        mut_backup = sample.get("mutations_vcf_presigned_url_backup")
+        if mut_url or mut_backup:
+            print(f"   Downloading mutations VCF...", flush=True)
+            primary, backup = _coalesce_urls(mut_url, mut_backup)
+            got = download_file_with_fallback(
+                primary, mutations_path, backup_url=backup,
+                expected_sha256=sample.get("mutations_vcf_sha256"), show_progress=True,
+            )
+            if got and got.exists():
+                have_mutations = True
+                _download_index_best_effort(
+                    sample.get("mutations_vcf_index_presigned_url"),
+                    sample.get("mutations_vcf_index_presigned_url_backup"),
+                    Path(str(mutations_path) + ".tbi"),
+                )
+
+    return {
+        "bam": bam_path,
+        "truth": truth_path,
+        "mutations": mutations_path if have_mutations else None,
+        "dir": out_dir,
+    }
+
+
+async def run_practice(cfg) -> int:
+    """Interactive practice mode: pick a sample, download it, run + self-score.
+
+    No chain. Uses an ephemeral keypair against the platform's /v2/practice/*
+    namespace (which the platform 404s unless practice mode is enabled). The
+    run+score core is shared with --score via _run_and_score().
+    """
+    tool = (getattr(cfg, "variant_caller", None) or os.getenv("MINER_TEMPLATE") or "gatk").lower()
+
+    try:
+        require_docker()
+    except RuntimeError as e:
+        print(f"ERROR: {e}", flush=True)
+        return 2
+
+    platform_url = os.getenv("PLATFORM_URL", "")
+    if not platform_url:
+        print("ERROR: PLATFORM_URL not set — required for practice mode.", flush=True)
+        return 2
+
+    keypair = Keypair.create_from_uri(f"//practice-{secrets.token_hex(4)}")
+    try:
+        # PlatformClient.__init__ raises ValueError for a non-https,
+        # non-localhost PLATFORM_URL — catch it here so a misconfigured URL
+        # prints a clean error instead of a raw traceback.
+        client = MinerPlatformClient(
+            keypair=keypair,
+            config=PlatformConfig(base_url=platform_url,
+                                  timeout=float(os.getenv("PLATFORM_TIMEOUT", "60"))),
+            demo=False,
+        )
+    except ValueError as e:
+        print(f"ERROR: invalid PLATFORM_URL: {e}", flush=True)
+        return 2
+
+    _UI.banner(tool)
+
+    # --- Fetch the sample menu ---
+    try:
+        listing = await client.list_practice_samples()
+    except PlatformClientError as e:
+        _UI.info(f"[red]ERROR:[/] {e}" if _UI.console else f"ERROR: {e}")
+        return 1
+    samples = listing.get("samples", [])
+    if not samples:
+        _UI.info("No practice samples available on this platform.")
+        return 1
+
+    # Flags let a caller shortcut the menus (non-interactive use):
+    #   --config X  -> action defaults to "score" (with that config)
+    #   --sample_id -> that sample, single-shot
+    flag_sample_id = getattr(cfg, "sample_id", None)
+    flag_config = cfg.config
+    single_shot = bool(flag_sample_id)
+
+    async def _fetch_and_download(sample_id):
+        """Fetch a sample's URLs and download its files. Returns files dict or None."""
+        print(f"\n   Fetching '{sample_id}'...", flush=True)
+        try:
+            full = await client.get_practice_sample(sample_id)
+        except PlatformClientError as e:
+            print(f"   ERROR: {e}", flush=True)
+            return None
+        files = _download_practice_files(full)
+        if files is None:
+            return None
+        return full, files
+
+    def _score_one(full, files, score_tool, score_config_src):
+        """Resolve ref+SDF and score one downloaded sample with the given tool/config."""
+        region = full.get("region")
+        chrom = region.split(":")[0] if region else "chr20"
+        ref_path = _resolve_reference_for(chrom)
+        if ref_path is None:
+            print(f"   ERROR: reference not found for {chrom}. "
+                  f"Place it at datasets/reference/{chrom}/{chrom}.fa", flush=True)
+            return False
+        if not _ensure_fasta_index(ref_path):
+            return False
+        try:
+            tool_config = _load_config_for_scoring(score_config_src, score_tool)
+        except (FileNotFoundError, ValueError, json.JSONDecodeError) as e:
+            print(f"   ERROR: could not load config: {e}", flush=True)
+            return False
+        opts = tool_config.get(f"{score_tool}_options", {})
+        cfg_name = score_config_src or f'configs/{score_tool}.conf'
+        _UI.info(f"[cyan]Scoring[/] with tool=[bold]{score_tool}[/], config=[bold]{cfg_name}[/]  [dim]({len(opts)} params)[/]"
+                 if _UI.console else f"Scoring with tool={score_tool}, config={cfg_name}  ({len(opts)} params)")
+        if files["mutations"] is None:
+            _UI.info("[yellow]NOTE:[/] no mutations VCF for this sample — score may differ slightly from the validator."
+                     if _UI.console else "NOTE: no mutations VCF for this sample — score may differ slightly from the validator.")
+        # _run_and_score returns the combined_final on success, or None if the
+        # variant caller, hap.py, SDF resolution, or scoring failed. Surface
+        # that as the outcome so a failed score is reported as failure (and a
+        # single-shot / --demo run exits non-zero) instead of a false success.
+        result = _run_and_score(
+            tool=score_tool,
+            tool_config=tool_config,
+            bam_path=files["bam"],
+            ref_path=ref_path,
+            truth_path=files["truth"],
+            mutations_path=files["mutations"],
+            region=region,
+        )
+        if result is None:
+            print("   ERROR: scoring did not complete — see the messages above.", flush=True)
+            return False
+        return True
+
+    def _plain_action(_choices):
+        print("\n   What do you want to do?", flush=True)
+        print("     1. Score  — run your config on a sample and see your score", flush=True)
+        print("     2. Download — just fetch sample files (BAM + truth + mutations)", flush=True)
+        raw = input("\n   Pick 1 or 2 (or 'q' to quit): ").strip().lower()
+        if raw in ("q", "quit", "exit"):
+            return None
+        if raw in ("1", "score", "s"):
+            return "score"
+        if raw in ("2", "download", "d"):
+            return "download"
+        return "__invalid__"
+
+    while True:
+        # --- Step 1: choose the action (score or download) ---
+        if flag_config or single_shot:
+            action = "score"
+        else:
+            try:
+                action = await _UI.select(
+                    "What do you want to do?",
+                    [("Score — run your config and see your score", "score"),
+                     ("Download — just fetch a sample's files", "download")],
+                    _plain_action,
+                )
+            except EOFError:
+                return 0
+            if action is None:
+                return 0
+            if action == "__invalid__":
+                _UI.info("Invalid selection.")
+                continue
+
+        # --- Step 1b (score only): confirm the tool (default .env MINER_TEMPLATE) ---
+        run_tool = tool
+        if action == "score" and not single_shot and not flag_config:
+            try:
+                run_tool = await _UI.confirm_tool(tool)
+            except EOFError:
+                return 0
+            if not run_tool:
+                return 0
+
+        # --- Step 2: choose the sample (with an 'all' option for download) ---
+        allow_all = (action == "download")
+        if flag_sample_id:
+            match = next((s for s in samples if s.get("sample_id") == flag_sample_id), None)
+            if not match:
+                _UI.info(f"ERROR: sample_id '{flag_sample_id}' not in menu: "
+                         f"{[s.get('sample_id') for s in samples]}")
+                return 1
+            chosen = [flag_sample_id]
+        else:
+            def _plain_sample(_choices):
+                _UI.sample_table(samples, allow_all)
+                prompt = ("\n   Pick a sample number"
+                          + (" or 'a' for all" if allow_all else "")
+                          + " (or 'q' to quit): ")
+                raw = input(prompt).strip().lower()
+                if raw in ("q", "quit", "exit"):
+                    return None
+                if allow_all and raw in ("a", "all"):
+                    return "__all__"
+                if raw.isdigit() and 1 <= int(raw) <= len(samples):
+                    return samples[int(raw) - 1]["sample_id"]
+                return "__invalid__"
+
+            # Interactive: a rich table for context, then an arrow-key picker.
+            if _UI.interactive and _UI.questionary:
+                _UI.sample_table(samples, allow_all=False)
+            choices = [
+                (f"{s.get('sample_id')}  ·  {s.get('chromosome')}  ·  {s.get('num_mutations')} mutations",
+                 s["sample_id"])
+                for s in samples
+            ]
+            if allow_all:
+                choices.append(("ALL — download every sample", "__all__"))
+            try:
+                picked = await _UI.select("Pick a sample:", choices, _plain_sample)
+            except EOFError:
+                return 0
+            if picked is None:
+                return 0
+            if picked == "__invalid__":
+                _UI.info("Invalid selection.")
+                continue
+            chosen = [s["sample_id"] for s in samples] if picked == "__all__" else [picked]
+
+        # --- Act on each chosen sample ---
+        for sid in chosen:
+            result = await _fetch_and_download(sid)
+            if result is None:
+                if single_shot:
+                    return 1
+                continue
+            full, files = result
+            if action == "download":
+                if _UI.console:
+                    _UI.console.print(f"   [green]✓[/] Downloaded [bold]{sid}[/] → [dim]{files['dir']}[/]")
+                    _UI.console.print(f"       [dim]BAM[/] {files['bam'].name}   [dim]truth[/] {files['truth'].name}"
+                                      + (f"   [dim]mutations[/] {files['mutations'].name}" if files['mutations'] else ""))
+                else:
+                    print(f"   Downloaded '{sid}' to {files['dir']}", flush=True)
+                    print(f"     BAM:       {files['bam']}", flush=True)
+                    print(f"     Truth:     {files['truth']}", flush=True)
+                    print(f"     Mutations: {files['mutations'] if files['mutations'] else '(none)'}", flush=True)
+            else:
+                ok = _score_one(full, files, run_tool, flag_config)
+                if not ok and single_shot:
+                    return 1
+
+        # --- Loop unless a flag forced a single-shot run ---
+        if single_shot or flag_config:
+            return 0
+        try:
+            if _UI.interactive and _UI.questionary:
+                again = bool(await _UI.questionary.confirm("Do another?", default=False, style=_UI._qstyle).ask_async())
+            else:
+                again = input("\n   Do another? [y/N]: ").strip().lower() in ("y", "yes")
+        except EOFError:
+            return 0
+        if not again:
+            if _UI.console:
+                _UI.console.print("\n   [dim]Done. Happy tuning![/]\n")
+            return 0
+
+
+def _parse_side_mode_args(argv):
+    """Parse --score / --practice / --demo and their sub-args from raw argv.
+
+    bittensor's bt.config() does NOT surface plain store_true flags like
+    --practice/--score/--demo as top-level config attributes (and it has its
+    OWN --config flag that collides with ours), so we must NOT rely on the
+    bittensor Config for these. Parse them from sys.argv directly with a
+    plain argparse that ignores everything else. Returns a namespace with
+    .score/.practice/.demo and the sub-args (bam/truth/region/config/etc.).
+    """
+    p = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    p.add_argument("--score", action="store_true", default=False)
+    p.add_argument("--practice", action="store_true", default=False)
+    p.add_argument("--demo", action="store_true", default=False)
+    p.add_argument("--bam", type=str, default=None)
+    p.add_argument("--truth", type=str, default=None)
+    p.add_argument("--mutations", type=str, default=None)
+    p.add_argument("--region", type=str, default=None)
+    p.add_argument("--config", type=str, default=None)
+    p.add_argument("--reference", type=str, default=None)
+    p.add_argument("--confident_bed", type=str, default=None)
+    p.add_argument("--reference_sdf", type=str, default=None)
+    p.add_argument("--sample_id", type=str, default=None)
+    p.add_argument("--variant_caller", type=str, default=None)
+    ns, _unknown = p.parse_known_args(argv)
+    return ns
+
+
+# Default sample --demo scores against. Env-overridable so ops can rotate it
+# without a code change. A one-shot onboarding run: --demo is just the practice
+# self-scorer pinned to this single fixed sample (no picker).
+DEMO_SAMPLE_ID = os.getenv("DEMO_SAMPLE_ID", "d7b99f4a-061c-4202-8b12-2c1425bd4974")
+
+
 def main():
     """Main entry point."""
-    miner = Miner()
+    # Detect side-modes from raw argv BEFORE bittensor's config layer (which
+    # drops these custom flags). --score/--practice/--demo bypass the full miner.
+    side = _parse_side_mode_args(sys.argv[1:])
+    if side.score:
+        sys.exit(run_offline_score(side))
+    if side.demo:
+        # --demo == the practice self-scorer pinned to one fixed sample: no
+        # chain/wallet, download BAM + truth, run the config, print the exact
+        # score a validator would compute. Pin the sample and default the
+        # config so a brand-new operator gets a score in one command.
+        side.practice = True
+        if not getattr(side, "sample_id", None):
+            side.sample_id = DEMO_SAMPLE_ID
+        if not getattr(side, "config", None):
+            tool = side.variant_caller or os.getenv("MINER_TEMPLATE") or "gatk"
+            side.config = f"configs/{tool}.conf"
+    if side.practice:
+        # Ephemeral keypair + /v2/practice/*; no chain/wallet/metagraph.
+        sys.exit(asyncio.run(run_practice(side)))
+
+    cfg = Miner.get_config()
+    miner = Miner(config=cfg)
     miner.run()
 
 

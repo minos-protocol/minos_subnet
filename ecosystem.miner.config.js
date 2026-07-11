@@ -17,9 +17,10 @@ module.exports = {
       log_date_format: "YYYY-MM-DD HH:mm:ss Z",
       env: {
         PYTHONUNBUFFERED: "1",
-        // Uncomment to run against the platform /v2/demo/* sandbox
-        // (ephemeral keypair, no wallet/registration, no TAO earned):
-        //   MINER_DEMO: "true",
+        // PM2 runs the long-running live miner. For a one-shot, walletless
+        // scored test run, do NOT set MINER_DEMO here (demo/practice exit
+        // after one run and a supervisor would restart-loop them) — instead
+        // run in the foreground: bash start-miner.sh --demo  (or --practice).
       },
     },
   ],
