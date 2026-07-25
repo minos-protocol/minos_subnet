@@ -230,6 +230,7 @@ Public scoring:
 ```text
 GET https://api.theminos.ai/scoring/all
 GET https://api.theminos.ai/scoring/detailed/{hotkey}
+GET https://api.theminos.ai/scoring/parameter-ranges
 GET https://api.theminos.ai/scoring/rounds/current/leaderboard
 GET https://api.theminos.ai/scoring/rounds/latest-finalized/leaderboard
 ```

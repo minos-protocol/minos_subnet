@@ -172,7 +172,7 @@ The scoring weights (60% F1, 15% completeness, 15% FP) mean you want to lean sli
 | 40-60   | Something is suboptimal. Check tool parameters and Docker image.  |
 | Below 40| Likely a configuration error. See Common Mistakes below.          |
 
-The genomic region (chr20, 5MB windows from 10MB-55MB) varies per round, so some score variance is normal. Focus on your current-round score trend and consistency across regions.
+The genomic region rotates across chr19–chr22 (5 MB and 10 MB windows) and varies per round, so some score variance is normal. Focus on your current-round score trend and consistency across regions.
 
 ---
 
