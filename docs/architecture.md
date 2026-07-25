@@ -20,7 +20,7 @@ Each scoring round follows this lifecycle:
 
 ```text
 PLATFORM
-  │  Creates round with: round_id, region (e.g. chr20:10M-15M, chr16:5M-10M),
+  │  Creates round with: round_id, region (e.g. chr19:13M-23M, chr21:17M-22M),
   │  mutated BAM (presigned S3 URL), truth VCF (private)
   │
   ▼ status: "pending"  (round created, waiting for start time)
@@ -65,7 +65,7 @@ Miners register on Bittensor and poll the platform for active rounds:
 POST /v2/round-status  →  {
   "round_id", "status", "region",
   "bam_presigned_url", "bam_index_presigned_url",
-  "time_remaining_seconds", "num_mutations"
+  "time_remaining_seconds"
 }
 ```
 

@@ -131,6 +131,7 @@ GET /health
 GET /v2/info
 GET /scoring/all
 GET /scoring/detailed/{hotkey}
+GET /scoring/parameter-ranges
 GET /scoring/rounds/current/leaderboard
 GET /scoring/rounds/latest-finalized/leaderboard
 GET /dashboard/network-stats

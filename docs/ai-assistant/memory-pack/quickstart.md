@@ -83,6 +83,7 @@ PM2 online means the process is running. It does not prove that the miner is par
 - Platform health: `GET https://api.theminos.ai/health`
 - Current public scores: `GET https://api.theminos.ai/scoring/all`
 - One miner detail: `GET https://api.theminos.ai/scoring/detailed/{hotkey}`
+- Accepted params + valid ranges: `GET https://api.theminos.ai/scoring/parameter-ranges`
 - Current leaderboard: `GET https://api.theminos.ai/scoring/rounds/current/leaderboard`
 - Latest finalized leaderboard: `GET https://api.theminos.ai/scoring/rounds/latest-finalized/leaderboard`
 

@@ -105,6 +105,7 @@ minos_subnet/
 ├── docs/                     # Architecture and integration docs
 │   ├── architecture.md       # System architecture deep dive
 │   ├── tuning_guide.md       # Miner tuning reference (scoring, parameters, strategy)
+│   ├── parameter_ranges.md   # Accepted parameters and valid ranges per tool
 │   ├── hap_py_docker.md      # hap.py Docker image reference
 │   └── ai-assistant/         # AI assistant knowledge graph, runtime skills, and persona assets
 ├── scripts/                  # Developer tools
@@ -617,6 +618,7 @@ btcli subnet metagraph --netuid 107
 - [utils/README.md](utils/README.md) - Utility modules reference
 - [docs/architecture.md](docs/architecture.md) - System architecture deep dive
 - [docs/tuning_guide.md](docs/tuning_guide.md) - Miner tuning guide (scoring breakdown, parameters, strategy)
+- [docs/parameter_ranges.md](docs/parameter_ranges.md) - Accepted parameters and valid ranges per tool (mirrors `GET /scoring/parameter-ranges`)
 - [docs/hap_py_docker.md](docs/hap_py_docker.md) - hap.py Docker image reference
 - [docs/ai-assistant/memory-pack/README.md](docs/ai-assistant/memory-pack/README.md) - Public Minos SN107 knowledge source for Ditto and agent runtimes
 - [docs/ai-assistant/README.md](docs/ai-assistant/README.md) - OpenClaw/Hermes local skill, persona, and model setup assets

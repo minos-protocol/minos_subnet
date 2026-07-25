@@ -26,14 +26,13 @@ Ineligible miners receive 0 weight even if they submit. This is expected behavio
 
 ## Reward And Weight Split
 
-Public protocol shape:
+Public protocol shape (live values in the network config):
 
-- 87% goes to burn.
-- 10% goes to the top eligible miner.
-- 3% is distributed as pruning dust across eligible ranks #2 through #10.
-- Dust uses decay 0.8.
+- The round winner receives ~90% of the miner weight (`winner_weight = 0.9`) — the split is winner-heavy.
+- Eligible ranks #2 through #20 split the remaining ~10% as pruning dust, decaying by 0.8 (`dust_top_n = 20`, `dust_decay = 0.8`).
+- Burn is a configurable protocol rate, currently 0% (`burn_rate = 0.0`, sent to `burn_uid = 0`).
 
-If fewer eligible dust recipients exist, the dust budget is distributed across available eligible ranks. If no eligible miner can receive a portion, unused weight goes to burn.
+These are dynamic protocol values — read the current numbers from `get_network_config` rather than assuming them. If fewer eligible dust recipients exist, the dust budget spreads across the available eligible ranks; any weight that cannot be assigned to an eligible miner goes to burn.
 
 ## Beginner Interpretation
 
