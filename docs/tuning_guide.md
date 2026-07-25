@@ -78,12 +78,14 @@ Three active tools are supported. Pick based on your hardware and willingness to
 
 Only quality-related parameters are exposed. Infrastructure params (threads, memory) are handled by the system and stripped before submission.
 
+> **Full accepted-parameter ranges:** see [parameter_ranges.md](parameter_ranges.md) or the live endpoint `GET https://api.theminos.ai/scoring/parameter-ranges`. Every parameter has a valid range; a value outside its range is automatically set to that parameter's default, so a config never fails just because one value was out of range. The ranges below reflect those valid ranges.
+
 ### GATK HaplotypeCaller
 
 | Parameter | Default | Range | Effect |
 |-----------|---------|-------|--------|
-| `standard_min_confidence_threshold_for_calling` | 30 | 0-100 | Higher = fewer, more confident calls. Raising this reduces FPs but hurts recall. |
-| `min_base_quality_score` | 10 | 0-50 | Filters bases below this quality. Too high kills soft evidence for real variants. |
+| `standard_min_confidence_threshold_for_calling` | 30 | 10-100 | Higher = fewer, more confident calls. Raising this reduces FPs but hurts recall. |
+| `min_base_quality_score` | 10 | 10-50 | Filters bases below this quality. Too high kills soft evidence for real variants. |
 | `pcr_indel_model` | CONSERVATIVE | NONE, HOSTILE, AGGRESSIVE, CONSERVATIVE | Use **NONE** for PCR-free libraries (GIAB donors are PCR-free). |
 
 **Tuning priority:** Set `pcr_indel_model=NONE` first. Then adjust `standard_min_confidence_threshold_for_calling` between 20-40 to find your sweet spot between precision and recall.

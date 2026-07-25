@@ -23,6 +23,7 @@ https://api.theminos.ai
 - `GET /scoring/detailed/{hotkey}`
 - `GET /scoring/metagraph/miners`
 - `GET /scoring/weights`
+- `GET /scoring/parameter-ranges`
 - `GET /scoring/rounds`
 - `GET /scoring/rounds/current/leaderboard`
 - `GET /scoring/rounds/latest-finalized/leaderboard`
@@ -49,6 +50,7 @@ Beginners should not manually call signed POST endpoints. The miner software han
 - inspect current or latest finalized leaderboard
 - inspect public miner score history
 - inspect public network stats
+- check which tool-config parameters and value ranges the platform accepts
 
 ## Not For Beginner Support
 
