@@ -121,16 +121,23 @@ and ignored if submitted: `memory_gb`, `num_threads`, `ref_build`, `threads`,
 | `ext_prob` | int | 1 – 60 | 20 |
 | `gap_frac` | float | 0.0 – 1.0 | 0.002 |
 | `tandem_qual` | int | 0 – 1000 | 500 |
+| `indel_bias` | float | 0.1 – 5.0 | 1.0 |
 | `del_bias` | float | 0.1 – 2.0 | 1.0 |
 | `min_ireads` | int | 1 – 100 | 1 |
+| `score_vs_ref` | float | 0.0 – 1.0 | 0.0 |
+| `indels_cns` | bool | `true` / `false` | `false` |
+| `indel_size` | int | 50 – 150 | 110 |
 | `count_orphans` | bool | `true` / `false` | `false` |
 | `multiallelic_caller` | bool | `true` / `false` | `true` |
+| `consensus_caller` | bool | `true` / `false` | `false` |
 | `variants_only` | bool | `true` / `false` | `true` |
 | `ploidy` | enum | `GRCh37`, `GRCh38`, `X`, `Y`, `1`, `2` | `GRCh38` |
+| `prior` | float | 0.0 – 1.0 | 0.0011 |
 | `pval_threshold` | float | 0.0 – 1.0 | 0.5 |
 
-**Not applied:** `prior`, `indel_bias`, `score_vs_ref`. These are accepted for
-compatibility but the platform runs bcftools with its own defaults for them.
+`prior` applies to the multiallelic caller (`-m`). `pval_threshold` applies to
+the consensus caller (`-c`). `indel_bias` and `score_vs_ref` are mpileup
+likelihood-model parameters and apply with either caller.
 
 ---
 

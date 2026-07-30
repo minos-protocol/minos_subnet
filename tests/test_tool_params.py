@@ -386,6 +386,20 @@ class TestValidateAndBuildFlags:
         result = validate_and_build_flags("bcftools", {"indel_size": 200})
         assert result["valid"] is False
 
+    def test_bcftools_indel_bias_flag(self):
+        result = validate_and_build_flags("bcftools", {"indel_bias": 1.5})
+        assert result["valid"] is True
+        flag = result["flags"][0]
+        assert flag["stage"] == "mpileup"
+        assert flag["flag"] == "--indel-bias 1.5"
+
+    def test_bcftools_score_vs_ref_flag(self):
+        result = validate_and_build_flags("bcftools", {"score_vs_ref": 0.25})
+        assert result["valid"] is True
+        flag = result["flags"][0]
+        assert flag["stage"] == "mpileup"
+        assert flag["flag"] == "--score-vs-ref 0.25"
+
     def test_bcftools_multiallelic_caller_flag(self):
         result = validate_and_build_flags("bcftools", {"multiallelic_caller": True})
         assert result["valid"] is True
@@ -410,6 +424,13 @@ class TestValidateAndBuildFlags:
         call_flags = [f["flag"] for f in result["flags"] if f["stage"] == "call"]
         assert "-m" not in call_flags
         assert "-c" not in call_flags
+
+    def test_bcftools_prior_flag(self):
+        result = validate_and_build_flags("bcftools", {"prior": 0.002})
+        assert result["valid"] is True
+        flag = result["flags"][0]
+        assert flag["stage"] == "call"
+        assert flag["flag"] == "-P 0.002"
 
     # -- Mixed valid + invalid --
 
