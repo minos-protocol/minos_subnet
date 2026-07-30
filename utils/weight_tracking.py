@@ -39,15 +39,18 @@ CANONICAL_TIEBREAK_TOLERANCE = 0.001
 # Minimum canonical coverage. Platform contributors below the per-validator
 # stake floor are excluded, and the validator requires enough distinct
 # validators before using the canonical ranking.
-CANONICAL_MIN_VALIDATOR_COUNT = int(os.getenv("CANONICAL_MIN_VALIDATOR_COUNT", "4"))
+CANONICAL_MIN_VALIDATOR_COUNT = int(os.getenv("CANONICAL_MIN_VALIDATOR_COUNT", "2"))
 CANONICAL_MIN_VALIDATOR_STAKE = float(os.getenv("CANONICAL_MIN_VALIDATOR_STAKE", "5000"))
 
-# Reward defaults. These are absolute validator-vector weights before
-# Bittensor's u16 encoding: burn gets 0.87, rank #1 gets 0.10, and ranks
-# #2-#10 split the remaining 0.03 by geometric decay.
-DEFAULT_BURN_RATE = 0.87
-DEFAULT_WINNER_WEIGHT = 0.10
-DEFAULT_DUST_TOP_N = 10
+# Reward defaults — FALLBACK ONLY. The live validator requires the authoritative
+# values from /scoring/network-config (get_network_config) and ignores these.
+# Current policy (absolute validator-vector weights before Bittensor's u16
+# encoding): burn 0.0, rank #1 gets 0.9, and eligible ranks #2-#20 split the
+# remaining ~0.10 by 0.8 geometric decay. Always check network-config for the
+# latest — these are dynamic protocol values.
+DEFAULT_BURN_RATE = 0.0
+DEFAULT_WINNER_WEIGHT = 0.9
+DEFAULT_DUST_TOP_N = 20
 DEFAULT_DUST_DECAY = 0.80
 
 

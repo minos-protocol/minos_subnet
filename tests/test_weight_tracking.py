@@ -143,8 +143,12 @@ class TestRoundOnlyState:
 
 
 class TestRoundOnlyWeights:
-    def test_top_ten_distribution_uses_current_round_scores(self, score_tracker):
-        scores = {f"hk_{i}": 1.0 - (i * 0.01) for i in range(1, 12)}
+    def test_top_n_distribution_uses_current_round_scores(self, score_tracker):
+        # Seed one more miner than dust_top_n so the rank just past the cutoff
+        # gets 0 and ranks #2..dust_top_n each receive proportional dust. Driven
+        # off the DEFAULT_* constants so it tracks the current reward policy.
+        n = DEFAULT_DUST_TOP_N + 1
+        scores = {f"hk_{i}": 1.0 - (i * 0.01) for i in range(1, n + 1)}
         _seed_participation(score_tracker, scores, MIN_PARTICIPATION_ROUNDS - 1)
         _record_scores(score_tracker, "r1", scores)
 
@@ -153,12 +157,13 @@ class TestRoundOnlyWeights:
         )
 
         assert weights["hk_1"] == pytest.approx(DEFAULT_WINNER_WEIGHT)
-        assert weights["hk_11"] == pytest.approx(0.0)
+        # rank dust_top_n+1 is beyond the dust cutoff -> 0
+        assert weights[f"hk_{n}"] == pytest.approx(0.0)
 
         dust_pool = 1.0 - DEFAULT_BURN_RATE - DEFAULT_WINNER_WEIGHT
         dust_raw = [DEFAULT_DUST_DECAY ** i for i in range(DEFAULT_DUST_TOP_N - 1)]
         dust_total = sum(dust_raw)
-        for rank in range(2, 11):
+        for rank in range(2, DEFAULT_DUST_TOP_N + 1):
             expected = dust_pool * dust_raw[rank - 2] / dust_total
             assert weights[f"hk_{rank}"] == pytest.approx(expected)
 

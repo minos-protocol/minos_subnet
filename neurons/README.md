@@ -216,9 +216,10 @@ python -m neurons.validator
 
 ### Weight Distribution
 
-Validators burn 87%, give the top eligible miner 10%, and split the remaining
-3% across eligible ranks #2 through #10 using ranked pruning dust. Eligibility
-requires at least 5 valid scored rounds in the last 20 finalized rounds, and
+Validators apply the `/scoring/network-config` reward policy (dynamic — check it
+for current values). Currently the top eligible miner gets ~90% and eligible
+ranks #2 through #20 split the remaining ~10% as ranked pruning dust; burn is 0%.
+Eligibility requires at least 5 valid scored rounds in the last 20 finalized rounds, and
 the current round counts toward that threshold. Eligible miners are ranked only
 by the current round's AdvancedScorer score; ineligible miners receive 0
 weight. Tiebreaker: earliest submission timestamp (applied only at

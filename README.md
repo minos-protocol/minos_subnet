@@ -562,7 +562,7 @@ Only finite scores where `0 < current_score <= 1.0` are eligible for ranking. Ro
 
 ### Weight Distribution
 
-Validators burn 87% of their weight, give the top eligible current-round miner 10%, and split the remaining 3% as ranked pruning dust across eligible ranks #2 through #10 using 0.8 geometric weighting. If fewer dust recipients exist, that 3% is renormalized across the available ranks; if no dust recipients exist, unused dust is sent to burn.
+Validators apply the reward policy from `/scoring/network-config` (winner-heavy pruning dust). Currently the top eligible current-round miner receives ~90% of the weight (`winner_weight = 0.9`), eligible ranks #2 through #20 split the remaining ~10% as ranked pruning dust (`dust_top_n = 20`) using 0.8 geometric weighting, and burn is 0% (`burn_rate = 0.0`). These are dynamic protocol values — **check `/scoring/network-config` for the latest**. If fewer dust recipients exist, the dust is renormalized across the available ranks; any weight that cannot be assigned to an eligible miner is sent to burn.
 
 Eligibility requires scoring in at least 5 of the last 20 rounds, including the current round. Miners below the participation threshold receive 0 weight until they qualify. Close current-round ties use deterministic round data from the validator/platform flow; historical scores are not part of the ranking.
 

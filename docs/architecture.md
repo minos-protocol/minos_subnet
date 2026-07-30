@@ -157,7 +157,7 @@ SNP/INDEL weighting is truth-count-proportional (fallback: 70/30).
 - Each scored round is ranked from that round's normalized AdvancedScorer result only; historical scores do not carry into winner selection
 - Miners must participate in ≥ 5 of the last 20 rounds to be eligible for weights; the current round counts
 - Miners below the participation threshold receive 0 weight
-- 87% goes to the burn UID, the highest-scoring eligible current-round miner receives 10%, and the remaining 3% is distributed as ranked pruning dust across eligible ranks #2 through #10 using geometric decay
+- Reward params come from `/scoring/network-config` (dynamic — check it for the latest). Currently: the highest-scoring eligible current-round miner receives ~90% (`winner_weight = 0.9`), eligible ranks #2 through #20 (`dust_top_n = 20`) split the remaining ~10% as ranked pruning dust using 0.8 geometric decay, and burn is 0% (`burn_rate = 0.0`)
 - Close current-round ties use deterministic submission/canonical-ranking signals so validators converge on the same winner
 
 ---
@@ -170,7 +170,7 @@ SNP/INDEL weighting is truth-count-proportional (fallback: 70/30).
 | **Synthetic mutations** | HelixForge inserts mutations at positions unknown to miners; GIAB alone is insufficient to score well |
 | **Keypair authentication** | Every API call is signed with the Bittensor wallet keypair — submissions cannot be spoofed |
 | **Infrastructure stripping** | `threads`, `memory_gb`, `timeout`, `ref_build`, `num_threads` are removed from submitted configs — only quality parameters count |
-| **Winner-heavy rewards** | The top eligible miner receives the main reward share; eligible ranks #2-#10 receive pruning dust, so copied configs still need differentiated current-round performance |
+| **Winner-heavy rewards** | The top eligible miner receives the main reward share (~90%); eligible ranks #2-#20 receive pruning dust, so copied configs still need differentiated current-round performance |
 
 ---
 
