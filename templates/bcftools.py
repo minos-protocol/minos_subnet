@@ -89,6 +89,15 @@ def variant_call(
                 return True
         return False
 
+    # Exactly one caller mode: `bcftools call -m` (multiallelic) and `-c`
+    # (consensus) are mutually exclusive. Reject configs that enable both.
+    _has_m = any(f.split()[0] in ("-m", "--multiallelic-caller") for f in call_flags)
+    _has_c = any(f.split()[0] in ("-c", "--consensus-caller") for f in call_flags)
+    if _has_m and _has_c:
+        return {"success": False, "variant_count": 0,
+                "error": "Invalid BCFtools parameters: multiallelic_caller and "
+                         "consensus_caller are mutually exclusive; enable exactly one."}
+
     if call_flags and not _has_caller_mode(call_flags):
         call_flags = ["-m"] + call_flags
         logger.info("bcftools.call: no caller mode in submitted flags; defaulting to -m")

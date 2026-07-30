@@ -815,6 +815,20 @@ BCFTOOLS_QUALITY_PARAMS = {
         "flag_mpileup": "--score-vs-ref",
         "stage": "mpileup"
     },
+    "indels_cns": {
+        "type": "bool",
+        "default": False,
+        "flag_mpileup": "--indels-cns",
+        "stage": "mpileup"
+    },
+    "indel_size": {
+        "type": "int",
+        "min": 50,
+        "max": 150,
+        "default": 110,
+        "flag_mpileup": "--indel-size",
+        "stage": "mpileup"
+    },
 
     # --- mpileup: read filtering ---
 
@@ -831,6 +845,12 @@ BCFTOOLS_QUALITY_PARAMS = {
         "type": "bool",
         "default": True,
         "flag_call": "-m",
+        "stage": "call"
+    },
+    "consensus_caller": {
+        "type": "bool",
+        "default": False,
+        "flag_call": "-c",
         "stage": "call"
     },
     "variants_only": {
