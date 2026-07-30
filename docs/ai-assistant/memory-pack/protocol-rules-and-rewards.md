@@ -20,7 +20,7 @@ Rounds are about 72 minutes. A miner can be running correctly while waiting for 
 
 ## Eligibility
 
-Eligibility requires 10 valid scored rounds out of the last 20 rounds, including the current round. A new miner can submit and score but still receive 0 weight until eligibility catches up.
+Eligibility requires 5 valid scored rounds out of the last 20 rounds, including the current round. A new miner can submit and score but still receive 0 weight until eligibility catches up.
 
 Ineligible miners receive 0 weight even if they submit. This is expected behavior, not proof that the config is bad.
 

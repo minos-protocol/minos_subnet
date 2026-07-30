@@ -14,9 +14,14 @@ def fixtures_dir():
 
 @pytest.fixture
 def score_tracker():
-    """Fresh ScoreTracker with default settings."""
-    from utils.weight_tracking import ScoreTracker
-    return ScoreTracker(min_rounds=10)
+    """Fresh ScoreTracker with default settings.
+
+    Uses the live eligibility gate (MIN_PARTICIPATION_ROUNDS) so tests that seed
+    participation relative to that constant stay consistent when the gate value
+    changes.
+    """
+    from utils.weight_tracking import ScoreTracker, MIN_PARTICIPATION_ROUNDS
+    return ScoreTracker(min_rounds=MIN_PARTICIPATION_ROUNDS)
 
 
 @pytest.fixture

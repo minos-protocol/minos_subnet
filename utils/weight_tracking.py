@@ -3,7 +3,7 @@ Round-only winner weighting.
 
 Each Minos round is a fresh genomics challenge, so validator weights should be
 computed from that round's finalized scores only. Miners must still have valid
-scores in at least 10 of the last 20 finalized rounds before they can receive
+scores in at least 5 of the last 20 finalized rounds before they can receive
 winner/dust weight; the current round counts. The platform weight-history
 schema still has a legacy ``ema_score`` field, which is intentionally left empty
 for round-only scoring.
@@ -22,10 +22,10 @@ import os
 
 logger = logging.getLogger(__name__)
 
-# Eligibility gate: score in at least 10 of the last 20 finalized rounds. The
+# Eligibility gate: score in at least 5 of the last 20 finalized rounds. The
 # current round is appended before weights are computed, so it counts.
 PARTICIPATION_WINDOW = int(os.getenv("PARTICIPATION_WINDOW", "20"))
-MIN_PARTICIPATION_ROUNDS = int(os.getenv("MIN_PARTICIPATION_ROUNDS", "10"))
+MIN_PARTICIPATION_ROUNDS = int(os.getenv("MIN_PARTICIPATION_ROUNDS", "5"))
 
 # Equal current-round scores are tied by earliest submission timestamp.
 ROUND_SCORE_TOLERANCE = 1e-9
@@ -39,15 +39,18 @@ CANONICAL_TIEBREAK_TOLERANCE = 0.001
 # Minimum canonical coverage. Platform contributors below the per-validator
 # stake floor are excluded, and the validator requires enough distinct
 # validators before using the canonical ranking.
-CANONICAL_MIN_VALIDATOR_COUNT = int(os.getenv("CANONICAL_MIN_VALIDATOR_COUNT", "4"))
+CANONICAL_MIN_VALIDATOR_COUNT = int(os.getenv("CANONICAL_MIN_VALIDATOR_COUNT", "2"))
 CANONICAL_MIN_VALIDATOR_STAKE = float(os.getenv("CANONICAL_MIN_VALIDATOR_STAKE", "5000"))
 
-# Reward defaults. These are absolute validator-vector weights before
-# Bittensor's u16 encoding: burn gets 0.87, rank #1 gets 0.10, and ranks
-# #2-#10 split the remaining 0.03 by geometric decay.
-DEFAULT_BURN_RATE = 0.87
-DEFAULT_WINNER_WEIGHT = 0.10
-DEFAULT_DUST_TOP_N = 10
+# Reward defaults — FALLBACK ONLY. The live validator requires the authoritative
+# values from /scoring/network-config (get_network_config) and ignores these.
+# Current policy (absolute validator-vector weights before Bittensor's u16
+# encoding): burn 0.0, rank #1 gets 0.9, and eligible ranks #2-#20 split the
+# remaining ~0.10 by 0.8 geometric decay. Always check network-config for the
+# latest — these are dynamic protocol values.
+DEFAULT_BURN_RATE = 0.0
+DEFAULT_WINNER_WEIGHT = 0.9
+DEFAULT_DUST_TOP_N = 20
 DEFAULT_DUST_DECAY = 0.80
 
 
@@ -70,7 +73,7 @@ class ScoreTracker:
         # hotkey -> current round raw score (same value, explicit for reporting)
         self.last_raw_scores: Dict[str, float] = {}
 
-        # Recent finalized rounds for the 10-of-20 eligibility gate.
+        # Recent finalized rounds for the 5-of-20 eligibility gate.
         self.round_history: List[dict] = []
         self._participation_counts: Dict[str, int] = defaultdict(int)
         self._recorded_round_ids = set()
@@ -84,7 +87,7 @@ class ScoreTracker:
 
         Historical platform scores are not loaded because old scores must not
         influence the next round's ranking. Recent participation history is
-        loaded so the 10-of-20 eligibility gate survives validator restarts.
+        loaded so the 5-of-20 eligibility gate survives validator restarts.
         Restart recovery for a currently scoring round is handled separately by
         /v2/get-submissions, which returns already-submitted scores for that
         round.

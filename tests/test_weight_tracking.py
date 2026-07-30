@@ -51,13 +51,13 @@ class TestRoundOnlyState:
                 score_tracker.update("hk_bad", bad_score)
         assert "hk_bad" not in score_tracker.round_scores
 
-    def test_nine_of_twenty_is_not_eligible(self, score_tracker):
+    def test_below_min_participation_is_not_eligible(self, score_tracker):
         _seed_participation(score_tracker, ["hk_a"], MIN_PARTICIPATION_ROUNDS - 1)
 
         assert score_tracker.get_participation_count("hk_a") == MIN_PARTICIPATION_ROUNDS - 1
         assert not score_tracker.is_eligible("hk_a")
 
-    def test_ten_of_twenty_is_eligible(self, score_tracker):
+    def test_at_min_participation_is_eligible(self, score_tracker):
         _seed_participation(score_tracker, ["hk_a"], MIN_PARTICIPATION_ROUNDS)
 
         assert score_tracker.get_participation_count("hk_a") == MIN_PARTICIPATION_ROUNDS
@@ -116,26 +116,39 @@ class TestRoundOnlyState:
         assert score_tracker.is_eligible("hk_old")
 
     def test_recovery_trims_to_recent_window(self, score_tracker):
+        # Rounds beyond the participation window that recovery must drop.
+        trimmed = 5
+        total = PARTICIPATION_WINDOW + trimmed
+        # hk_old only appears in the oldest rounds, so after the window trims the
+        # first `trimmed` it lands one round below the gate; hk_recent fills the
+        # rest. Driven off the constants so it holds for any gate value.
+        old_round_span = trimmed + (MIN_PARTICIPATION_ROUNDS - 1)
         round_history = [
             {
                 "round_id": f"old_{idx}",
-                "scored_hotkeys": ["hk_old"] if idx < 10 else ["hk_recent"],
+                "scored_hotkeys": ["hk_old"] if idx < old_round_span else ["hk_recent"],
             }
-            for idx in range(PARTICIPATION_WINDOW + 5)
+            for idx in range(total)
         ]
 
         score_tracker.recover_from_platform_state([], round_history)
 
         assert len(score_tracker.round_history) == PARTICIPATION_WINDOW
-        assert score_tracker.get_participation_count("hk_old") == 5
-        assert score_tracker.get_participation_count("hk_recent") == 15
+        assert score_tracker.get_participation_count("hk_old") == MIN_PARTICIPATION_ROUNDS - 1
+        assert score_tracker.get_participation_count("hk_recent") == (
+            PARTICIPATION_WINDOW - (MIN_PARTICIPATION_ROUNDS - 1)
+        )
         assert not score_tracker.is_eligible("hk_old")
         assert score_tracker.is_eligible("hk_recent")
 
 
 class TestRoundOnlyWeights:
-    def test_top_ten_distribution_uses_current_round_scores(self, score_tracker):
-        scores = {f"hk_{i}": 1.0 - (i * 0.01) for i in range(1, 12)}
+    def test_top_n_distribution_uses_current_round_scores(self, score_tracker):
+        # Seed one more miner than dust_top_n so the rank just past the cutoff
+        # gets 0 and ranks #2..dust_top_n each receive proportional dust. Driven
+        # off the DEFAULT_* constants so it tracks the current reward policy.
+        n = DEFAULT_DUST_TOP_N + 1
+        scores = {f"hk_{i}": 1.0 - (i * 0.01) for i in range(1, n + 1)}
         _seed_participation(score_tracker, scores, MIN_PARTICIPATION_ROUNDS - 1)
         _record_scores(score_tracker, "r1", scores)
 
@@ -144,12 +157,13 @@ class TestRoundOnlyWeights:
         )
 
         assert weights["hk_1"] == pytest.approx(DEFAULT_WINNER_WEIGHT)
-        assert weights["hk_11"] == pytest.approx(0.0)
+        # rank dust_top_n+1 is beyond the dust cutoff -> 0
+        assert weights[f"hk_{n}"] == pytest.approx(0.0)
 
         dust_pool = 1.0 - DEFAULT_BURN_RATE - DEFAULT_WINNER_WEIGHT
         dust_raw = [DEFAULT_DUST_DECAY ** i for i in range(DEFAULT_DUST_TOP_N - 1)]
         dust_total = sum(dust_raw)
-        for rank in range(2, 11):
+        for rank in range(2, DEFAULT_DUST_TOP_N + 1):
             expected = dust_pool * dust_raw[rank - 2] / dust_total
             assert weights[f"hk_{rank}"] == pytest.approx(expected)
 

@@ -254,20 +254,48 @@ if [ "$FLAG_PRACTICE" = true ] || [ "$DEMO_INTENT" = true ]; then
     # --demo is pinned to a chr20 sample, so on a fresh box it only needs the
     # chr20 reference. Signal demo scope to setup.py (via ensure_runtime_assets)
     # so it fetches chr20 (~60 MB) instead of the full validator superset. Only
-    # for --demo — --practice can pick a chr21 sample and needs the wider set.
+    # for --demo — --practice can pick a chr21/chr22 sample and needs the wider set.
     if [ "$DEMO_INTENT" = true ] && [ "$FLAG_PRACTICE" != true ]; then
         export MINER_DEMO=true
     fi
 
     ensure_runtime_assets
 
-    # Scoring uses hap.py/vcfeval, which needs the RTG SDF — a validator-only
-    # asset the normal miner data set omits. Fetch it directly for just the
-    # sample chromosomes (chr20/chr21) — ~50 MB total, vs the ~5 GB
-    # all-chromosome validator superset. The SDF files are public.
+    # Chromosomes the chosen mode can serve: --demo is pinned to a chr20 sample,
+    # --practice can pick chr20/chr21/chr22. Fetch only those, not the ~5 GB
+    # all-chromosome validator superset.
     REF_BASE="${REF_S3_BASE:-https://api.theminos.ai/reference}"
+    if [ "$FLAG_PRACTICE" = true ]; then
+        PRACTICE_CHROMS="chr20 chr21 chr22"
+    else
+        PRACTICE_CHROMS="chr20"
+    fi
+
+    # Reference FASTA (+ .fai + .dict) for those chromosomes. ensure_runtime_assets
+    # only probes chr20.fa, and the demo-scoped data set fetches chr20 alone — so
+    # on a demo-first box a chr21/chr22 practice sample would otherwise fail with
+    # "reference not found for <chrom>". Fetch any that are missing (~60 MB/chrom).
+    for chrom in $PRACTICE_CHROMS; do
+        fa_dir="datasets/reference/$chrom"
+        if [ -f "$fa_dir/$chrom.fa" ]; then
+            continue
+        fi
+        echo -e "${YELLOW}Fetching reference FASTA for $chrom (needed to call)...${NC}"
+        mkdir -p "$fa_dir"
+        for ext in fa fa.fai dict; do
+            if ! curl -fsSL "$REF_BASE/$chrom/$chrom.$ext" -o "$fa_dir/$chrom.$ext"; then
+                echo -e "${RED}Could not download reference $chrom.$ext. Scoring will fail.${NC}"
+                rm -f "$fa_dir/$chrom.$ext"
+                exit 1
+            fi
+        done
+    done
+
+    # Scoring uses hap.py/vcfeval, which needs the RTG SDF — a validator-only
+    # asset the normal miner data set omits. Fetch it for the same chromosomes
+    # (~24 MB/chrom). The SDF files are public.
     SDF_FILES="done mainIndex nameIndex0 namedata0 namepointer0 progress seqdata0 seqpointer0 sequenceIndex0 summary.txt"
-    for chrom in chr20 chr21; do
+    for chrom in $PRACTICE_CHROMS; do
         sdf_dir="datasets/reference/$chrom/$chrom.sdf"
         if [ -f "$sdf_dir/seqdata0" ]; then
             continue

@@ -65,12 +65,14 @@ tracker = ScoreTracker()
 # Update a miner's score
 tracker.update(hotkey="5xxx...", raw_score=0.92)
 
-# Get absolute miner weights before the validator adds burn
+# Get absolute miner weights before the validator adds burn.
+# Reward params are read live from /scoring/network-config (values below are the
+# current policy — check network-config for the latest).
 weights = tracker.get_winner_heavy_pruning_dust_weights(
     miner_hotkeys=["5xxx...", "5yyy..."],
-    burn_rate=0.87,
-    winner_weight=0.10,
-    dust_top_n=10,
+    burn_rate=0.0,
+    winner_weight=0.9,
+    dust_top_n=20,
     dust_decay=0.8,
 )
 # Returns: {hotkey: weight} mapping
@@ -79,8 +81,8 @@ weights = tracker.get_winner_heavy_pruning_dust_weights(
 **Algorithm:**
 
 1. **Round Score:** current-round AdvancedScorer `combined_final` only.
-2. **Participation Gating:** 10 valid scored rounds in the last 20 required; the current round counts.
-3. **Winner-Heavy Pruning Dust:** eligible rank #1 gets winner weight, ranks #2-#10 split dust.
+2. **Participation Gating:** 5 valid scored rounds in the last 20 required; the current round counts.
+3. **Winner-Heavy Pruning Dust:** eligible rank #1 gets winner weight, ranks #2-#`dust_top_n` (currently #20) split dust.
 4. **Burn Remainder:** validator sends unallocated weight to the burn UID.
 
 ### 3. File Utils (file_utils.py)

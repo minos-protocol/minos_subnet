@@ -31,12 +31,12 @@ The AdvancedScorer outputs a raw score on a 0–100 scale. Validators normalize 
 
 - A single bad round costs that round, not future rounds.
 - There is no historical-score decay or carryover in the current scoring path.
-- Eligibility still depends on recent participation: miners must have valid positive scores in at least 10 of the last 20 rounds.
+- Eligibility still depends on recent participation: miners must have valid positive scores in at least 5 of the last 20 rounds.
 - When reading logs: `Score: 85.00/100` means the current-round score is 0.85 after normalization.
 
 **Before eligibility:** miners receive 0 weight until they have enough recent valid scored rounds. Validators keep the unassigned budget in burn rather than paying ineligible miners.
 
-**After eligibility:** **winner-heavy with pruning dust** among eligible miners — validators burn 87%, give rank #1 10%, and split the remaining 3% across eligible ranks #2 through #10 with ranked decay. Ineligible miners and ranks below the dust cutoff get 0.
+**After eligibility:** **winner-heavy with pruning dust** among eligible miners — rank #1 gets ~90% and eligible ranks #2 through #20 split the remaining ~10% with ranked (0.8) decay; burn is currently 0%. Ineligible miners and ranks below the dust cutoff get 0. (Reward values are dynamic — check `/scoring/network-config` for the latest.)
 
 Consistency matters as much as peak performance.
 
@@ -44,9 +44,9 @@ Consistency matters as much as peak performance.
 
 This is the most common question for new miners. There are three distinct causes; check them in this order.
 
-**1. You are not eligible yet (most likely).** Eligibility requires participating in **at least 10 of the last 20 rounds**. With ~20 rounds per day, a fresh miner needs roughly 12 hours of continuous uptime before they can earn any weight, even with perfect scores. During this time you appear in validator logs but receive 0 weight. This is expected.
+**1. You are not eligible yet (most likely).** Eligibility requires participating in **at least 5 of the last 20 rounds**. With ~20 rounds per day, a fresh miner needs roughly 6 hours of continuous uptime before they can earn any weight, even with perfect scores. During this time you appear in validator logs but receive 0 weight. This is expected.
 
-**2. You are eligible but outside the paid ranks.** Once eligible, the top miner gets the main 10% miner weight and eligible ranks #2 through #10 split the pruning dust. If your current-round score ranks below the paid cutoff, you get 0. The fix is to score better — see Section 4 (Tuning Strategy).
+**2. You are eligible but outside the paid ranks.** Once eligible, the top miner gets the main (~90%) miner weight and eligible ranks #2 through #20 split the pruning dust. If your current-round score ranks below the paid cutoff, you get 0. The fix is to score better — see Section 4 (Tuning Strategy).
 
 **3. You are submitting but the score is 0.** Causes: wrong reference build, malformed VCF (multi-sample, missing index), tool config rejected by the parameter whitelist, or a Docker error. Check your logs for the line `Score: 0.00/100`. If you see it, the variant call ran but produced no usable output. If you do not see a score line at all, your submission never made it to the scoring phase — check the platform connectivity / round timing.
 
@@ -147,7 +147,7 @@ The FP rate penalty ramps steeply once you exceed the dynamic threshold. If your
 
 Use **demo mode** (`--demo`) for a one-shot check before committing to live rounds — it downloads a single fixed, fully-answered sample (BAM + truth), runs your variant caller, and prints the exact score a validator would compute.
 
-To score against **any** sample (not just the fixed demo one), use **practice mode** (`--practice`): pick from a menu of fully-answered chr20/chr21 samples and compare configs before going live. A bad config can cost the current round and may fail to count toward eligibility if it produces no valid positive score.
+To score against **any** sample (not just the fixed demo one), use **practice mode** (`--practice`): pick from a menu of fully-answered chr20/chr21/chr22 samples and compare configs before going live. A bad config can cost the current round and may fail to count toward eligibility if it produces no valid positive score.
 
 ### The Core Tradeoff
 
@@ -241,4 +241,4 @@ min_mapping_quality=10
 3. Set PCR-free mode if using GATK.
 4. Tune one parameter at a time, watching your per-component scores.
 5. Keep your FP rate low — the penalty ramps steeply past the threshold.
-6. Be patient — eligibility takes 10 valid scored rounds, and region-to-region variance is normal.
+6. Be patient — eligibility takes 5 valid scored rounds, and region-to-region variance is normal.

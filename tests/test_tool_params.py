@@ -364,6 +364,53 @@ class TestValidateAndBuildFlags:
         assert result["valid"] is True
         assert result["flags"] == []
 
+    def test_bcftools_indels_cns_bool_flag(self):
+        result = validate_and_build_flags("bcftools", {"indels_cns": True})
+        assert result["valid"] is True
+        flag = result["flags"][0]
+        assert flag["stage"] == "mpileup"
+        assert flag["flag"] == "--indels-cns"
+
+    def test_bcftools_indel_size_valid(self):
+        result = validate_and_build_flags("bcftools", {"indel_size": 110})
+        assert result["valid"] is True
+        flag = result["flags"][0]
+        assert flag["stage"] == "mpileup"
+        assert flag["flag"] == "--indel-size 110"
+
+    def test_bcftools_indel_size_out_of_range_low(self):
+        result = validate_and_build_flags("bcftools", {"indel_size": 49})
+        assert result["valid"] is False
+
+    def test_bcftools_indel_size_out_of_range_high(self):
+        result = validate_and_build_flags("bcftools", {"indel_size": 200})
+        assert result["valid"] is False
+
+    def test_bcftools_multiallelic_caller_flag(self):
+        result = validate_and_build_flags("bcftools", {"multiallelic_caller": True})
+        assert result["valid"] is True
+        flag = result["flags"][0]
+        assert flag["stage"] == "call"
+        assert flag["flag"] == "-m"
+
+    def test_bcftools_consensus_caller_flag(self):
+        result = validate_and_build_flags("bcftools", {"consensus_caller": True})
+        assert result["valid"] is True
+        flag = result["flags"][0]
+        assert flag["stage"] == "call"
+        assert flag["flag"] == "-c"
+
+    def test_bcftools_both_callers_false_emit_no_caller_flag(self):
+        # With both off, the caller params emit nothing; templates.bcftools then
+        # defaults the `call` invocation to -m (see test_bcftools.py).
+        result = validate_and_build_flags(
+            "bcftools", {"multiallelic_caller": False, "consensus_caller": False}
+        )
+        assert result["valid"] is True
+        call_flags = [f["flag"] for f in result["flags"] if f["stage"] == "call"]
+        assert "-m" not in call_flags
+        assert "-c" not in call_flags
+
     # -- Mixed valid + invalid --
 
     def test_mixed_valid_and_invalid_params(self):
