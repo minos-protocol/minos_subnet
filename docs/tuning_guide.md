@@ -31,7 +31,7 @@ The AdvancedScorer outputs a raw score on a 0–100 scale. Validators normalize 
 
 - A single bad round costs that round, not future rounds.
 - There is no historical-score decay or carryover in the current scoring path.
-- Eligibility still depends on recent participation: miners must have valid positive scores in at least 10 of the last 20 rounds.
+- Eligibility still depends on recent participation: miners must have valid positive scores in at least 5 of the last 20 rounds.
 - When reading logs: `Score: 85.00/100` means the current-round score is 0.85 after normalization.
 
 **Before eligibility:** miners receive 0 weight until they have enough recent valid scored rounds. Validators keep the unassigned budget in burn rather than paying ineligible miners.
@@ -44,7 +44,7 @@ Consistency matters as much as peak performance.
 
 This is the most common question for new miners. There are three distinct causes; check them in this order.
 
-**1. You are not eligible yet (most likely).** Eligibility requires participating in **at least 10 of the last 20 rounds**. With ~20 rounds per day, a fresh miner needs roughly 12 hours of continuous uptime before they can earn any weight, even with perfect scores. During this time you appear in validator logs but receive 0 weight. This is expected.
+**1. You are not eligible yet (most likely).** Eligibility requires participating in **at least 5 of the last 20 rounds**. With ~20 rounds per day, a fresh miner needs roughly 6 hours of continuous uptime before they can earn any weight, even with perfect scores. During this time you appear in validator logs but receive 0 weight. This is expected.
 
 **2. You are eligible but outside the paid ranks.** Once eligible, the top miner gets the main 10% miner weight and eligible ranks #2 through #10 split the pruning dust. If your current-round score ranks below the paid cutoff, you get 0. The fix is to score better — see Section 4 (Tuning Strategy).
 
@@ -241,4 +241,4 @@ min_mapping_quality=10
 3. Set PCR-free mode if using GATK.
 4. Tune one parameter at a time, watching your per-component scores.
 5. Keep your FP rate low — the penalty ramps steeply past the threshold.
-6. Be patient — eligibility takes 10 valid scored rounds, and region-to-region variance is normal.
+6. Be patient — eligibility takes 5 valid scored rounds, and region-to-region variance is normal.

@@ -155,7 +155,7 @@ SNP/INDEL weighting is truth-count-proportional (fallback: 70/30).
 ### 5.2 Weight assignment (round-only winner-heavy pruning dust)
 
 - Each scored round is ranked from that round's normalized AdvancedScorer result only; historical scores do not carry into winner selection
-- Miners must participate in ≥ 10 of the last 20 rounds to be eligible for weights; the current round counts
+- Miners must participate in ≥ 5 of the last 20 rounds to be eligible for weights; the current round counts
 - Miners below the participation threshold receive 0 weight
 - 87% goes to the burn UID, the highest-scoring eligible current-round miner receives 10%, and the remaining 3% is distributed as ranked pruning dust across eligible ranks #2 through #10 using geometric decay
 - Close current-round ties use deterministic submission/canonical-ranking signals so validators converge on the same winner

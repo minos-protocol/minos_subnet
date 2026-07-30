@@ -79,7 +79,7 @@ weights = tracker.get_winner_heavy_pruning_dust_weights(
 **Algorithm:**
 
 1. **Round Score:** current-round AdvancedScorer `combined_final` only.
-2. **Participation Gating:** 10 valid scored rounds in the last 20 required; the current round counts.
+2. **Participation Gating:** 5 valid scored rounds in the last 20 required; the current round counts.
 3. **Winner-Heavy Pruning Dust:** eligible rank #1 gets winner weight, ranks #2-#10 split dust.
 4. **Burn Remainder:** validator sends unallocated weight to the burn UID.
 

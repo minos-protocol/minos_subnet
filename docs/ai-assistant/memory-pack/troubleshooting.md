@@ -84,7 +84,7 @@ Next checks:
 
 ### Score Exists But Weight Is 0
 
-The miner may not be eligible yet, may lack enough recent valid scored rounds, or may rank outside the rewarded set. Eligibility requires 10 valid scored rounds out of the last 20 rounds, including the current round.
+The miner may not be eligible yet, may lack enough recent valid scored rounds, or may rank outside the rewarded set. Eligibility requires 5 valid scored rounds out of the last 20 rounds, including the current round.
 
 Next checks:
 

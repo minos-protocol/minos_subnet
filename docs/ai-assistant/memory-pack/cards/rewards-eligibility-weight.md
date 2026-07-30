@@ -13,7 +13,7 @@ Score means validators evaluated miner output. Eligibility means the miner has e
 Current public protocol shape for this memory pack:
 
 - Rounds are about 72 minutes.
-- Eligibility requires 10 valid scored rounds out of the last 20 rounds, including the current round.
+- Eligibility requires 5 valid scored rounds out of the last 20 rounds, including the current round.
 - Ineligible miners can submit and score but receive 0 weight until eligibility catches up.
 - The round winner receives ~90% of the miner weight (`winner_weight = 0.9`) — winner-heavy.
 - Eligible ranks #2 through #20 split the remaining ~10% as pruning dust, decaying by 0.8 (`dust_top_n = 20`, `dust_decay = 0.8`).

@@ -564,7 +564,7 @@ Only finite scores where `0 < current_score <= 1.0` are eligible for ranking. Ro
 
 Validators burn 87% of their weight, give the top eligible current-round miner 10%, and split the remaining 3% as ranked pruning dust across eligible ranks #2 through #10 using 0.8 geometric weighting. If fewer dust recipients exist, that 3% is renormalized across the available ranks; if no dust recipients exist, unused dust is sent to burn.
 
-Eligibility requires scoring in at least 10 of the last 20 rounds, including the current round. Miners below the participation threshold receive 0 weight until they qualify. Close current-round ties use deterministic round data from the validator/platform flow; historical scores are not part of the ranking.
+Eligibility requires scoring in at least 5 of the last 20 rounds, including the current round. Miners below the participation threshold receive 0 weight until they qualify. Close current-round ties use deterministic round data from the validator/platform flow; historical scores are not part of the ranking.
 
 ---
 
@@ -583,7 +583,7 @@ Eligibility requires scoring in at least 10 of the last 20 rounds, including the
 | Round skipped, "<10min left"  | Submitted too late                         | Miner needs ≥10 min remaining to start a round. Check clock skew (`timedatectl`) and platform connectivity speed |
 | Reference download stuck/slow | Platform redirect or transient network     | Setup retries once automatically. If it still fails, re-run `python setup.py --update-data-only`                 |
 | Validator: "no scoring rounds"| Round still in submission window           | Validators only score AFTER the submission window closes. Wait for the next tempo boundary                       |
-| Earning 0 weight as miner     | Not eligible yet, no valid current score, or outside the top current-round winners | Need >=10 of last 20 rounds participated, then a stronger current-round Advanced Score. See [tuning_guide](docs/tuning_guide.md) |
+| Earning 0 weight as miner     | Not eligible yet, no valid current score, or outside the top current-round winners | Need >=5 of last 20 rounds participated, then a stronger current-round Advanced Score. See [tuning_guide](docs/tuning_guide.md) |
 
 ### Logs
 

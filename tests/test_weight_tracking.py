@@ -51,13 +51,13 @@ class TestRoundOnlyState:
                 score_tracker.update("hk_bad", bad_score)
         assert "hk_bad" not in score_tracker.round_scores
 
-    def test_nine_of_twenty_is_not_eligible(self, score_tracker):
+    def test_below_min_participation_is_not_eligible(self, score_tracker):
         _seed_participation(score_tracker, ["hk_a"], MIN_PARTICIPATION_ROUNDS - 1)
 
         assert score_tracker.get_participation_count("hk_a") == MIN_PARTICIPATION_ROUNDS - 1
         assert not score_tracker.is_eligible("hk_a")
 
-    def test_ten_of_twenty_is_eligible(self, score_tracker):
+    def test_at_min_participation_is_eligible(self, score_tracker):
         _seed_participation(score_tracker, ["hk_a"], MIN_PARTICIPATION_ROUNDS)
 
         assert score_tracker.get_participation_count("hk_a") == MIN_PARTICIPATION_ROUNDS
@@ -116,19 +116,28 @@ class TestRoundOnlyState:
         assert score_tracker.is_eligible("hk_old")
 
     def test_recovery_trims_to_recent_window(self, score_tracker):
+        # Rounds beyond the participation window that recovery must drop.
+        trimmed = 5
+        total = PARTICIPATION_WINDOW + trimmed
+        # hk_old only appears in the oldest rounds, so after the window trims the
+        # first `trimmed` it lands one round below the gate; hk_recent fills the
+        # rest. Driven off the constants so it holds for any gate value.
+        old_round_span = trimmed + (MIN_PARTICIPATION_ROUNDS - 1)
         round_history = [
             {
                 "round_id": f"old_{idx}",
-                "scored_hotkeys": ["hk_old"] if idx < 10 else ["hk_recent"],
+                "scored_hotkeys": ["hk_old"] if idx < old_round_span else ["hk_recent"],
             }
-            for idx in range(PARTICIPATION_WINDOW + 5)
+            for idx in range(total)
         ]
 
         score_tracker.recover_from_platform_state([], round_history)
 
         assert len(score_tracker.round_history) == PARTICIPATION_WINDOW
-        assert score_tracker.get_participation_count("hk_old") == 5
-        assert score_tracker.get_participation_count("hk_recent") == 15
+        assert score_tracker.get_participation_count("hk_old") == MIN_PARTICIPATION_ROUNDS - 1
+        assert score_tracker.get_participation_count("hk_recent") == (
+            PARTICIPATION_WINDOW - (MIN_PARTICIPATION_ROUNDS - 1)
+        )
         assert not score_tracker.is_eligible("hk_old")
         assert score_tracker.is_eligible("hk_recent")
 

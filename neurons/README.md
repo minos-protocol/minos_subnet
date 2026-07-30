@@ -162,7 +162,7 @@ python -m neurons.validator
 | `PLATFORM_URL` | https://api.theminos.ai | Platform API URL |
 | `PLATFORM_TIMEOUT` | 60 | Platform API request timeout (seconds) |
 | `STORAGE_PRIMARY_BACKEND` | hippius | Storage preference: `hippius` tries Hippius SN75 first (Bittensor decentralized, recommended). `aws_s3` reverses the order. |
-| `MIN_PARTICIPATION_ROUNDS` | 10 | Valid scored rounds required inside the recent eligibility window |
+| `MIN_PARTICIPATION_ROUNDS` | 5 | Valid scored rounds required inside the recent eligibility window |
 | `PARTICIPATION_WINDOW` | 20 | Recent finalized rounds considered for eligibility |
 | `SCORING_THREADS` | auto | Override: threads per scoring Docker job. Auto-tuned from cores (clamped 2–8) |
 | `SCORING_MEMORY_GB` | 16 | Override: memory per scoring Docker job. **Below 16 OOM-crashes DeepVariant** |
@@ -218,7 +218,7 @@ python -m neurons.validator
 
 Validators burn 87%, give the top eligible miner 10%, and split the remaining
 3% across eligible ranks #2 through #10 using ranked pruning dust. Eligibility
-requires at least 10 valid scored rounds in the last 20 finalized rounds, and
+requires at least 5 valid scored rounds in the last 20 finalized rounds, and
 the current round counts toward that threshold. Eligible miners are ranked only
 by the current round's AdvancedScorer score; ineligible miners receive 0
 weight. Tiebreaker: earliest submission timestamp (applied only at
