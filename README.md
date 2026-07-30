@@ -185,7 +185,7 @@ MINER_DEMO=true bash start-miner.sh   # env var works the same as --flag
 
 ### Score your config against any sample (practice mode)
 
-`--demo` scores one fixed sample; **`--practice`** lets you score against **any** of the fully-answered chr20/chr21 samples — pick from a menu, run your config, and see the **exact score a validator would compute** — no chain, no wallet, no live round at risk:
+`--demo` scores one fixed sample; **`--practice`** lets you score against **any** of the fully-answered chr20/chr21/chr22 samples — pick from a menu, run your config, and see the **exact score a validator would compute** — no chain, no wallet, no live round at risk:
 
 ```bash
 bash start-miner.sh --practice                                   # interactive: pick a sample, see your score
