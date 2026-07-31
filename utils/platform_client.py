@@ -409,6 +409,65 @@ class ValidatorPlatformClient(PlatformClient):
     # Round-Based API Methods
     # =========================================================================
 
+    async def get_canonical_ranking(
+        self,
+        round_id: Optional[str] = None,
+        top_n: int = 10,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch the stake-weighted canonical ranking via the authenticated POST.
+
+        Uses the same canonical-v2 signing as the rest of the validator API: the
+        validator signs with its whitelisted hotkey and POSTs to
+        /v2/canonical-ranking (the /v2 validator-auth router). Used only as a
+        close-call tiebreak signal.
+
+        Backward-compatible during rollout: if the server does not expose the
+        POST route yet (404/405) or the request errors, fall back to the
+        base-class GET so the tiebreak signal is never lost. Returns ``None`` on
+        any error or not-ready (425), which the caller treats as canonical
+        unavailable.
+        """
+        path = "/v2/canonical-ranking"
+
+        def _signed_body():
+            # Re-sign per attempt so each retry carries a fresh timestamp/nonce
+            # (the server's replay protection rejects a reused nonce).
+            return self._auth_body(
+                "POST", path,
+                validator_hotkey=self.keypair.ss58_address,
+                round_id=round_id,
+                top_n=top_n,
+            )
+
+        try:
+            async with self._get_client() as client:
+                for attempt in range(3):
+                    response = await client.post(
+                        path, json=_signed_body(), headers=self._AUTH_HEADERS, timeout=10.0
+                    )
+                    if response.status_code == 200:
+                        return response.json()
+                    # Older server without the signed POST route → legacy GET.
+                    if response.status_code in (404, 405):
+                        return await super().get_canonical_ranking(
+                            round_id=round_id, top_n=top_n
+                        )
+                    # Not ready yet (final-score gate still closed) → brief retry.
+                    if response.status_code == 425 and attempt < 2:
+                        await asyncio.sleep(5.0)
+                        continue
+                    break
+                return None
+        except Exception:
+            # Any transport/signing error → degrade to the legacy GET so this
+            # migration never costs a validator its tiebreak signal.
+            try:
+                return await super().get_canonical_ranking(
+                    round_id=round_id, top_n=top_n
+                )
+            except Exception:
+                return None
+
     async def get_validator_state(self) -> Dict[str, Any]:
         """Get validator state for restart recovery.
 

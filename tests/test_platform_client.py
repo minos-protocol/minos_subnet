@@ -12,6 +12,7 @@ from utils.platform_client import (
     PlatformClient,
     PlatformConfig,
     MinerPlatformClient,
+    ValidatorPlatformClient,
     PlatformClientError,
     AuthenticationError,
     retry_async,
@@ -459,3 +460,95 @@ class TestDemoModeRouting:
         assert live_path != demo_path
         assert live_sig and demo_sig
         assert live_sig != demo_sig, "demo + live must produce distinct signatures"
+
+
+# ---------------------------------------------------------------------------
+# Validator canonical-ranking: signed POST migration (commit-reveal lockdown)
+# ---------------------------------------------------------------------------
+
+class TestValidatorCanonicalRankingPost:
+    """ValidatorPlatformClient.get_canonical_ranking uses the signed POST
+    /v2/canonical-ranking, with a graceful fallback to the legacy public GET so
+    the tiebreak signal survives the rollout."""
+
+    def _make_client(self) -> ValidatorPlatformClient:
+        return ValidatorPlatformClient(_keypair(), _https_config())
+
+    @staticmethod
+    def _mock_http(post_response=None, get_response=None):
+        mock_http = AsyncMock()
+        if post_response is not None:
+            mock_http.post = AsyncMock(return_value=post_response)
+        if get_response is not None:
+            mock_http.get = AsyncMock(return_value=get_response)
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+        return mock_http
+
+    @staticmethod
+    def _resp(status_code, payload=None):
+        r = MagicMock()
+        r.status_code = status_code
+        r.json.return_value = payload or {}
+        return r
+
+    @pytest.mark.asyncio
+    async def test_signed_post_to_v2_route(self):
+        client = self._make_client()
+        payload = {"ranking": [{"miner_hotkey": "hk_win"}], "validator_count": 3}
+        mock_http = self._mock_http(post_response=self._resp(200, payload))
+
+        with patch.object(client, "_get_client", return_value=mock_http):
+            out = await client.get_canonical_ranking(round_id="r1", top_n=5)
+
+        assert out == payload
+        args, kwargs = mock_http.post.call_args
+        assert args[0] == "/v2/canonical-ranking"          # POST on the /v2 router
+        body = kwargs["json"]
+        # Auth-gated: carries the validator's hotkey + a fresh v2 signature/nonce.
+        assert body["validator_hotkey"] == client.keypair.ss58_address
+        assert body["round_id"] == "r1" and body["top_n"] == 5
+        assert body["signature"] and body["nonce"] and body["timestamp"]
+        assert kwargs["headers"]["X-Minos-Auth-Version"] == "2"
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_legacy_get_on_404(self):
+        client = self._make_client()
+        legacy_payload = {"ranking": [{"miner_hotkey": "hk_legacy"}]}
+        mock_http = self._mock_http(
+            post_response=self._resp(404),
+            get_response=self._resp(200, legacy_payload),
+        )
+
+        with patch.object(client, "_get_client", return_value=mock_http):
+            out = await client.get_canonical_ranking(round_id="r1")
+
+        assert out == legacy_payload
+        # Fallback hit the legacy public GET on the /scoring router.
+        assert mock_http.get.call_args[0][0] == "/scoring/canonical-ranking"
+
+    @pytest.mark.asyncio
+    async def test_retries_on_425_with_fresh_nonce_then_none(self):
+        client = self._make_client()
+        mock_http = self._mock_http(post_response=self._resp(425))
+
+        with patch.object(client, "_get_client", return_value=mock_http), \
+                patch("utils.platform_client.asyncio.sleep", new=AsyncMock()):
+            out = await client.get_canonical_ranking()
+
+        assert out is None
+        assert mock_http.post.call_count == 3          # retried up to the cap
+        nonces = [c.kwargs["json"]["nonce"] for c in mock_http.post.call_args_list]
+        assert len(set(nonces)) == 3                   # re-signed each attempt (no replay)
+
+    @pytest.mark.asyncio
+    async def test_transport_error_degrades_to_get(self):
+        client = self._make_client()
+        legacy_payload = {"ranking": []}
+        mock_http = self._mock_http(get_response=self._resp(200, legacy_payload))
+        mock_http.post = AsyncMock(side_effect=httpx.ConnectError("boom"))
+
+        with patch.object(client, "_get_client", return_value=mock_http):
+            out = await client.get_canonical_ranking()
+
+        assert out == legacy_payload
