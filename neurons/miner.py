@@ -236,7 +236,7 @@ class Miner:
             action="store_true",
             default=False,
             help=(
-                "Interactive practice mode: pick a fully-answered chr20/chr21/chr22 "
+                "Interactive practice mode: pick a fully-answered chr19/chr20/chr21/chr22 "
                 "sample from the platform, download its BAM + truth + "
                 "mutations (reused if already downloaded), run your config, and "
                 "self-score with the validator scorer. No chain. Optionally "
@@ -650,7 +650,7 @@ class Miner:
                 print(f"   is persisted, no score is computed, no TAO is earned.", flush=True)
                 print(f"", flush=True)
                 print(f"   To actually SCORE and improve your config, use practice", flush=True)
-                print(f"   mode — it serves fully-answered chr20/chr21/chr22 samples and", flush=True)
+                print(f"   mode — it serves fully-answered chr19/chr20/chr21/chr22 samples and", flush=True)
                 print(f"   scores your config with the exact validator scorer:", flush=True)
                 print(f"     python neurons/miner.py --practice --config configs/{self.variant_caller}.conf", flush=True)
                 print(f"", flush=True)

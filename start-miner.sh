@@ -254,7 +254,7 @@ if [ "$FLAG_PRACTICE" = true ] || [ "$DEMO_INTENT" = true ]; then
     # --demo is pinned to a chr20 sample, so on a fresh box it only needs the
     # chr20 reference. Signal demo scope to setup.py (via ensure_runtime_assets)
     # so it fetches chr20 (~60 MB) instead of the full validator superset. Only
-    # for --demo — --practice can pick a chr21/chr22 sample and needs the wider set.
+    # for --demo — --practice can pick a chr19/chr21/chr22 sample and needs the wider set.
     if [ "$DEMO_INTENT" = true ] && [ "$FLAG_PRACTICE" != true ]; then
         export MINER_DEMO=true
     fi
@@ -262,18 +262,18 @@ if [ "$FLAG_PRACTICE" = true ] || [ "$DEMO_INTENT" = true ]; then
     ensure_runtime_assets
 
     # Chromosomes the chosen mode can serve: --demo is pinned to a chr20 sample,
-    # --practice can pick chr20/chr21/chr22. Fetch only those, not the ~5 GB
+    # --practice can pick chr19/chr20/chr21/chr22. Fetch only those, not the ~5 GB
     # all-chromosome validator superset.
     REF_BASE="${REF_S3_BASE:-https://api.theminos.ai/reference}"
     if [ "$FLAG_PRACTICE" = true ]; then
-        PRACTICE_CHROMS="chr20 chr21 chr22"
+        PRACTICE_CHROMS="chr19 chr20 chr21 chr22"
     else
         PRACTICE_CHROMS="chr20"
     fi
 
     # Reference FASTA (+ .fai + .dict) for those chromosomes. ensure_runtime_assets
     # only probes chr20.fa, and the demo-scoped data set fetches chr20 alone — so
-    # on a demo-first box a chr21/chr22 practice sample would otherwise fail with
+    # on a demo-first box a chr19/chr21/chr22 practice sample would otherwise fail with
     # "reference not found for <chrom>". Fetch any that are missing (~60 MB/chrom).
     for chrom in $PRACTICE_CHROMS; do
         fa_dir="datasets/reference/$chrom"
