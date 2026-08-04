@@ -1,8 +1,11 @@
 # Install the CPU build of PyTorch by default (much smaller than the CUDA
 # build). For GPU, install torch from pytorch.org first, then run this file.
 --extra-index-url https://download.pytorch.org/whl/cpu
-bittensor>=9.12.2
-bittensor-cli>=9.5.0
+# Pinned to the current stable validator stack (bittensor 10.3.0 pulls
+# bittensor-drand>=1.3.0; pin drand too so the commit-reveal path is fixed).
+bittensor==10.3.0
+bittensor-drand==1.3.0
+bittensor-cli==9.21.0
 torch>=2.0.0,<2.7.0
 numpy>=1.24.0
 pydantic>=2.0.0

@@ -148,7 +148,7 @@ minos_subnet/
 | Disk | ≥60 GB (miner) / ≥100 GB (validator) | Reference: ~2 GB miner, ~14 GB validator (SDF expands ~6×). Plus per-round BAMs (~6 GB each) until cleaned. |
 | Docker | 20.10+ (24.0+ recommended) | Required for GATK, hap.py, bcftools |
 | Python | 3.10+ | We test on 3.12 |
-| Bittensor | Latest pip install | Provides wallet/subtensor/dendrite APIs |
+| Bittensor | 10.3.0 (via requirements.txt) | Provides wallet/subtensor/dendrite APIs; 11.x is not supported |
 
 ---
 
@@ -185,7 +185,7 @@ MINER_DEMO=true bash start-miner.sh   # env var works the same as --flag
 
 ### Score your config against any sample (practice mode)
 
-`--demo` scores one fixed sample; **`--practice`** lets you score against **any** of the fully-answered chr20/chr21/chr22 samples — pick from a menu, run your config, and see the **exact score a validator would compute** — no chain, no wallet, no live round at risk:
+`--demo` scores one fixed sample; **`--practice`** lets you score against **any** of the fully-answered chr19/chr20/chr21/chr22 samples — pick from a menu, run your config, and see the **exact score a validator would compute** — no chain, no wallet, no live round at risk:
 
 ```bash
 bash start-miner.sh --practice                                   # interactive: pick a sample, see your score
