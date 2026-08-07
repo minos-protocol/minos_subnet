@@ -352,6 +352,15 @@ class TestValidateAndBuildFlags:
         assert flag["stage"] == "call"
         assert flag["flag"] == "--ploidy GRCh38"
 
+    def test_bcftools_numeric_ploidy_preset_from_conf(self):
+        """Numeric presets parsed from .conf files are valid BCFtools enums."""
+        for preset in (1, 2):
+            result = validate_and_build_flags("bcftools", {"ploidy": preset})
+            assert result["valid"] is True
+            flag = result["flags"][0]
+            assert flag["stage"] == "call"
+            assert flag["flag"] == f"--ploidy {preset}"
+
     def test_bcftools_bool_flag_true(self):
         result = validate_and_build_flags("bcftools", {"no_BAQ": True})
         assert result["valid"] is True

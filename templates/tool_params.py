@@ -924,6 +924,18 @@ def validate_and_build_flags(tool_name: str, tool_options: dict) -> dict:
 
         param_def = params[param_name]
 
+        # Numeric values in .conf files are parsed as integers, but BCFtools
+        # defines its built-in numeric ploidy presets as the enum strings "1"
+        # and "2". Normalize them before enum validation so `ploidy=2`
+        # produces the valid CLI argument `--ploidy 2`.
+        if (
+            tool_name == "bcftools"
+            and param_name == "ploidy"
+            and isinstance(param_value, int)
+            and str(param_value) in param_def["allowed_values"]
+        ):
+            param_value = str(param_value)
+
         # Validate by type
         if param_def["type"] == "int":
             if not isinstance(param_value, int):
