@@ -147,7 +147,7 @@ The FP rate penalty ramps steeply once you exceed the dynamic threshold. If your
 
 Use **demo mode** (`--demo`) for a one-shot check before committing to live rounds — it downloads a single fixed, fully-answered sample (BAM + truth), runs your variant caller, and prints the exact score a validator would compute.
 
-To score against **any** sample (not just the fixed demo one), use **practice mode** (`--practice`): pick from a menu of fully-answered chr19/chr20/chr21/chr22 samples and compare configs before going live. A bad config can cost the current round and may fail to count toward eligibility if it produces no valid positive score.
+To score against **any** sample (not just the fixed demo one), use **practice mode** (`--practice`): pick from a menu of fully-answered chr18/chr19/chr20/chr21/chr22 samples and compare configs before going live. A bad config can cost the current round and may fail to count toward eligibility if it produces no valid positive score.
 
 ### The Core Tradeoff
 
