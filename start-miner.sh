@@ -262,11 +262,11 @@ if [ "$FLAG_PRACTICE" = true ] || [ "$DEMO_INTENT" = true ]; then
     ensure_runtime_assets
 
     # Chromosomes the chosen mode can serve: --demo is pinned to a chr20 sample,
-    # --practice can pick chr19/chr20/chr21/chr22. Fetch only those, not the ~5 GB
+    # --practice can pick chr18/chr19/chr20/chr21/chr22. Fetch only those, not the ~5 GB
     # all-chromosome validator superset.
     REF_BASE="${REF_S3_BASE:-https://api.theminos.ai/reference}"
     if [ "$FLAG_PRACTICE" = true ]; then
-        PRACTICE_CHROMS="chr19 chr20 chr21 chr22"
+        PRACTICE_CHROMS="chr18 chr19 chr20 chr21 chr22"
     else
         PRACTICE_CHROMS="chr20"
     fi
