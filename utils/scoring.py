@@ -22,6 +22,20 @@ logger = logging.getLogger(__name__)
 HAPPY_DOCKER_IMAGE = "genonet/hap-py@sha256:03acabe84bbfba35f5a7234129d524c563f5657e1f21150a2ea2797f8e6d05f2"
 BCFTOOLS_DOCKER_IMAGE = "quay.io/biocontainers/bcftools:1.20--h8b25389_0"
 
+# FILTER values that mark a passing query call in hap.py's annotated output VCF.
+# hap.py normalizes FILTER=PASS to "." and writes the applied filter by name
+# (e.g. "LowQual") for filtered calls (verified against the pinned image), so
+# only these two values mean the call passed. Every metric parser must apply the
+# same policy: the summary.csv F1 rows are read from Filter=PASS only, so the
+# VCF parsers feeding the ratio, overcall, and synthetic metrics must likewise
+# count PASS calls only, or a miner's FILTER labeling silently changes scores.
+_PASS_FILTER_VALUES = (".", "PASS")
+
+
+def _is_pass_filter(filter_value: str) -> bool:
+    """Return True when an annotated-VCF FILTER value marks a PASS call."""
+    return filter_value in _PASS_FILTER_VALUES
+
 
 def subset_bed(source_bed: Path, target_bed: Path, region: str) -> bool:
     """Filter BED file to entries overlapping the target region."""
@@ -257,6 +271,10 @@ def compute_synthetic_only_metrics(happy_vcf_path: str, mutations_vcf_path: str,
 
     SNPs are matched by exact (chrom, pos, ref, alt). INDELs use position tolerance
     to handle normalization differences.
+
+    Only PASS query calls are counted, matching the Filter=PASS convention of the
+    summary.csv F1 rows: non-PASS calls earn no FP/TP credit, and a truth variant
+    matched only by a non-PASS call counts as FN.
     """
     try:
         happy_path = Path(happy_vcf_path)
@@ -322,10 +340,14 @@ def compute_synthetic_only_metrics(happy_vcf_path: str, mutations_vcf_path: str,
                     is_snp = bvt_truth == 'SNP'
                     matched = _match_snp(chrom, pos, ref, alt) if is_snp else _match_indel(chrom, pos)
                     if matched:
-                        key = f"{'tp' if bd_truth == 'TP' else 'fn'}_{'snp' if is_snp else 'indel'}"
+                        # A truth variant is only recovered (TP) when a PASS query
+                        # call matched it; a non-PASS match earns no credit (FN),
+                        # matching the Filter=PASS convention used for F1.
+                        is_tp = bd_truth == 'TP' and _is_pass_filter(fields[6])
+                        key = f"{'tp' if is_tp else 'fn'}_{'snp' if is_snp else 'indel'}"
                         counts[key] += 1
 
-                if bd_query == 'FP':
+                if bd_query == 'FP' and _is_pass_filter(fields[6]):
                     is_snp = bvt_query == 'SNP'
                     matched = _match_snp(chrom, pos, ref, alt) if is_snp else _match_indel(chrom, pos)
                     if matched:
@@ -365,7 +387,11 @@ def compute_synthetic_only_metrics(happy_vcf_path: str, mutations_vcf_path: str,
 def parse_region_overcall_metrics(happy_vcf_path: str,
                                   synthetic_truth_total: float,
                                   synthetic_snp_truth_total: float) -> Optional[Dict[str, float]]:
-    """Count full-region query false positives for the overcall guardrail."""
+    """Count full-region query false positives for the overcall guardrail.
+
+    Only PASS query calls are counted, matching the Filter=PASS convention of
+    the summary.csv F1 rows.
+    """
     try:
         vcf_path = Path(happy_vcf_path)
         if not vcf_path.exists():
@@ -391,7 +417,9 @@ def parse_region_overcall_metrics(happy_vcf_path: str,
                 bd_query = fmt_query.get('BD', '.')
                 bvt_query = fmt_query.get('BVT', '.')
 
-                if bd_query == 'FP':
+                # Count PASS query calls only, matching the F1 Filter=PASS
+                # convention; non-PASS calls are treated as not submitted.
+                if bd_query == 'FP' and _is_pass_filter(fields[6]):
                     if bvt_query == 'SNP':
                         counts['region_fp_snp'] += 1
                     elif bvt_query == 'INDEL':
@@ -435,6 +463,10 @@ def parse_happy_vcf_assessed_metrics(happy_vcf_path: str) -> Optional[Dict[str, 
     This function parses the annotated output VCF and computes these
     metrics from only assessed variants (BD=TP or BD=FP), giving accurate
     values for the AdvancedScorer.
+
+    Query-side counting is restricted to PASS calls, matching the Filter=PASS
+    convention of the summary.csv F1 rows; truth-side ratios cover all assessed
+    truth variants regardless of the query's FILTER.
 
     Args:
         happy_vcf_path: Path to hap.py output .vcf.gz
@@ -483,8 +515,13 @@ def parse_happy_vcf_assessed_metrics(happy_vcf_path: str) -> Optional[Dict[str, 
                 blt_truth = fmt_truth.get('BLT', '.')
                 blt_query = fmt_query.get('BLT', '.')
 
-                # Count query-side assessed variants (TP or FP)
-                if bd_query in ('TP', 'FP'):
+                # Count query-side assessed variants (TP or FP) that passed
+                # filters, matching the F1 Filter=PASS convention; non-PASS
+                # calls must not shape the query Ti/Tv or Het/Hom ratios.
+                # Truth-side counting below is deliberately unfiltered: truth
+                # ratios cover all assessed truth variants regardless of how
+                # (or whether) the query matched them.
+                if bd_query in ('TP', 'FP') and _is_pass_filter(fields[6]):
                     vtype = bvt_query
                     if vtype == 'SNP':
                         stats['query_total_snp'] += 1

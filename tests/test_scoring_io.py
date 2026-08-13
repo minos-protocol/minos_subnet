@@ -16,6 +16,7 @@ import pytest
 from utils.scoring import (
     generate_challenge_region_bed,
     generate_synthetic_regions_bed,
+    compute_synthetic_only_metrics,
     parse_region_overcall_metrics,
     parse_happy_vcf_assessed_metrics,
     HappyScorer,
@@ -312,6 +313,38 @@ class TestParseHappyVcfAssessedMetrics:
         assert result["hethom_truth_snp"] == pytest.approx(1.0)
         assert result["query_total_indel"] == 0
 
+    def test_non_pass_query_calls_excluded_from_query_ratios(self, tmp_path):
+        """Non-PASS query calls must not shape query ratios; truth ratios stay unfiltered.
+
+        hap.py annotates a LowQual junk call with BD=FP (verified against the
+        pinned image); summary.csv carries it in the ALL row but not the PASS
+        row, so the VCF parsers must exclude it too. hap.py writes PASS as ".",
+        so both "." and "PASS" must count as passing.
+        """
+        vcf = tmp_path / "happy_output.vcf.gz"
+        _write_happy_vcf(vcf, [
+            # Row A: PASS (".") query TP SNP tv het
+            "chr20\t100\t.\tA\tG\t50\t.\t.\tBD:BVT:BI:BLT\tTP:SNP:tv:het\tTP:SNP:tv:het\n",
+            # Row B: LowQual query FP SNP ti homalt - must be ignored query-side
+            "chr20\t200\t.\tC\tT\t50\tLowQual\t.\tBD:BVT:BI:BLT\tTP:SNP:tv:homalt\tFP:SNP:ti:homalt\n",
+            # Row C: literal PASS query TP SNP tv homalt
+            "chr20\t300\t.\tG\tA\t50\tPASS\t.\tBD:BVT:BI:BLT\tTP:SNP:tv:homalt\tTP:SNP:tv:homalt\n",
+            # Row D: truth variant matched only by a LowQual call - truth side
+            # must still count even though the query side is filtered out
+            "chr20\t400\t.\tT\tC\t50\tLowQual\t.\tBD:BVT:BI:BLT\tTP:SNP:ti:homalt\tTP:SNP:ti:homalt\n",
+        ])
+
+        result = parse_happy_vcf_assessed_metrics(str(vcf))
+
+        assert result is not None
+        # Query side: only rows A and C pass filters.
+        assert result["query_total_snp"] == 2
+        assert result["titv_query_snp"] == pytest.approx(0.0)    # 0 ti / 2 tv
+        assert result["hethom_query_snp"] == pytest.approx(1.0)  # 1 het / 1 hom
+        # Truth side: all four variants count regardless of the query FILTER.
+        assert result["titv_truth_snp"] == pytest.approx(1 / 3)    # 1 ti / 3 tv
+        assert result["hethom_truth_snp"] == pytest.approx(1 / 3)  # 1 het / 3 hom
+
     def test_missing_file_returns_none(self, tmp_path):
         """Non-existent file returns None."""
         result = parse_happy_vcf_assessed_metrics(str(tmp_path / "nonexistent.vcf.gz"))
@@ -382,6 +415,111 @@ class TestParseRegionOvercallMetrics:
         assert result["fp_per_target"] == pytest.approx(12.0)
         assert result["snp_fp_per_target"] == 0.0
         assert result["overcall_penalty"] == 0.0
+
+    def test_non_pass_fps_excluded_from_guardrail(self, tmp_path):
+        """LowQual junk FPs are invisible to F1, so they must not consume the
+        overcall budget either (consistent FILTER semantics)."""
+        vcf = tmp_path / "happy_output.vcf.gz"
+        _write_happy_vcf(vcf, [
+            "chr20\t10000100\t.\tA\tG\t50\tLowQual\t.\tBD:BVT\t.:.\tFP:SNP\n",
+        ] * 12)
+
+        result = parse_region_overcall_metrics(
+            str(vcf),
+            synthetic_truth_total=1,
+            synthetic_snp_truth_total=1,
+        )
+
+        assert result is not None
+        assert result["region_fp_snp"] == 0
+        assert result["region_fp_total"] == 0
+        assert result["fp_per_target"] == 0.0
+        assert result["overcall_penalty"] == 0.0
+
+    def test_pass_fps_counted_despite_non_pass_spam(self, tmp_path):
+        """PASS FPs still drive the guardrail when LowQual spam is present."""
+        vcf = tmp_path / "happy_output.vcf.gz"
+        rows = ["chr20\t10000100\t.\tA\tG\t50\t.\t.\tBD:BVT\t.:.\tFP:SNP\n"] * 12
+        rows += ["chr20\t10000200\t.\tA\tG\t50\tLowQual\t.\tBD:BVT\t.:.\tFP:SNP\n"] * 100
+        _write_happy_vcf(vcf, rows)
+
+        result = parse_region_overcall_metrics(
+            str(vcf),
+            synthetic_truth_total=1,
+            synthetic_snp_truth_total=1,
+        )
+
+        assert result is not None
+        assert result["region_fp_snp"] == 12
+        assert result["fp_per_target"] == pytest.approx(12.0)
+        assert result["snp_fp_per_target"] == pytest.approx(12.0)
+        assert result["overcall_penalty"] == pytest.approx(8.0)
+
+
+# ---------------------------------------------------------------------------
+# TestComputeSyntheticOnlyMetrics
+# ---------------------------------------------------------------------------
+
+class TestComputeSyntheticOnlyMetrics:
+    """Tests for compute_synthetic_only_metrics FILTER handling."""
+
+    def _write_mutations(self, path: Path, snp_targets):
+        """Write a mutations VCF whose SNP targets are (chrom, pos, ref, alt)."""
+        lines = [
+            f"{chrom}\t{pos}\t.\t{ref}\t{alt}\t100\tPASS\tSYNTHETIC\tGT\t0/1\n"
+            for chrom, pos, ref, alt in snp_targets
+        ]
+        _write_vcf(path, lines)
+
+    def test_non_pass_target_fps_not_counted(self, tmp_path):
+        """A LowQual junk FP at a planted target must not count as an FP.
+
+        Such a call is invisible to the Filter=PASS F1 rows, so counting it in
+        the synthetic precision/F1 would let FILTER labeling move the score.
+        """
+        mutations = tmp_path / "mutations.vcf"
+        self._write_mutations(mutations, [
+            ("chr20", 100, "A", "G"),
+            ("chr20", 300, "G", "A"),
+        ])
+        vcf = tmp_path / "happy_output.vcf.gz"
+        _write_happy_vcf(vcf, [
+            # Target 1 recovered by a PASS call
+            "chr20\t100\t.\tA\tG\t50\t.\t.\tBD:BVT\tTP:SNP\tTP:SNP\n",
+            # Target 2 missed (FN)
+            "chr20\t300\t.\tG\tA\t50\t.\t.\tBD:BVT\tFN:SNP\t.:.\n",
+            # LowQual junk FP at target 1 - must be ignored
+            "chr20\t100\t.\tA\tG\t50\tLowQual\t.\tBD:BVT\t.:.\tFP:SNP\n",
+        ])
+
+        result = compute_synthetic_only_metrics(str(vcf), str(mutations))
+
+        assert result is not None
+        assert result["tp_snp"] == 1
+        assert result["fn_snp"] == 1
+        assert result["fp_snp"] == 0
+        assert result["precision_snp"] == pytest.approx(1.0)
+        assert result["recall_snp"] == pytest.approx(0.5)
+        assert result["f1_snp"] == pytest.approx(2 / 3)
+        assert result["query_total_snp"] == 1
+
+    def test_non_pass_match_earns_no_tp_credit(self, tmp_path):
+        """A truth variant matched only by a non-PASS call counts as FN,
+        matching the Filter=PASS F1 convention."""
+        mutations = tmp_path / "mutations.vcf"
+        self._write_mutations(mutations, [("chr20", 100, "A", "G")])
+        vcf = tmp_path / "happy_output.vcf.gz"
+        _write_happy_vcf(vcf, [
+            "chr20\t100\t.\tA\tG\t50\tLowQual\t.\tBD:BVT\tTP:SNP\tTP:SNP\n",
+        ])
+
+        result = compute_synthetic_only_metrics(str(vcf), str(mutations))
+
+        assert result is not None
+        assert result["tp_snp"] == 0
+        assert result["fn_snp"] == 1
+        assert result["recall_snp"] == pytest.approx(0.0)
+        assert result["f1_snp"] == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------
