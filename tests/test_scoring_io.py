@@ -346,9 +346,12 @@ class TestParseRegionOvercallMetrics:
         assert result["region_fp_total"] == 2
         assert result["fp_per_target"] == pytest.approx(0.2)
         assert result["snp_fp_per_target"] == pytest.approx(0.125)
+        # 1 indel FP over 2 indel truth targets -> below the per-class limit
+        assert result["indel_fp_per_target"] == pytest.approx(0.5)
         assert result["overcall_penalty"] == 0.0
 
-    def test_penalty_requires_total_and_snp_gates(self, tmp_path):
+    def test_snp_overcall_penalized_independently(self, tmp_path):
+        """SNP overcalling is penalized even when the indel class is clean."""
         vcf = tmp_path / "happy_output.vcf.gz"
         _write_happy_vcf(vcf, [
             "chr20\t10000100\t.\tA\tG\t50\tPASS\t.\tBD:BVT\tTP:SNP\tFP:SNP\n",
@@ -364,9 +367,16 @@ class TestParseRegionOvercallMetrics:
         assert result["region_fp_total"] == 12
         assert result["fp_per_target"] == pytest.approx(12.0)
         assert result["snp_fp_per_target"] == pytest.approx(12.0)
-        assert result["overcall_penalty"] == pytest.approx(8.0)
+        # 4.0 points per FP-per-target above the 1.0 per-class limit
+        assert result["overcall_penalty"] == pytest.approx((12.0 - 1.0) * 4.0)
 
-    def test_no_penalty_when_snp_gate_not_met(self, tmp_path):
+    def test_indel_overcall_penalized_without_snp_fps(self, tmp_path):
+        """Indel spam is penalized on its own gate.
+
+        The old AND-condition required BOTH a total and an SNP gate, so an
+        unlimited number of indel FPs passed with zero penalty whenever the
+        SNP FP count stayed low.
+        """
         vcf = tmp_path / "happy_output.vcf.gz"
         _write_happy_vcf(vcf, [
             "chr20\t10000100\t.\tA\tAT\t50\tPASS\t.\tBD:BVT\tTP:INDEL\tFP:INDEL\n",
@@ -381,7 +391,96 @@ class TestParseRegionOvercallMetrics:
         assert result is not None
         assert result["fp_per_target"] == pytest.approx(12.0)
         assert result["snp_fp_per_target"] == 0.0
-        assert result["overcall_penalty"] == 0.0
+        # No indel truth targets -> denominator floors to 1.0
+        assert result["indel_fp_per_target"] == pytest.approx(12.0)
+        assert result["overcall_penalty"] == pytest.approx((12.0 - 1.0) * 4.0)
+
+    def test_free_band_padding_penalized(self, tmp_path):
+        """Padding inside the old free bands (<= 6x SNP, <= 10x total FPs per
+        target) is no longer free."""
+        vcf = tmp_path / "happy_output.vcf.gz"
+        _write_happy_vcf(vcf, [
+            "chr20\t10000100\t.\tA\tG\t50\tPASS\t.\tBD:BVT\tTP:SNP\tFP:SNP\n",
+        ] * 5)
+
+        result = parse_region_overcall_metrics(
+            str(vcf),
+            synthetic_truth_total=1,
+            synthetic_snp_truth_total=1,
+        )
+
+        assert result is not None
+        assert result["fp_per_target"] == pytest.approx(5.0)
+        assert result["snp_fp_per_target"] == pytest.approx(5.0)
+        assert result["overcall_penalty"] == pytest.approx((5.0 - 1.0) * 4.0)
+
+    def test_and_edge_exploit_indel_spam_behind_low_snp_count(self, tmp_path):
+        """The audit AND-edge: total FPs far above the old 10x gate while the
+        SNP ratio stays under the old 6x gate, so the AND-condition never
+        fired and indel spam was free."""
+        vcf = tmp_path / "happy_output.vcf.gz"
+        _write_happy_vcf(vcf, [
+            "chr20\t10000100\t.\tA\tG\t50\tPASS\t.\tBD:BVT\tTP:SNP\tFP:SNP\n",
+        ] * 5 + [
+            "chr20\t10000200\t.\tA\tAT\t50\tPASS\t.\tBD:BVT\tTP:INDEL\tFP:INDEL\n",
+        ] * 30)
+
+        result = parse_region_overcall_metrics(
+            str(vcf),
+            synthetic_truth_total=2,
+            synthetic_snp_truth_total=1,
+        )
+
+        assert result is not None
+        # fp_per_target = 35/2 = 17.5 > old 10x gate, but snp_fp_per_target = 5
+        # <= old 6x gate, so the old AND-condition gave penalty 0.
+        assert result["fp_per_target"] == pytest.approx(17.5)
+        assert result["snp_fp_per_target"] == pytest.approx(5.0)
+        assert result["indel_fp_per_target"] == pytest.approx(30.0)
+        assert result["overcall_penalty"] == pytest.approx(
+            (5.0 - 1.0) * 4.0 + (30.0 - 1.0) * 4.0
+        )
+
+    def test_penalty_exceeds_old_flat_cap(self, tmp_path):
+        """The penalty keeps growing past the old flat 45-point cap so heavy
+        overcalling keeps costing points (the final score clamps at zero
+        downstream)."""
+        vcf = tmp_path / "happy_output.vcf.gz"
+        _write_happy_vcf(vcf, [
+            "chr20\t10000100\t.\tA\tG\t50\tPASS\t.\tBD:BVT\tTP:SNP\tFP:SNP\n",
+        ] * 100)
+
+        result = parse_region_overcall_metrics(
+            str(vcf),
+            synthetic_truth_total=1,
+            synthetic_snp_truth_total=1,
+        )
+
+        assert result is not None
+        assert result["overcall_penalty"] == pytest.approx((100.0 - 1.0) * 4.0)
+        assert result["overcall_penalty"] > 45.0
+
+    def test_hard_fail_above_absolute_fp_cap(self, tmp_path, monkeypatch):
+        """Call sets beyond the absolute assessed-FP cap hard-fail to a
+        score-wiping penalty regardless of per-target ratios."""
+        monkeypatch.setattr("utils.scoring.OVERCALL_HARD_FAIL_FP_TOTAL", 5)
+        monkeypatch.setattr("utils.scoring.OVERCALL_HARD_FAIL_PENALTY", 100.0)
+
+        vcf = tmp_path / "happy_output.vcf.gz"
+        _write_happy_vcf(vcf, [
+            "chr20\t10000100\t.\tA\tG\t50\tPASS\t.\tBD:BVT\tTP:SNP\tFP:SNP\n",
+        ] * 6)
+
+        result = parse_region_overcall_metrics(
+            str(vcf),
+            synthetic_truth_total=1000,
+            synthetic_snp_truth_total=800,
+        )
+
+        assert result is not None
+        # Per-target ratios are tiny (0.006 total); the absolute cap fires.
+        assert result["fp_per_target"] == pytest.approx(0.006)
+        assert result["overcall_penalty"] == pytest.approx(100.0)
 
 
 # ---------------------------------------------------------------------------

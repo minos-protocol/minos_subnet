@@ -22,6 +22,19 @@ logger = logging.getLogger(__name__)
 HAPPY_DOCKER_IMAGE = "genonet/hap-py@sha256:03acabe84bbfba35f5a7234129d524c563f5657e1f21150a2ea2797f8e6d05f2"
 BCFTOOLS_DOCKER_IMAGE = "quay.io/biocontainers/bcftools:1.20--h8b25389_0"
 
+# Overcall guardrail thresholds. More than one assessed full-region FP per
+# truth variant of a class is overcalling. Each class is gated independently
+# (see parse_region_overcall_metrics) so spam in one class cannot hide behind
+# a low count in the other, and the penalty is uncapped so heavy overcalling
+# keeps costing points (the final score clamps at zero downstream).
+OVERCALL_FP_PER_TARGET_LIMIT = 1.0
+OVERCALL_PENALTY_PER_FP = 4.0
+# Absolute assessed-FP ceiling: a call set beyond this is spam, so it
+# hard-fails to a score-wiping penalty. This also bounds hap.py/vcfeval
+# resource pressure from unbounded junk VCFs on validator hardware.
+OVERCALL_HARD_FAIL_FP_TOTAL = 20000
+OVERCALL_HARD_FAIL_PENALTY = 100.0
+
 
 def subset_bed(source_bed: Path, target_bed: Path, region: str) -> bool:
     """Filter BED file to entries overlapping the target region."""
@@ -365,7 +378,12 @@ def compute_synthetic_only_metrics(happy_vcf_path: str, mutations_vcf_path: str,
 def parse_region_overcall_metrics(happy_vcf_path: str,
                                   synthetic_truth_total: float,
                                   synthetic_snp_truth_total: float) -> Optional[Dict[str, float]]:
-    """Count full-region query false positives for the overcall guardrail."""
+    """Count full-region query false positives for the overcall guardrail.
+
+    Penalizes each variant class independently once its FPs exceed
+    OVERCALL_FP_PER_TARGET_LIMIT per truth variant of that class, and
+    hard-fails call sets above OVERCALL_HARD_FAIL_FP_TOTAL assessed FPs.
+    """
     try:
         vcf_path = Path(happy_vcf_path)
         if not vcf_path.exists():
@@ -400,14 +418,21 @@ def parse_region_overcall_metrics(happy_vcf_path: str,
         region_fp_total = counts['region_fp_snp'] + counts['region_fp_indel']
         fp_per_target = region_fp_total / max(float(synthetic_truth_total), 1.0)
         snp_fp_per_target = counts['region_fp_snp'] / max(float(synthetic_snp_truth_total), 1.0)
-        if fp_per_target > 10.0 and snp_fp_per_target > 6.0:
-            overcall_penalty = min(45.0, (fp_per_target - 10.0) * 4.0)
+        synthetic_indel_truth_total = synthetic_truth_total - synthetic_snp_truth_total
+        indel_fp_per_target = counts['region_fp_indel'] / max(float(synthetic_indel_truth_total), 1.0)
+
+        if region_fp_total > OVERCALL_HARD_FAIL_FP_TOTAL:
+            overcall_penalty = OVERCALL_HARD_FAIL_PENALTY
         else:
-            overcall_penalty = 0.0
+            overcall_penalty = OVERCALL_PENALTY_PER_FP * (
+                max(0.0, snp_fp_per_target - OVERCALL_FP_PER_TARGET_LIMIT) +
+                max(0.0, indel_fp_per_target - OVERCALL_FP_PER_TARGET_LIMIT)
+            )
 
         logger.info(f"Overcall guardrail: region_fp={region_fp_total}, "
                     f"fp_per_target={fp_per_target:.2f}, "
                     f"snp_fp_per_target={snp_fp_per_target:.2f}, "
+                    f"indel_fp_per_target={indel_fp_per_target:.2f}, "
                     f"penalty={overcall_penalty:.2f}")
 
         return {
@@ -416,6 +441,7 @@ def parse_region_overcall_metrics(happy_vcf_path: str,
             'region_fp_total': float(region_fp_total),
             'fp_per_target': fp_per_target,
             'snp_fp_per_target': snp_fp_per_target,
+            'indel_fp_per_target': indel_fp_per_target,
             'overcall_penalty': overcall_penalty,
         }
 
