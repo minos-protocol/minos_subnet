@@ -10,7 +10,7 @@ import json
 import logging
 import uuid
 import httpx
-from typing import Optional, Dict, Any, List, Callable, TypeVar
+from typing import Optional, Dict, Any, List, Set, Callable, TypeVar
 from dataclasses import dataclass
 from bittensor_wallet import Keypair
 
@@ -565,6 +565,66 @@ class ValidatorPlatformClient(PlatformClient):
                 return response.json()
 
         return await retry_async(_do_request, max_retries=3)
+
+    async def get_practice_manifest(self) -> Optional[Set[str]]:
+        """Fetch SHA-256 hashes of every practice-sample file (validator only).
+
+        Practice samples are fully answered (their truth VCFs include the
+        synthetic planted variants) and their files are downloadable by any
+        keypair, so a live round built from practice material is decided
+        before it starts. Validators compare each live round's file hashes
+        against this manifest and hard-fail any round that collides.
+
+        Expected response shape (mirrors the practice sample metadata):
+            {"samples": [
+                {"sample_id": "...", "bam_sha256": "...",
+                 "truth_vcf_sha256": "...", "mutations_vcf_sha256": "..."},
+                ...
+            ]}
+        Every string value under a ``*_sha256`` key is collected, so newly
+        added practice file types are picked up without a client change.
+
+        Returns:
+            Set of practice file hashes (lowercased for case-insensitive
+            matching), or None when the manifest is unavailable (practice
+            mode disabled, endpoint not deployed yet, or transport error).
+            None means "overlap not provable", not "overlap absent": callers
+            log and continue scoring, and only an actual hash collision
+            hard-fails a round.
+        """
+        path = "/v2/practice/manifest"
+
+        async def _do_request():
+            body = self._auth_body(
+                "POST", path, validator_hotkey=self.keypair.ss58_address
+            )
+            async with self._get_client() as client:
+                response = await client.post(
+                    path, json=body, headers=self._AUTH_HEADERS, timeout=10.0
+                )
+                if response.status_code != 200:
+                    # 404 = practice mode not enabled / endpoint not deployed
+                    # yet; treat like the other practice endpoints degrade.
+                    raise PlatformClientError(
+                        f"Practice manifest unavailable "
+                        f"({response.status_code}): {response.text}"
+                    )
+                return response.json()
+
+        try:
+            payload = await retry_async(_do_request, max_retries=2)
+        except Exception:
+            return None
+
+        hashes: Set[str] = set()
+        samples = payload.get("samples") if isinstance(payload, dict) else None
+        for sample in samples if isinstance(samples, list) else []:
+            if not isinstance(sample, dict):
+                continue
+            for key, value in sample.items():
+                if key.endswith("_sha256") and isinstance(value, str) and value:
+                    hashes.add(value.lower())
+        return hashes
 
     async def submit_score(
         self,

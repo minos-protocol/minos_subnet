@@ -91,6 +91,16 @@ def _is_zero_input_advanced_fingerprint(metrics: dict, combined_final: float) ->
     )
 
 
+# Round-file hash fields checked against the practice manifest. Same keys
+# _download_round_files verifies downloads against; a round missing a hash
+# simply skips that file's overlap comparison.
+_PRACTICE_OVERLAP_HASH_FIELDS = (
+    "bam_sha256",
+    "truth_vcf_sha256",
+    "mutations_vcf_sha256",
+)
+
+
 def auto_scoring_config():
     """Size concurrent scoring jobs from host CPU/RAM.
 
@@ -468,6 +478,11 @@ class Validator:
             # --- Step 2: Get all submissions + download shared files ---
             round_data = await self.platform_client.get_round_submissions(round_id)
 
+            # Practice/live overlap guard — runs before any file download so a
+            # colliding round is refused wholesale, never scored.
+            if await self._round_reuses_practice_material(round_id, round_data):
+                return False
+
             submissions = round_data.get("submissions", [])
             region = round_data.get("region", "")
 
@@ -609,6 +624,46 @@ class Validator:
         self.score_tracker._recorded_round_ids = set(
             snapshot.get("recorded_round_ids", set())
         )
+
+    async def _round_reuses_practice_material(self, round_id: str, round_data: dict) -> bool:
+        """Hard-fail gate: reject live rounds built from practice material.
+
+        Practice samples are fully answered (their truth VCFs include the
+        synthetic planted variants) and their files are downloadable by any
+        keypair, so a live round that reuses a practice BAM or mutation set
+        is decided before it starts — a miner who cached the practice answer
+        key can submit perfect planted calls with zero read evidence.
+        Compare this round's file SHA-256 hashes against the platform's
+        practice manifest and refuse to score any collision.
+
+        Returns True when the round must be rejected. An unavailable or
+        empty manifest means overlap is not provable (practice mode may be
+        disabled on this deployment), so scoring proceeds with a warning;
+        only an actual hash collision hard-fails the round.
+        """
+        practice_hashes = await self.platform_client.get_practice_manifest()
+        if not practice_hashes:
+            bt.logging.warning(
+                f"Round {round_id}: practice manifest unavailable — "
+                "practice/live overlap check skipped for this round"
+            )
+            return False
+
+        practice_hashes = {str(h).lower() for h in practice_hashes}
+        round_hashes = {
+            str(round_data[field]).lower()
+            for field in _PRACTICE_OVERLAP_HASH_FIELDS
+            if round_data.get(field)
+        }
+        overlap = round_hashes & practice_hashes
+        if overlap:
+            bt.logging.error(
+                f"Round {round_id}: HARD FAIL — file hash(es) {sorted(overlap)} "
+                "match the practice answer-key manifest; refusing to score a "
+                "round built from practice material"
+            )
+            return True
+        return False
 
     def _download_round_files(self, round_id, round_data):
         """Download BAM + truth VCF and verify reference files; return paths dict or None on failure."""

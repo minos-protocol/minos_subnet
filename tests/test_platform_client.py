@@ -552,3 +552,157 @@ class TestValidatorCanonicalRankingPost:
             out = await client.get_canonical_ranking()
 
         assert out == legacy_payload
+
+
+# ---------------------------------------------------------------------------
+# Validator practice manifest (practice/live overlap guard support)
+# ---------------------------------------------------------------------------
+
+class TestValidatorPracticeManifest:
+    """ValidatorPlatformClient.get_practice_manifest collects every *_sha256
+    hash from the practice sample list and degrades to None when the
+    manifest is unavailable, so the validator can hard-fail rounds that
+    reuse practice material without stalling scoring on deployments where
+    practice mode is disabled or the endpoint is not deployed yet."""
+
+    PRACTICE_BAM_SHA = "a" * 64
+    PRACTICE_TRUTH_SHA = "b" * 64
+    PRACTICE_MUTATIONS_SHA = "c" * 64
+
+    def _make_client(self) -> ValidatorPlatformClient:
+        return ValidatorPlatformClient(_keypair(), _https_config())
+
+    @staticmethod
+    def _mock_http(post_response):
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(return_value=post_response)
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+        return mock_http
+
+    @staticmethod
+    def _resp(status_code, payload=None):
+        r = MagicMock()
+        r.status_code = status_code
+        r.text = "stub"
+        r.json.return_value = payload or {}
+        return r
+
+    def _manifest_payload(self):
+        return {
+            "samples": [
+                {
+                    "sample_id": "practice_chr18_1",
+                    "chromosome": "chr18",
+                    "region": "chr18:1-1000000",
+                    "bam_sha256": self.PRACTICE_BAM_SHA,
+                    "truth_vcf_sha256": self.PRACTICE_TRUTH_SHA,
+                    "mutations_vcf_sha256": self.PRACTICE_MUTATIONS_SHA,
+                },
+            ]
+        }
+
+    @pytest.mark.asyncio
+    async def test_signed_post_to_practice_manifest_route(self):
+        client = self._make_client()
+        mock_http = self._mock_http(self._resp(200, self._manifest_payload()))
+
+        with patch.object(client, "_get_client", return_value=mock_http):
+            out = await client.get_practice_manifest()
+
+        assert out  # parsed (contents asserted below)
+        args, kwargs = mock_http.post.call_args
+        assert args[0] == "/v2/practice/manifest"
+        body = kwargs["json"]
+        # Validator-auth-gated: carries the hotkey + a fresh v2 signature/nonce.
+        assert body["validator_hotkey"] == client.keypair.ss58_address
+        assert body["signature"] and body["nonce"] and body["timestamp"]
+        assert kwargs["headers"]["X-Minos-Auth-Version"] == "2"
+
+    @pytest.mark.asyncio
+    async def test_collects_every_sha256_field(self):
+        client = self._make_client()
+        mock_http = self._mock_http(self._resp(200, self._manifest_payload()))
+
+        with patch.object(client, "_get_client", return_value=mock_http):
+            out = await client.get_practice_manifest()
+
+        assert out == {
+            self.PRACTICE_BAM_SHA,
+            self.PRACTICE_TRUTH_SHA,
+            self.PRACTICE_MUTATIONS_SHA,
+        }
+
+    @pytest.mark.asyncio
+    async def test_collects_hashes_from_multiple_samples(self):
+        client = self._make_client()
+        second_bam_sha = "d" * 64
+        payload = self._manifest_payload()
+        payload["samples"].append(
+            {"sample_id": "practice_chr22_1", "bam_sha256": second_bam_sha}
+        )
+        mock_http = self._mock_http(self._resp(200, payload))
+
+        with patch.object(client, "_get_client", return_value=mock_http):
+            out = await client.get_practice_manifest()
+
+        assert out == {
+            self.PRACTICE_BAM_SHA,
+            self.PRACTICE_TRUTH_SHA,
+            self.PRACTICE_MUTATIONS_SHA,
+            second_bam_sha,
+        }
+
+    @pytest.mark.asyncio
+    async def test_lowercases_hashes_for_case_insensitive_matching(self):
+        client = self._make_client()
+        payload = {"samples": [{"sample_id": "s1", "bam_sha256": "A" * 64}]}
+        mock_http = self._mock_http(self._resp(200, payload))
+
+        with patch.object(client, "_get_client", return_value=mock_http):
+            out = await client.get_practice_manifest()
+
+        assert out == {"a" * 64}
+
+    @pytest.mark.asyncio
+    async def test_malformed_payload_gives_empty_set(self):
+        client = self._make_client()
+        for payload in ({}, {"samples": "not a list"}, {"samples": [{"sample_id": "s1"}]}):
+            mock_http = self._mock_http(self._resp(200, payload))
+            with patch.object(client, "_get_client", return_value=mock_http):
+                out = await client.get_practice_manifest()
+            assert out == set(), f"expected empty set for payload {payload!r}"
+
+    @pytest.mark.asyncio
+    async def test_404_returns_none(self):
+        """Practice mode disabled / endpoint not deployed yet → None, not raise."""
+        client = self._make_client()
+        mock_http = self._mock_http(self._resp(404))
+
+        with patch.object(client, "_get_client", return_value=mock_http):
+            out = await client.get_practice_manifest()
+
+        assert out is None
+
+    @pytest.mark.asyncio
+    async def test_server_error_returns_none(self):
+        client = self._make_client()
+        mock_http = self._mock_http(self._resp(500))
+
+        with patch.object(client, "_get_client", return_value=mock_http):
+            out = await client.get_practice_manifest()
+
+        assert out is None
+
+    @pytest.mark.asyncio
+    async def test_transport_error_returns_none_after_retries(self):
+        client = self._make_client()
+        mock_http = self._mock_http(None)
+        mock_http.post = AsyncMock(side_effect=httpx.ConnectError("boom"))
+
+        with patch.object(client, "_get_client", return_value=mock_http), \
+                patch("utils.platform_client.asyncio.sleep", new=AsyncMock()):
+            out = await client.get_practice_manifest()
+
+        assert out is None
+        assert mock_http.post.call_count == 3  # 1 initial + 2 retries
