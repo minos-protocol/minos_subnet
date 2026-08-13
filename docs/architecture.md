@@ -148,7 +148,7 @@ hap.py computes SNP and INDEL precision/recall against the truth VCF. The `Advan
 | **Core F1** | 60% | Truth-weighted F1 across SNPs and INDELs, with nonlinear emphasis (γ=0.5) rewarding near-perfect callers |
 | **Completeness** | 15% | Average recall + coverage (1 − fraction unassessed) |
 | **FP Rate** | 15% | Penalises excess false positives and call counts diverging from truth |
-| **Quality** | 10% | Ti/Tv and Het/Hom ratio match against truth — rewards biologically consistent calls |
+| **Quality** | 10% | Ti/Tv and Het/Hom ratio match against truth, with query ratios assessed only on calls matching the planted targets — rewards biologically consistent calls |
 
 SNP/INDEL weighting is truth-count-proportional (fallback: 70/30).
 

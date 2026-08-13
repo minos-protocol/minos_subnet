@@ -257,6 +257,14 @@ def compute_synthetic_only_metrics(happy_vcf_path: str, mutations_vcf_path: str,
 
     SNPs are matched by exact (chrom, pos, ref, alt). INDELs use position tolerance
     to handle normalization differences.
+
+    Also computes the query-side Ti/Tv and Het/Hom ratios over those same
+    target-matching calls. The ratio keys are always present in the returned
+    dict so score_vcf's update() replaces the region-wide ratios from
+    summary.csv / the assessed parser with target-scoped ones. Without this,
+    off-target false positives padded across the region are invisible to F1 and
+    the target-local FP counts yet still shift the assessed ratios, letting a
+    submission steer the Quality component toward the truth ratios for free.
     """
     try:
         happy_path = Path(happy_vcf_path)
@@ -291,6 +299,11 @@ def compute_synthetic_only_metrics(happy_vcf_path: str, mutations_vcf_path: str,
             'tp_snp': 0, 'fp_snp': 0, 'fn_snp': 0,
             'tp_indel': 0, 'fp_indel': 0, 'fn_indel': 0,
         }
+        ratio_counts = {
+            'ti_query': 0, 'tv_query': 0,
+            'het_query_snp': 0, 'hom_query_snp': 0,
+            'het_query_indel': 0, 'hom_query_indel': 0,
+        }
 
         def _match_snp(chrom, pos, ref, alt):
             return (chrom, pos, ref, alt) in target_snps
@@ -317,6 +330,8 @@ def compute_synthetic_only_metrics(happy_vcf_path: str, mutations_vcf_path: str,
                 bd_query = fmt_query.get('BD', '.')
                 bvt_truth = fmt_truth.get('BVT', '.')
                 bvt_query = fmt_query.get('BVT', '.')
+                bi_query = fmt_query.get('BI', '.')
+                blt_query = fmt_query.get('BLT', '.')
 
                 if bd_truth in ('TP', 'FN'):
                     is_snp = bvt_truth == 'SNP'
@@ -330,6 +345,30 @@ def compute_synthetic_only_metrics(happy_vcf_path: str, mutations_vcf_path: str,
                     matched = _match_snp(chrom, pos, ref, alt) if is_snp else _match_indel(chrom, pos)
                     if matched:
                         counts[f"fp_{'snp' if is_snp else 'indel'}"] += 1
+
+                # Quality-component ratios: restrict to target-matching query
+                # calls so off-target padding cannot shape them (the assessed
+                # parser counts every assessed call in the region).
+                if bd_query in ('TP', 'FP'):
+                    if bvt_query == 'SNP':
+                        matched = _match_snp(chrom, pos, ref, alt)
+                    else:
+                        matched = _match_indel(chrom, pos)
+                    if matched:
+                        if bvt_query == 'SNP':
+                            if bi_query == 'ti':
+                                ratio_counts['ti_query'] += 1
+                            elif bi_query == 'tv':
+                                ratio_counts['tv_query'] += 1
+                            if blt_query == 'het':
+                                ratio_counts['het_query_snp'] += 1
+                            elif blt_query == 'homalt':
+                                ratio_counts['hom_query_snp'] += 1
+                        elif bvt_query == 'INDEL':
+                            if blt_query == 'het':
+                                ratio_counts['het_query_indel'] += 1
+                            elif blt_query == 'homalt':
+                                ratio_counts['hom_query_indel'] += 1
 
         tp_s, fp_s, fn_s = counts['tp_snp'], counts['fp_snp'], counts['fn_snp']
         tp_i, fp_i, fn_i = counts['tp_indel'], counts['fp_indel'], counts['fn_indel']
@@ -345,6 +384,10 @@ def compute_synthetic_only_metrics(happy_vcf_path: str, mutations_vcf_path: str,
         logger.info(f"Filtered metrics: SNP TP={tp_s} FP={fp_s} FN={fn_s} F1={f1_snp:.4f} | "
                      f"INDEL TP={tp_i} FP={fp_i} FN={fn_i} F1={f1_indel:.4f}")
 
+        ti_q, tv_q = ratio_counts['ti_query'], ratio_counts['tv_query']
+        het_q_snp, hom_q_snp = ratio_counts['het_query_snp'], ratio_counts['hom_query_snp']
+        het_q_indel, hom_q_indel = ratio_counts['het_query_indel'], ratio_counts['hom_query_indel']
+
         return {
             'f1_snp': f1_snp, 'precision_snp': precision_snp, 'recall_snp': recall_snp,
             'f1_indel': f1_indel, 'precision_indel': precision_indel, 'recall_indel': recall_indel,
@@ -353,6 +396,12 @@ def compute_synthetic_only_metrics(happy_vcf_path: str, mutations_vcf_path: str,
             'truth_total_snp': float(tp_s + fn_s), 'truth_total_indel': float(tp_i + fn_i),
             'query_total_snp': float(tp_s + fp_s), 'query_total_indel': float(tp_i + fp_i),
             'frac_na_snp': 0.0, 'frac_na_indel': 0.0,
+            # Query ratios over target-matching calls only. Emitted even when a
+            # denominator is zero (0.0 makes compute_advanced_score skip that
+            # ratio) so region-wide values never survive score_vcf's update().
+            'titv_query_snp': ti_q / tv_q if tv_q > 0 else 0.0,
+            'hethom_query_snp': het_q_snp / hom_q_snp if hom_q_snp > 0 else 0.0,
+            'hethom_query_indel': het_q_indel / hom_q_indel if hom_q_indel > 0 else 0.0,
             'weighted_f1': 0.7 * f1_snp + 0.3 * f1_indel,
         }
 

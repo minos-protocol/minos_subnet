@@ -14,10 +14,12 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from utils.scoring import (
+    compute_synthetic_only_metrics,
     generate_challenge_region_bed,
     generate_synthetic_regions_bed,
     parse_region_overcall_metrics,
     parse_happy_vcf_assessed_metrics,
+    AdvancedScorer,
     HappyScorer,
     slice_truth_vcf,
     subset_bed,
@@ -63,6 +65,67 @@ def _read_bed(path: Path) -> list[tuple[str, int, int]]:
         parts = line.split("\t")
         regions.append((parts[0], int(parts[1]), int(parts[2])))
     return regions
+
+
+def _write_mutations_vcf(path: Path):
+    """Write a mutations VCF with 4 SNP and 2 INDEL planted targets.
+
+    Target query ratios: SNP Ti/Tv = 2/2 = 1.0, SNP Het/Hom = 2/2 = 1.0,
+    INDEL Het/Hom = 1/1 = 1.0.
+    """
+    _write_vcf(path, [
+        "chr20\t10000100\t.\tA\tG\t50\tPASS\tSYNTHETIC\tGT\t0/1\n",
+        "chr20\t10000200\t.\tC\tT\t50\tPASS\tSYNTHETIC\tGT\t1/1\n",
+        "chr20\t10000300\t.\tA\tT\t50\tPASS\tSYNTHETIC\tGT\t0/1\n",
+        "chr20\t10000400\t.\tG\tC\t50\tPASS\tSYNTHETIC\tGT\t1/1\n",
+        "chr20\t10000500\t.\tA\tAT\t50\tPASS\tSYNTHETIC\tGT\t0/1\n",
+        "chr20\t10000600\t.\tC\tCG\t50\tPASS\tSYNTHETIC\tGT\t1/1\n",
+    ])
+
+
+def _happy_tp_rows() -> list[str]:
+    """hap.py rows matching every planted target (a perfect honest caller)."""
+    return [
+        "chr20\t10000100\t.\tA\tG\t50\tPASS\t.\tBD:BVT:BI:BLT\tTP:SNP:ti:het\tTP:SNP:ti:het\n",
+        "chr20\t10000200\t.\tC\tT\t50\tPASS\t.\tBD:BVT:BI:BLT\tTP:SNP:ti:homalt\tTP:SNP:ti:homalt\n",
+        "chr20\t10000300\t.\tA\tT\t50\tPASS\t.\tBD:BVT:BI:BLT\tTP:SNP:tv:het\tTP:SNP:tv:het\n",
+        "chr20\t10000400\t.\tG\tC\t50\tPASS\t.\tBD:BVT:BI:BLT\tTP:SNP:tv:homalt\tTP:SNP:tv:homalt\n",
+        "chr20\t10000500\t.\tA\tAT\t50\tPASS\t.\tBD:BVT:BI:BLT\tTP:INDEL:.:het\tTP:INDEL:.:het\n",
+        "chr20\t10000600\t.\tC\tCG\t50\tPASS\t.\tBD:BVT:BI:BLT\tTP:INDEL:.:homalt\tTP:INDEL:.:homalt\n",
+    ]
+
+
+def _truth_fn_rows() -> list[str]:
+    """Truth-only rows shaping the region-wide truth ratios.
+
+    With the four target SNP truth rows (2 Ti / 2 Tv, 2 het / 2 hom), these
+    five extra rows bring the region-wide truth ratios to Ti/Tv = 6/3 = 2.0
+    and Het/Hom = 6/3 = 2.0, away from the target ratios of 1.0.
+    """
+    return [
+        "chr20\t10000700\t.\tC\tT\t50\tPASS\t.\tBD:BVT:BI:BLT\tFN:SNP:ti:het\t.:.:.:.\n",
+        "chr20\t10000800\t.\tA\tG\t50\tPASS\t.\tBD:BVT:BI:BLT\tFN:SNP:ti:het\t.:.:.:.\n",
+        "chr20\t10000900\t.\tC\tT\t50\tPASS\t.\tBD:BVT:BI:BLT\tFN:SNP:ti:het\t.:.:.:.\n",
+        "chr20\t10001000\t.\tA\tG\t50\tPASS\t.\tBD:BVT:BI:BLT\tFN:SNP:ti:het\t.:.:.:.\n",
+        "chr20\t10001100\t.\tG\tT\t50\tPASS\t.\tBD:BVT:BI:BLT\tFN:SNP:tv:homalt\t.:.:.:.\n",
+    ]
+
+
+def _padding_fp_rows() -> list[str]:
+    """Off-target query FP rows that pull assessed query ratios to the truth ratios.
+
+    Five junk SNP FPs (4 Ti-het + 1 Tv-homalt) far from any planted target.
+    Added to the honest rows they move the region-wide assessed query ratios
+    from 1.0/1.0 to Ti/Tv = 6/3 = 2.0 and Het/Hom = 6/3 = 2.0, exactly the
+    truth ratios, while staying far below the overcall guardrail gates.
+    """
+    return [
+        "chr20\t10001200\t.\tA\tG\t50\tPASS\t.\tBD:BVT:BI:BLT\t.:.:.:.\tFP:SNP:ti:het\n",
+        "chr20\t10001300\t.\tC\tT\t50\tPASS\t.\tBD:BVT:BI:BLT\t.:.:.:.\tFP:SNP:ti:het\n",
+        "chr20\t10001400\t.\tA\tG\t50\tPASS\t.\tBD:BVT:BI:BLT\t.:.:.:.\tFP:SNP:ti:het\n",
+        "chr20\t10001500\t.\tC\tT\t50\tPASS\t.\tBD:BVT:BI:BLT\t.:.:.:.\tFP:SNP:ti:het\n",
+        "chr20\t10001600\t.\tG\tT\t50\tPASS\t.\tBD:BVT:BI:BLT\t.:.:.:.\tFP:SNP:tv:homalt\n",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -474,3 +537,138 @@ class TestHappyScorerCsvParsing:
             )
 
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# TestComputeSyntheticOnlyMetrics
+# ---------------------------------------------------------------------------
+
+class TestComputeSyntheticOnlyMetrics:
+    """Tests for compute_synthetic_only_metrics."""
+
+    def test_query_ratios_restricted_to_target_matches(self, tmp_path):
+        """Query Ti/Tv and Het/Hom must ignore off-target padded FP calls.
+
+        The padded hap.py VCF contains five off-target query FPs chosen so the
+        region-wide assessed ratios (Ti/Tv=2.0, Het/Hom=2.0) differ from the
+        target-matching ratios (1.0/1.0/1.0). Only the latter may be reported,
+        otherwise junk calls padded across the region steer the Quality
+        component toward the truth ratios.
+        """
+        mutations = tmp_path / "mutations.vcf"
+        happy_vcf = tmp_path / "happy_output.vcf.gz"
+        _write_mutations_vcf(mutations)
+        _write_happy_vcf(
+            happy_vcf,
+            _happy_tp_rows() + _truth_fn_rows() + _padding_fp_rows(),
+        )
+
+        result = compute_synthetic_only_metrics(str(happy_vcf), str(mutations))
+
+        assert result is not None
+        assert result["titv_query_snp"] == pytest.approx(1.0)
+        assert result["hethom_query_snp"] == pytest.approx(1.0)
+        assert result["hethom_query_indel"] == pytest.approx(1.0)
+        # Target-local counts are untouched by the off-target padding.
+        assert result["fp_snp"] == 0
+        assert result["fp_indel"] == 0
+
+    def test_ratio_keys_always_present(self, tmp_path):
+        """Ratio keys must exist even when a denominator is zero.
+
+        Without an unconditional key, the region-wide value from summary.csv or
+        the assessed parser survives score_vcf's update() and stays gameable.
+        """
+        mutations = tmp_path / "mutations.vcf"
+        happy_vcf = tmp_path / "happy_output.vcf.gz"
+        # Two Ti SNP targets only: no Tv calls, no indels.
+        _write_vcf(mutations, [
+            "chr20\t10000100\t.\tA\tG\t50\tPASS\tSYNTHETIC\tGT\t0/1\n",
+            "chr20\t10000200\t.\tC\tT\t50\tPASS\tSYNTHETIC\tGT\t1/1\n",
+        ])
+        _write_happy_vcf(happy_vcf, [
+            "chr20\t10000100\t.\tA\tG\t50\tPASS\t.\tBD:BVT:BI:BLT\tTP:SNP:ti:het\tTP:SNP:ti:het\n",
+            "chr20\t10000200\t.\tC\tT\t50\tPASS\t.\tBD:BVT:BI:BLT\tTP:SNP:ti:homalt\tTP:SNP:ti:homalt\n",
+        ])
+
+        result = compute_synthetic_only_metrics(str(happy_vcf), str(mutations))
+
+        assert result is not None
+        assert result["titv_query_snp"] == 0.0
+        assert result["hethom_query_snp"] == pytest.approx(1.0)
+        assert result["hethom_query_indel"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# TestQualityRatioPaddingExploit
+# ---------------------------------------------------------------------------
+
+class TestQualityRatioPaddingExploit:
+    """Regression test: region-wide FP padding must not buy Quality points.
+
+    Reproduces HappyScorer.score_vcf's merge order (summary.csv layer ->
+    assessed-only parser -> synthetic metrics -> overcall guardrail) without
+    Docker and asserts that a submission padded with off-target false positives
+    scores no better than the same submission without padding.
+    """
+
+    def _merged_metrics(self, workdir: Path, padded: bool):
+        """Build the metrics dict exactly as score_vcf merges it."""
+        workdir.mkdir(parents=True, exist_ok=True)
+        mutations = workdir / "mutations.vcf"
+        happy_vcf = workdir / "happy_output.vcf.gz"
+        _write_mutations_vcf(mutations)
+        rows = _happy_tp_rows() + _truth_fn_rows()
+        if padded:
+            rows = rows + _padding_fp_rows()
+        _write_happy_vcf(happy_vcf, rows)
+
+        # Stand-in for the summary.csv layer (perfect caller).
+        happy_results = {
+            'f1_snp': 1.0, 'f1_indel': 1.0,
+            'recall_snp': 1.0, 'recall_indel': 1.0,
+            'precision_snp': 1.0, 'precision_indel': 1.0,
+            'weighted_f1': 1.0,
+        }
+        assessed = parse_happy_vcf_assessed_metrics(str(happy_vcf))
+        happy_results.update(assessed)
+        synthetic = compute_synthetic_only_metrics(str(happy_vcf), str(mutations))
+        happy_results.update(synthetic)
+        overcall = parse_region_overcall_metrics(
+            str(happy_vcf),
+            synthetic['truth_total_snp'] + synthetic['truth_total_indel'],
+            synthetic['truth_total_snp'],
+        )
+        happy_results.update(overcall)
+        return happy_results, happy_vcf
+
+    def test_padding_reaches_region_ratios_but_stays_below_guardrail(self, tmp_path):
+        """Witness: the padded set matches truth ratios and pays no guardrail cost."""
+        metrics, happy_vcf = self._merged_metrics(tmp_path / "padded", padded=True)
+
+        assessed = parse_happy_vcf_assessed_metrics(str(happy_vcf))
+        # Off-target FPs pull the region-wide assessed query ratios to the
+        # region-wide truth ratios (2.0/2.0)...
+        assert assessed["titv_query_snp"] == pytest.approx(2.0)
+        assert assessed["hethom_query_snp"] == pytest.approx(2.0)
+        assert assessed["titv_truth_snp"] == pytest.approx(2.0)
+        assert assessed["hethom_truth_snp"] == pytest.approx(2.0)
+        # ...while staying far below the overcall guardrail gates.
+        assert metrics["overcall_penalty"] == 0.0
+        assert metrics["fp_per_target"] < 10.0
+        assert metrics["snp_fp_per_target"] < 6.0
+
+    def test_padding_does_not_outscore_honest_submission(self, tmp_path):
+        """A padded submission must not score above its unpadded equivalent."""
+        honest, _ = self._merged_metrics(tmp_path / "honest", padded=False)
+        padded, _ = self._merged_metrics(tmp_path / "padded", padded=True)
+
+        # The guardrail is silent for both, so any score difference can only
+        # come from the Quality ratio path.
+        assert honest["overcall_penalty"] == 0.0
+        assert padded["overcall_penalty"] == 0.0
+
+        score_honest = AdvancedScorer.compute_advanced_score(honest)
+        score_padded = AdvancedScorer.compute_advanced_score(padded)
+
+        assert score_padded == pytest.approx(score_honest, abs=1e-6)
