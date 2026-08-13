@@ -317,6 +317,32 @@ class TestParseHappyVcfAssessedMetrics:
         result = parse_happy_vcf_assessed_metrics(str(tmp_path / "nonexistent.vcf.gz"))
         assert result is None
 
+    def test_zero_denominator_ratios_emitted_explicitly(self, tmp_path):
+        """Ratio keys with zero denominators are still emitted as explicit 0.0.
+
+        Omitting a key when its denominator is zero lets hap.py's whole-VCF
+        summary.csv ratio survive the assessed-only override, so every ratio
+        key must always be present; 0.0 marks the class unavailable and the
+        Quality component fails closed on it.
+        """
+        vcf = tmp_path / "happy_output.vcf.gz"
+        # Two ti/het SNP calls only: no Tv, no homalt, no indels anywhere.
+        _write_happy_vcf(vcf, [
+            "chr20\t10000100\t.\tA\tG\t50\tPASS\t.\tBD:BVT:BI:BLT\tTP:SNP:ti:het\tTP:SNP:ti:het\n",
+            "chr20\t10000200\t.\tC\tT\t50\tPASS\t.\tBD:BVT:BI:BLT\tTP:SNP:ti:het\tTP:SNP:ti:het\n",
+        ])
+
+        result = parse_happy_vcf_assessed_metrics(str(vcf))
+
+        assert result is not None
+        assert result["query_total_snp"] == 2
+        assert result["query_total_indel"] == 0
+        for key in ("titv_query_snp", "titv_truth_snp",
+                    "hethom_query_snp", "hethom_truth_snp",
+                    "hethom_query_indel", "hethom_truth_indel"):
+            assert key in result
+            assert result[key] == 0.0
+
 
 # ---------------------------------------------------------------------------
 # TestParseRegionOvercallMetrics
@@ -474,3 +500,86 @@ class TestHappyScorerCsvParsing:
             )
 
         assert result is None
+
+    def test_assessed_override_wipes_whole_vcf_ratios_at_zero_counts(
+        self, tmp_path, happy_summary_csv_path
+    ):
+        """Whole-VCF summary.csv ratios never survive the assessed correction.
+
+        The fixture CSV reports QUERY.TOTAL.TiTv_ratio=2.0 and
+        TRUTH.TOTAL.TiTv_ratio=2.1 computed over the ENTIRE VCF (including
+        UNK calls). The assessed VCF written below contains only Ti calls, so
+        the assessed-only Ti/Tv is unavailable and must replace the polluted
+        CSV values with the explicit 0.0 sentinel instead of leaving them.
+        """
+        truth_vcf, query_vcf, ref_fasta, sdf_dir = self._setup_scoring_env(tmp_path)
+        expected_csv = tmp_path / "happy_query.vcf.summary.csv"
+        assessed_vcf = tmp_path / "happy_query.vcf.vcf.gz"
+
+        def fake_subprocess_run(cmd, **kwargs):
+            """Simulate hap.py: copy fixture CSV and write the assessed VCF."""
+            shutil.copy(happy_summary_csv_path, expected_csv)
+            _write_happy_vcf(assessed_vcf, [
+                "chr20\t10000100\t.\tA\tG\t50\tPASS\t.\tBD:BVT:BI:BLT\tTP:SNP:ti:het\tTP:SNP:ti:het\n",
+            ])
+            mock_result = MagicMock()
+            mock_result.returncode = 0
+            mock_result.stdout = ""
+            mock_result.stderr = ""
+            return mock_result
+
+        scorer = HappyScorer()
+
+        with patch("utils.scoring.subprocess.run", side_effect=fake_subprocess_run), \
+             patch("utils.scoring.generate_synthetic_regions_bed", return_value=False), \
+             patch("utils.scoring.slice_truth_vcf", return_value=False):
+            result = scorer.score_vcf(
+                truth_vcf=str(truth_vcf),
+                query_vcf=str(query_vcf),
+                reference_fasta=str(ref_fasta),
+                reference_sdf=str(sdf_dir),
+            )
+
+        assert result is not None
+        assert result["titv_query_snp"] == 0.0
+        assert result["titv_truth_snp"] == 0.0
+
+    def test_missing_assessed_vcf_drops_whole_vcf_ratios(
+        self, tmp_path, happy_summary_csv_path
+    ):
+        """When the assessed correction is unavailable, whole-VCF ratios drop.
+
+        With no annotated hap.py VCF to correct them, the summary.csv ratios
+        (computed including UNK calls outside the region) must be removed
+        entirely so the Quality component fails closed instead of scoring
+        miner-polluted values.
+        """
+        truth_vcf, query_vcf, ref_fasta, sdf_dir = self._setup_scoring_env(tmp_path)
+        expected_csv = tmp_path / "happy_query.vcf.summary.csv"
+
+        def fake_subprocess_run(cmd, **kwargs):
+            """Simulate hap.py producing only the summary CSV (no VCF)."""
+            shutil.copy(happy_summary_csv_path, expected_csv)
+            mock_result = MagicMock()
+            mock_result.returncode = 0
+            mock_result.stdout = ""
+            mock_result.stderr = ""
+            return mock_result
+
+        scorer = HappyScorer()
+
+        with patch("utils.scoring.subprocess.run", side_effect=fake_subprocess_run), \
+             patch("utils.scoring.generate_synthetic_regions_bed", return_value=False), \
+             patch("utils.scoring.slice_truth_vcf", return_value=False):
+            result = scorer.score_vcf(
+                truth_vcf=str(truth_vcf),
+                query_vcf=str(query_vcf),
+                reference_fasta=str(ref_fasta),
+                reference_sdf=str(sdf_dir),
+            )
+
+        assert result is not None
+        for key in ("titv_query_snp", "titv_truth_snp",
+                    "hethom_query_snp", "hethom_truth_snp",
+                    "hethom_query_indel", "hethom_truth_indel"):
+            assert key not in result

@@ -1248,7 +1248,7 @@ def _run_and_score(tool, tool_config, bam_path, ref_path, truth_path,
     zero_input = (
         (metrics.get("f1_snp") or 0.0) == 0.0
         and (metrics.get("f1_indel") or 0.0) == 0.0
-        and 0.24999 <= combined_final <= 0.25001
+        and 0.14999 <= combined_final <= 0.15001
     )
     would_record = valid_range and not zero_input
 

@@ -22,6 +22,16 @@ logger = logging.getLogger(__name__)
 HAPPY_DOCKER_IMAGE = "genonet/hap-py@sha256:03acabe84bbfba35f5a7234129d524c563f5657e1f21150a2ea2797f8e6d05f2"
 BCFTOOLS_DOCKER_IMAGE = "quay.io/biocontainers/bcftools:1.20--h8b25389_0"
 
+# Ratio metrics that hap.py's summary.csv computes over the ENTIRE truth/query
+# VCF, including UNK calls outside the -f BED regions. The assessed-only
+# correction must replace or drop every one of these before scoring so a
+# whole-VCF (miner-influenced) ratio can never reach the Quality component.
+WHOLE_VCF_RATIO_KEYS = (
+    'titv_query_snp', 'titv_truth_snp',
+    'hethom_query_snp', 'hethom_truth_snp',
+    'hethom_query_indel', 'hethom_truth_indel',
+)
+
 
 def subset_bed(source_bed: Path, target_bed: Path, region: str) -> bool:
     """Filter BED file to entries overlapping the target region."""
@@ -529,23 +539,19 @@ def parse_happy_vcf_assessed_metrics(happy_vcf_path: str) -> Optional[Dict[str, 
             'frac_na_indel': 0.0,
         }
 
-        # Ti/Tv ratio (query-side, assessed only)
-        if stats['tv_query'] > 0:
-            result['titv_query_snp'] = stats['ti_query'] / stats['tv_query']
-        if stats['tv_truth'] > 0:
-            result['titv_truth_snp'] = stats['ti_truth'] / stats['tv_truth']
+        # Ti/Tv and Het/Hom ratios (assessed only). Every ratio key is always
+        # emitted with an explicit value (0.0 when the denominator is zero) so
+        # the override in score_vcf replaces hap.py's whole-VCF summary.csv
+        # ratios even for zero-count classes; 0.0 marks the class unavailable,
+        # which the AdvancedScorer Quality component fails closed on.
+        result['titv_query_snp'] = stats['ti_query'] / stats['tv_query'] if stats['tv_query'] > 0 else 0.0
+        result['titv_truth_snp'] = stats['ti_truth'] / stats['tv_truth'] if stats['tv_truth'] > 0 else 0.0
+        result['hethom_query_snp'] = stats['het_query_snp'] / stats['hom_query_snp'] if stats['hom_query_snp'] > 0 else 0.0
+        result['hethom_truth_snp'] = stats['het_truth_snp'] / stats['hom_truth_snp'] if stats['hom_truth_snp'] > 0 else 0.0
+        result['hethom_query_indel'] = stats['het_query_indel'] / stats['hom_query_indel'] if stats['hom_query_indel'] > 0 else 0.0
+        result['hethom_truth_indel'] = stats['het_truth_indel'] / stats['hom_truth_indel'] if stats['hom_truth_indel'] > 0 else 0.0
 
-        # Het/Hom ratios (assessed only)
-        if stats['hom_query_snp'] > 0:
-            result['hethom_query_snp'] = stats['het_query_snp'] / stats['hom_query_snp']
-        if stats['hom_truth_snp'] > 0:
-            result['hethom_truth_snp'] = stats['het_truth_snp'] / stats['hom_truth_snp']
-        if stats['hom_query_indel'] > 0:
-            result['hethom_query_indel'] = stats['het_query_indel'] / stats['hom_query_indel']
-        if stats['hom_truth_indel'] > 0:
-            result['hethom_truth_indel'] = stats['het_truth_indel'] / stats['hom_truth_indel']
-
-        titv_str = f"{result['titv_query_snp']:.4f}" if 'titv_query_snp' in result else "N/A"
+        titv_str = f"{result['titv_query_snp']:.4f}"
         logger.info(f"Assessed-only metrics: query_snp={stats['query_total_snp']}, "
                      f"query_indel={stats['query_total_indel']}, titv={titv_str}")
 
@@ -867,10 +873,21 @@ class HappyScorer:
                 if assessed:
                     old_qt_snp = happy_results.get('query_total_snp', 0)
                     old_qt_indel = happy_results.get('query_total_indel', 0)
+                    # assessed always emits every WHOLE_VCF_RATIO_KEYS entry, so
+                    # this override wipes all whole-VCF CSV ratios, zero-count
+                    # classes included.
                     for key, val in assessed.items():
                         happy_results[key] = val
                     logger.info(f"Corrected metrics from VCF: query_total {old_qt_snp}+{old_qt_indel}"
                                 f" -> {assessed['query_total_snp']}+{assessed['query_total_indel']}")
+                else:
+                    # Assessed-only correction unavailable: drop the whole-VCF
+                    # summary.csv ratios entirely so the Quality component fails
+                    # closed instead of scoring UNK-polluted values.
+                    for key in WHOLE_VCF_RATIO_KEYS:
+                        happy_results.pop(key, None)
+                    logger.warning("Assessed-only ratio correction unavailable; "
+                                   "dropped whole-VCF ratio metrics from summary.csv")
 
                 logger.info(f"hap.py results: SNP F1={happy_results['f1_snp']:.3f}, INDEL F1={happy_results['f1_indel']:.3f}")
 
@@ -950,7 +967,8 @@ class AdvancedScorer:
         - Core (60%): Truth-weighted F1 with emphasis (γ=0.5)
         - Completeness (15%): Average recall (γ=3.0) + coverage (γ=2.0)
         - FP Rate (15%): Penalizes FP > 0.2% and call count != truth count
-        - Quality (10%): Ti/Tv and Het/Hom ratio match penalties
+        - Quality (10%): Ti/Tv and Het/Hom ratio match penalties; fails
+          closed to 0 when a ratio class is missing or zero
 
         Args:
             metrics: Dictionary with f1_snp, f1_indel, plus additional hap.py metrics
@@ -1028,8 +1046,12 @@ class AdvancedScorer:
                 AdvancedScorer.ratio_penalty(hethom_query_indel - hethom_truth_indel, 0.15)
             )
 
-        titv_component = sum(titv_penalties) / len(titv_penalties) if titv_penalties else 1.0
-        hethom_component = sum(hethom_penalties) / len(hethom_penalties) if hethom_penalties else 1.0
+        # Fail closed: when a ratio class is unavailable (missing or zero on
+        # either side) no penalty is computable, so the component scores 0
+        # instead of defaulting to full marks. A missing metric must never
+        # award free Quality points.
+        titv_component = sum(titv_penalties) / len(titv_penalties) if titv_penalties else 0.0
+        hethom_component = sum(hethom_penalties) / len(hethom_penalties) if hethom_penalties else 0.0
         quality_component = (titv_component + hethom_component) / 2.0
 
         # Final weighted score (60/15/15/10)

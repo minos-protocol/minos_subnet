@@ -98,8 +98,9 @@ class TestComputeAdvancedScore:
         """All-zero F1/recall metrics should produce a very low score.
 
         Note: score is not zero because coverage (frac_na=0 -> coverage=1.0)
-        and quality defaults still contribute (~25 points from FP + quality
-        components when there are zero calls).
+        and the FP-rate baseline still contribute (~15 points when there are
+        zero calls); the Quality component fails closed on the missing query
+        ratios and contributes nothing.
         """
         score = AdvancedScorer.compute_advanced_score(zero_happy_metrics)
         assert score < 30.0
@@ -301,18 +302,46 @@ class TestComputeAdvancedScore:
         expected_quality = ((titv_pen) + (hethom_snp_pen + hethom_indel_pen) / 2) / 2
         assert expected_quality == pytest.approx(1.0)
 
-        # Also verify the score is not penalized relative to a version without
-        # ratio data (which defaults quality to 1.0)
-        metrics_no_ratios = {**metrics}
-        del metrics_no_ratios['titv_truth_snp']
-        del metrics_no_ratios['titv_query_snp']
-        del metrics_no_ratios['hethom_truth_snp']
-        del metrics_no_ratios['hethom_query_snp']
-        del metrics_no_ratios['hethom_truth_indel']
-        del metrics_no_ratios['hethom_query_indel']
+        score = AdvancedScorer.compute_advanced_score(metrics)
+        assert 0.0 <= score <= 100.0
+
+    def test_missing_ratio_metrics_fail_closed(self):
+        """Missing ratio metrics must fail closed instead of awarding full quality.
+
+        With no Ti/Tv or Het/Hom data at all the Quality component (10% weight)
+        scores 0 rather than defaulting to 1.0, so the total drops by exactly
+        10 points relative to the identical metric set with matching ratios.
+        """
+        metrics = {
+            'f1_snp': 0.90, 'f1_indel': 0.85,
+            'recall_snp': 0.90, 'recall_indel': 0.85,
+            'truth_total_snp': 100, 'truth_total_indel': 50,
+            'query_total_snp': 100, 'query_total_indel': 50,
+            'fp_snp': 2, 'fp_indel': 1,
+            'frac_na_snp': 0.0, 'frac_na_indel': 0.0,
+            'titv_truth_snp': 2.1, 'titv_query_snp': 2.1,
+            'hethom_truth_snp': 1.5, 'hethom_query_snp': 1.5,
+            'hethom_truth_indel': 1.5, 'hethom_query_indel': 1.5,
+        }
         score_with = AdvancedScorer.compute_advanced_score(metrics)
+
+        metrics_no_ratios = {
+            key: val for key, val in metrics.items()
+            if not key.startswith(('titv_', 'hethom_'))
+        }
         score_without = AdvancedScorer.compute_advanced_score(metrics_no_ratios)
-        assert score_with == pytest.approx(score_without, abs=0.5)
+
+        assert score_with - score_without == pytest.approx(10.0)
+
+    def test_zero_query_ratios_fail_closed(self, zero_happy_metrics):
+        """Explicit 0.0 query ratios (no assessed Tv/Hom calls) fail closed.
+
+        All-zero input lands here: the Quality component contributes nothing,
+        so the deterministic score is ~15 (coverage + FP-rate baseline only),
+        not ~25 with a defaulted quality component.
+        """
+        score = AdvancedScorer.compute_advanced_score(zero_happy_metrics)
+        assert score == pytest.approx(15.0, abs=0.1)
 
     def test_size_ratio_far_from_one_penalized(self):
         """When total_calls is very different from total_truth, FP component suffers."""

@@ -84,10 +84,13 @@ def _valid_round_score(value, *, label: str) -> Optional[float]:
 
 
 def _is_zero_input_advanced_fingerprint(metrics: dict, combined_final: float) -> bool:
+    # All-zero input scores deterministically ~0.15: only the frac_na coverage
+    # half of Completeness and the FP-rate baseline contribute, because the
+    # Quality component fails closed (0) when the query ratios are missing.
     return (
         (metrics.get("f1_snp") or 0.0) == 0.0
         and (metrics.get("f1_indel") or 0.0) == 0.0
-        and 0.24999 <= combined_final <= 0.25001
+        and 0.14999 <= combined_final <= 0.15001
     )
 
 
