@@ -128,9 +128,19 @@ and ignored if submitted: `memory_gb`, `num_threads`, `ref_build`, `threads`,
 | `variants_only` | bool | `true` / `false` | `true` |
 | `ploidy` | enum | `GRCh37`, `GRCh38`, `X`, `Y`, `1`, `2` | `GRCh38` |
 | `pval_threshold` | float | 0.0 – 1.0 | 0.5 |
+| `difficult_regions_mask` | str | optional path to a plain `.bed` file | disabled |
 
 **Not applied:** `prior`, `indel_bias`, `score_vs_ref`. These are accepted for
 compatibility but the platform runs bcftools with its own defaults for them.
+
+**`difficult_regions_mask`** (optional): when set to the path of a BED file,
+the bcftools template appends a post-call exclude step (`bcftools view -T ^`)
+after `mpileup | call | norm`, dropping records that overlap the listed
+regions. This is the standard way to keep known-difficult regions (for example
+GIAB genome stratifications) out of a call set. Omit the parameter to leave
+the pipeline unchanged. Validators re-run submitted configs, so the file must
+exist at the same path wherever the config is executed; publishing canonical
+masks alongside the round inputs is the recommended deployment.
 
 ---
 

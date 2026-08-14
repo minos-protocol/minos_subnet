@@ -138,6 +138,63 @@ def validate_round_id(round_id: str) -> Dict[str, Any]:
     return {"valid": True, "error": None}
 
 
+# Regex pattern for a safe mask file basename: plain BED files only
+MASK_BASENAME_PATTERN = re.compile(r'^[A-Za-z0-9._-]+\.bed$')
+
+
+def validate_mask_path(mask_path: str) -> Dict[str, Any]:
+    """
+    Validate a difficult-regions BED mask path before it reaches a shell.
+
+    SECURITY CRITICAL: the validated path is mounted into the variant-calling
+    container and interpolated into a shell pipeline, so this rejects anything
+    outside a strict safe-path shape: no shell metacharacters, no whitespace,
+    no '..' traversal components, and plain '.bed' files only.
+
+    Args:
+        mask_path: Path to a BED file whose regions are excluded post-call
+                   (e.g., "/data/masks/grch38_alldifficultregions.bed")
+
+    Returns:
+        Dict with:
+        - valid: bool (True if the path is safe to use)
+        - error: str or None (error message if invalid)
+
+    Examples:
+        >>> validate_mask_path("/data/masks/hard_regions.bed")
+        {'valid': True, 'error': None}
+
+        >>> validate_mask_path("/data/../etc/passwd.bed")
+        {'valid': False, 'error': 'Mask path must not contain .. components'}
+    """
+    if not mask_path or not isinstance(mask_path, str):
+        return {"valid": False, "error": "Mask path must be a non-empty string"}
+
+    if len(mask_path) > 255:
+        return {"valid": False, "error": "Mask path too long (max 255 characters)"}
+
+    # Only unreserved path characters. Anything else (spaces, ';', '$', '`',
+    # quotes, ...) is rejected outright and never needs shell-escaping.
+    if not re.fullmatch(r'[A-Za-z0-9._/-]+', mask_path):
+        return {
+            "valid": False,
+            "error": f"Mask path contains forbidden characters: '{mask_path}'. "
+                     "Allowed: letters, digits, '.', '_', '/', '-'"
+        }
+
+    if any(part == '..' for part in mask_path.split('/')):
+        return {"valid": False, "error": "Mask path must not contain '..' components"}
+
+    basename = mask_path.rsplit('/', 1)[-1]
+    if not MASK_BASENAME_PATTERN.match(basename):
+        return {
+            "valid": False,
+            "error": f"Mask file must be a plain BED file ending in '.bed': '{basename}'"
+        }
+
+    return {"valid": True, "error": None}
+
+
 GATK_QUALITY_PARAMS = {
     # --- Quality filtering ---
 
@@ -885,6 +942,19 @@ BCFTOOLS_QUALITY_PARAMS = {
         "flag_call": "-p",
         "stage": "call"
     },
+
+    # --- Post-call: difficult-region masking ---
+
+    # Optional BED file with known-difficult regions (e.g. GIAB genome
+    # stratifications). When set, the bcftools template drops records
+    # overlapping these regions after mpileup|call|norm. Omit to disable;
+    # the pipeline is unchanged when the parameter is absent.
+    "difficult_regions_mask": {
+        "type": "str",
+        "default": None,
+        "stage": "post_call",
+        "validator": validate_mask_path,
+    },
 }
 
 
@@ -963,22 +1033,40 @@ def validate_and_build_flags(tool_name: str, tool_options: dict) -> dict:
                 errors.append(f"Parameter '{param_name}' must be bool, got {type(param_value)}")
                 continue
 
+        elif param_def["type"] == "str":
+            # Strict typing: bool/int/float/NaN/None are all rejected here.
+            if not isinstance(param_value, str):
+                errors.append(f"Parameter '{param_name}' must be str, got {type(param_value)}")
+                continue
+            validator = param_def.get("validator")
+            if validator is not None:
+                validation = validator(param_value)
+                if not validation["valid"]:
+                    errors.append(f"Parameter '{param_name}': {validation['error']}")
+                    continue
+
         # Build flag string
         if tool_name == "bcftools":
             # BCFtools has stage-specific flags
             stage = param_def.get("stage", "mpileup")
-            if stage == "mpileup":
-                flag_key = "flag_mpileup"
-            elif stage == "call":
-                flag_key = "flag_call"
-            else:
-                flag_key = "flag"
 
-            if param_def["type"] == "bool":
-                if param_value:  # Only add flag if True
-                    flags.append({"stage": stage, "flag": param_def[flag_key]})
+            if stage == "post_call":
+                # Post-call params are template pipeline steps, not CLI flags:
+                # hand the validated value itself to the template.
+                flags.append({"stage": stage, "flag": str(param_value)})
             else:
-                flags.append({"stage": stage, "flag": f"{param_def[flag_key]} {param_value}"})
+                if stage == "mpileup":
+                    flag_key = "flag_mpileup"
+                elif stage == "call":
+                    flag_key = "flag_call"
+                else:
+                    flag_key = "flag"
+
+                if param_def["type"] == "bool":
+                    if param_value:  # Only add flag if True
+                        flags.append({"stage": stage, "flag": param_def[flag_key]})
+                else:
+                    flags.append({"stage": stage, "flag": f"{param_def[flag_key]} {param_value}"})
         elif tool_name == "deepvariant" and param_def.get("stage") in ("make_examples", "postprocess_variants"):
             # DeepVariant extra args: make_examples and postprocess_variants collected separately
             # Convert Python bools to lowercase for absl flags

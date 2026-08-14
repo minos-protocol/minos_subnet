@@ -1,9 +1,14 @@
 """
 Tests for templates.tool_params — region validation, round_id validation,
-and tool-option whitelist enforcement with flag building.
+mask path validation, and tool-option whitelist enforcement with flag building.
 """
 
-from templates.tool_params import validate_region, validate_round_id, validate_and_build_flags
+from templates.tool_params import (
+    validate_region,
+    validate_round_id,
+    validate_mask_path,
+    validate_and_build_flags,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -435,3 +440,116 @@ class TestValidateAndBuildFlags:
         # The valid params still produce flags
         assert "--min-base-quality-score 20" in result["flags"]
         assert "--min-pruning 5" in result["flags"]
+
+
+# ---------------------------------------------------------------------------
+# Difficult-regions mask (bcftools post-call BED exclude)
+# ---------------------------------------------------------------------------
+
+class TestValidateMaskPath:
+    """Strict validation of difficult_regions_mask paths before shell use."""
+
+    def test_valid_absolute_path(self):
+        result = validate_mask_path("/data/masks/grch38_alldifficultregions.bed")
+        assert result["valid"] is True
+        assert result["error"] is None
+
+    def test_valid_relative_path(self):
+        result = validate_mask_path("masks/hard_regions.bed")
+        assert result["valid"] is True
+
+    def test_empty_rejected(self):
+        result = validate_mask_path("")
+        assert result["valid"] is False
+
+    def test_non_string_rejected(self):
+        for bad in [None, 42, 1.5, True, ["x.bed"]]:
+            result = validate_mask_path(bad)
+            assert result["valid"] is False, bad
+
+    def test_too_long_rejected(self):
+        result = validate_mask_path("/data/" + "x" * 300 + ".bed")
+        assert result["valid"] is False
+
+    def test_forbidden_characters_rejected(self):
+        for bad in [
+            "hard mask.bed",        # whitespace
+            "hard;rm.bed",          # shell metacharacter
+            "mask$(whoami).bed",    # command substitution
+            "mask`id`.bed",         # backticks
+            "mask|.bed",            # pipe
+        ]:
+            result = validate_mask_path(bad)
+            assert result["valid"] is False, bad
+
+    def test_traversal_components_rejected(self):
+        for bad in [
+            "../masks/hard.bed",
+            "/data/../masks/hard.bed",
+            "/data/masks/..",
+        ]:
+            result = validate_mask_path(bad)
+            assert result["valid"] is False, bad
+
+    def test_non_bed_extensions_rejected(self):
+        for bad in [
+            "masks/hard.txt",
+            "masks/hard.vcf",
+            "masks/hard.bed.gz",   # compressed BEDs need an index; plain BED only
+            "masks/hard",          # no extension
+        ]:
+            result = validate_mask_path(bad)
+            assert result["valid"] is False, bad
+
+
+class TestBcftoolsDifficultRegionsMask:
+    """difficult_regions_mask as an accepted bcftools parameter."""
+
+    VALID_MASK = "/data/masks/grch38_alldifficultregions.bed"
+
+    def test_valid_mask_accepted_as_post_call_flag(self):
+        result = validate_and_build_flags(
+            "bcftools", {"difficult_regions_mask": self.VALID_MASK}
+        )
+        assert result["valid"] is True
+        assert {"stage": "post_call", "flag": self.VALID_MASK} in result["flags"]
+
+    def test_mask_absent_produces_no_post_call_flag(self):
+        result = validate_and_build_flags("bcftools", {"min_BQ": 13})
+        assert result["valid"] is True
+        assert all(
+            f.get("stage") != "post_call" for f in result["flags"] if isinstance(f, dict)
+        )
+
+    def test_mask_rejects_non_string_values(self):
+        # Strict typing: bool-as-int and NaN-class values must not pass.
+        for bad in [True, False, 1, 0, 1.5, float("nan"), float("inf"), None]:
+            result = validate_and_build_flags(
+                "bcftools", {"difficult_regions_mask": bad}
+            )
+            assert result["valid"] is False, bad
+            assert any("must be str" in e for e in result["errors"]), bad
+
+    def test_mask_rejects_unsafe_paths(self):
+        for bad in [
+            "",
+            "../masks/hard.bed",
+            "/data/../masks/hard.bed",
+            "hard mask.bed",
+            "hard;rm.bed",
+            "masks/hard.txt",
+            "masks/hard.bed.gz",
+        ]:
+            result = validate_and_build_flags(
+                "bcftools", {"difficult_regions_mask": bad}
+            )
+            assert result["valid"] is False, bad
+            assert any("difficult_regions_mask" in e for e in result["errors"]), bad
+
+    def test_mask_only_accepted_for_bcftools(self):
+        for tool in ["gatk", "deepvariant"]:
+            result = validate_and_build_flags(
+                tool, {"difficult_regions_mask": self.VALID_MASK}
+            )
+            assert result["valid"] is False, tool
+            assert any("not in quality params whitelist" in e for e in result["errors"]), tool

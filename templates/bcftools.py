@@ -64,6 +64,7 @@ def variant_call(
     # Separate flags by pipeline stage
     mpileup_flags = []
     call_flags = []
+    difficult_regions_mask = None
 
     for flag_info in validation_result["flags"]:
         if isinstance(flag_info, dict):
@@ -71,6 +72,8 @@ def variant_call(
                 mpileup_flags.append(flag_info["flag"])
             elif flag_info["stage"] == "call":
                 call_flags.append(flag_info["flag"])
+            elif flag_info["stage"] == "post_call":
+                difficult_regions_mask = flag_info["flag"]
         else:
             mpileup_flags.append(flag_info)
 
@@ -104,6 +107,17 @@ def variant_call(
 
     call_flags_str = " ".join(call_flags) if call_flags else "-mv"
 
+    # Optional post-call difficult-regions mask: resolve the path and require
+    # the BED up front so a bad path fails before any Docker work starts.
+    # The same config is re-run by validators, so the file must exist at this
+    # path wherever the config is executed.
+    mask_path = None
+    if difficult_regions_mask:
+        mask_path = Path(difficult_regions_mask).resolve()
+        if not mask_path.is_file():
+            return {"success": False, "variant_count": 0,
+                    "error": f"Difficult-regions mask not found: {mask_path}"}
+
     start_time = time.time()
     is_arm = platform.machine() == "arm64"
 
@@ -136,6 +150,30 @@ def variant_call(
             except subprocess.TimeoutExpired:
                 return {"success": False, "variant_count": 0, "error": "BAM indexing timed out"}
 
+    # Build the pipeline script. With a difficult-regions mask the normalized
+    # output stays uncompressed (-Ou) and is piped through a post-call exclude
+    # step (bcftools view -T ^<mask>) before writing the final VCF; without a
+    # mask the pipeline is exactly mpileup|call|norm as before.
+    ref_q = shlex.quote(reference_path.name)
+    out_q = shlex.quote(output_vcf_path.name)
+    pipeline_script = (
+        f"set -euo pipefail\n"
+        f"bcftools mpileup --threads {threads} -f /ref/{ref_q} -r {shlex.quote(region)} {mpileup_flags_str} -Ou /data/{shlex.quote(bam_path.name)} "
+        f"| bcftools call --threads {threads} {call_flags_str} -Ou "
+    )
+    if mask_path is not None:
+        pipeline_script += (
+            f"| bcftools norm --threads {threads} -f /ref/{ref_q} -Ou "
+            f"| bcftools view --threads {threads} -T ^/mask/{shlex.quote(mask_path.name)} -Oz -o /output/{out_q}\n"
+        )
+        pipeline_label = "mpileup|call|norm|view(mask)"
+    else:
+        pipeline_script += (
+            f"| bcftools norm --threads {threads} -f /ref/{ref_q} -Oz -o /output/{out_q}\n"
+        )
+        pipeline_label = "mpileup|call|norm"
+    pipeline_script += f"bcftools index --threads {threads} /output/{out_q}"
+
     # The pipeline (|) runs inside the Docker container shell, not on the host
     bcftools_cmd = ["docker", "run", "--rm"]
     if is_arm:
@@ -146,13 +184,14 @@ def variant_call(
         "-v", f"{bam_path.parent}:/data",
         "-v", f"{reference_path.parent}:/ref",
         "-v", f"{output_vcf_path.parent}:/output",
+    ])
+    if mask_path is not None:
+        # Read-only: the container only reads the mask regions.
+        bcftools_cmd.extend(["-v", f"{mask_path.parent}:/mask:ro"])
+    bcftools_cmd.extend([
         "quay.io/biocontainers/bcftools:1.20--h8b25389_0",
         "sh", "-lc",
-        f"set -euo pipefail\n"
-        f"bcftools mpileup --threads {threads} -f /ref/{shlex.quote(reference_path.name)} -r {shlex.quote(region)} {mpileup_flags_str} -Ou /data/{shlex.quote(bam_path.name)} "
-        f"| bcftools call --threads {threads} {call_flags_str} -Ou "
-        f"| bcftools norm --threads {threads} -f /ref/{shlex.quote(reference_path.name)} -Oz -o /output/{shlex.quote(output_vcf_path.name)}\n"
-        f"bcftools index --threads {threads} /output/{shlex.quote(output_vcf_path.name)}",
+        pipeline_script,
     ])
 
     try:
@@ -186,7 +225,7 @@ def variant_call(
                 "version": "1.20",
                 "runtime_seconds": elapsed,
                 "region": region,
-                "pipeline": "mpileup|call|norm"
+                "pipeline": pipeline_label
             }
         }
 
