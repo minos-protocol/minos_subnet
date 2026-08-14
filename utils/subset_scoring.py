@@ -5,6 +5,7 @@ Provides utilities for extracting miner/validator lists from the Bittensor
 metagraph and checking whether the scoring deadline is approaching.
 """
 
+import math
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -90,3 +91,45 @@ def should_stop_secondary_scoring(
         return False
     remaining = seconds_until_deadline(scoring_end_time)
     return remaining < buffer_seconds
+
+
+def per_job_wall_clock_budget(
+    scoring_end_time: Optional[datetime],
+    num_jobs: int,
+    concurrency: int,
+    max_job_seconds: int,
+    buffer_seconds: int = 180,
+    min_job_seconds: int = 300,
+) -> int:
+    """
+    Return the wall-clock budget (seconds) a single miner scoring job may use.
+
+    Without a deadline the full max_job_seconds applies. Under deadline
+    pressure the remaining time (minus buffer_seconds) is split evenly across
+    the ceil(num_jobs / concurrency) batches still needed, so a cohort of
+    deliberately slow configs cannot consume the whole scoring window and
+    starve the remaining miners. Templates enforce the budget through their
+    subprocess timeout, i.e. an over-budget job is killed early.
+
+    Args:
+        scoring_end_time: Deadline from the platform assignment response.
+        num_jobs: Miner jobs still to score in this phase.
+        concurrency: Max jobs the validator runs at once.
+        max_job_seconds: Full per-tool timeout (the no-pressure budget).
+        buffer_seconds: Window reserved before the deadline.
+        min_job_seconds: Floor so jobs are not starved to zero near the deadline.
+
+    Returns:
+        Per-job budget in seconds, clamped to [min_job_seconds, max_job_seconds].
+    """
+    if scoring_end_time is None:
+        return max_job_seconds
+
+    jobs = max(1, num_jobs)
+    workers = max(1, concurrency)
+    batches = math.ceil(jobs / workers)
+
+    available = seconds_until_deadline(scoring_end_time) - buffer_seconds
+    per_job = available / batches
+
+    return int(max(min_job_seconds, min(max_job_seconds, per_job)))

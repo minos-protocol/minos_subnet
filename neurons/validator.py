@@ -49,7 +49,7 @@ from utils.file_utils import compute_sha256
 from utils.file_utils import download_file_with_fallback
 from utils.path_utils import safe_round_dir_name
 from utils.platform_client import ValidatorPlatformClient, PlatformConfig, PlatformClientError
-from utils.subset_scoring import should_stop_secondary_scoring
+from utils.subset_scoring import per_job_wall_clock_budget, should_stop_secondary_scoring
 from templates import load_template
 from templates.tool_params import validate_round_id
 
@@ -67,6 +67,12 @@ BITTENSOR_BLOCK_TIME_SECONDS = 12
 MAX_SLEEP_SECONDS = 120
 SCORE_GRACE_SECONDS = int(os.getenv("SCORE_GRACE_SECONDS", "60"))
 SCORE_FINALIZATION_DELAY_SECONDS = int(os.getenv("SCORE_FINALIZATION_DELAY_SECONDS", "5"))
+
+# Resource-pressure guard for the scoring window: hap.py cost grows with the
+# query variant count, so an oversized output VCF is refused before scoring.
+# Rounds are 5-10 MB windows where honest callers emit O(10^4) variants, so
+# this cap leaves ~50x headroom while bounding the worst case.
+MAX_SCORED_VCF_VARIANTS = 1_000_000
 
 
 def _valid_round_score(value, *, label: str) -> Optional[float]:
@@ -431,6 +437,12 @@ class Validator:
         4. Score secondary miners until 3 min before scoring deadline.
         5. After deadline, fetch backfill scores for gap miners from platform.
         6. Feed backfill scores into ScoreTracker, then record_round + set weights.
+
+        Every job also gets a deadline-aware per-miner wall-clock budget
+        (per_job_wall_clock_budget): under deadline pressure the remaining
+        window is split across the jobs still to run, so a cohort of slow
+        configs cannot consume the whole window. Templates enforce it via
+        their subprocess timeout (early kill).
         """
         rid_check = validate_round_id(round_id)
         if not rid_check["valid"]:
@@ -523,10 +535,14 @@ class Validator:
 
             # Score primaries first as a barrier, then secondaries (which may be
             # skipped near the deadline). In-flight jobs always finish; the
-            # deadline check only prevents starting new secondary work.
+            # deadline check only prevents starting new secondary work. Each job
+            # also gets a deadline-aware per-miner wall-clock budget so a cohort
+            # of slow configs cannot consume the whole scoring window (early kill
+            # happens via the subprocess timeout in the templates).
             sem = asyncio.Semaphore(self._scoring_cfg["concurrency"])
+            max_job_seconds = GENOMICS_CONFIG.get("variant_calling_timeout", 1800)
 
-            async def _bounded_score(sub, is_secondary: bool):
+            async def _bounded_score(sub, is_secondary: bool, job_timeout: int):
                 async with sem:
                     if is_secondary and should_stop_secondary_scoring(scoring_deadline, buffer_seconds=180):
                         bt.logging.debug(
@@ -539,6 +555,7 @@ class Validator:
                         ref_path, ref_sdf_path, truth_bed_path, truth_vcf_path,
                         region, scored_hotkeys, submission_times,
                         mutations_vcf_path=mutations_vcf_path,
+                        job_timeout=job_timeout,
                     )
 
             if primary_hotkeys:
@@ -546,11 +563,16 @@ class Validator:
                 secondary_subs_only = [s for s in ordered_subs if s.get("miner_hotkey") not in primary_hotkeys]
 
                 if primary_subs_only:
+                    primary_job_timeout = per_job_wall_clock_budget(
+                        scoring_deadline, len(primary_subs_only),
+                        self._scoring_cfg["concurrency"], max_job_seconds,
+                    )
                     bt.logging.info(
                         f"Round {round_id}: scoring {len(primary_subs_only)} primary miners "
-                        f"(concurrency={self._scoring_cfg['concurrency']})"
+                        f"(concurrency={self._scoring_cfg['concurrency']}, "
+                        f"per-job budget={primary_job_timeout}s)"
                     )
-                    await asyncio.gather(*[_bounded_score(s, False) for s in primary_subs_only])
+                    await asyncio.gather(*[_bounded_score(s, False, primary_job_timeout) for s in primary_subs_only])
 
                 if secondary_subs_only:
                     if should_stop_secondary_scoring(scoring_deadline, buffer_seconds=180):
@@ -559,18 +581,30 @@ class Validator:
                             f"{len(secondary_subs_only)} secondary miners"
                         )
                     else:
+                        # Recompute against the time actually left after the
+                        # primary barrier, so secondaries get a fair share.
+                        secondary_job_timeout = per_job_wall_clock_budget(
+                            scoring_deadline, len(secondary_subs_only),
+                            self._scoring_cfg["concurrency"], max_job_seconds,
+                        )
                         bt.logging.info(
                             f"Round {round_id}: scoring {len(secondary_subs_only)} secondary miners "
-                            f"(concurrency={self._scoring_cfg['concurrency']})"
+                            f"(concurrency={self._scoring_cfg['concurrency']}, "
+                            f"per-job budget={secondary_job_timeout}s)"
                         )
-                        await asyncio.gather(*[_bounded_score(s, True) for s in secondary_subs_only])
+                        await asyncio.gather(*[_bounded_score(s, True, secondary_job_timeout) for s in secondary_subs_only])
             else:
                 # No assignment (fallback / single-validator) — score everyone concurrently
+                fallback_job_timeout = per_job_wall_clock_budget(
+                    scoring_deadline, len(ordered_subs),
+                    self._scoring_cfg["concurrency"], max_job_seconds,
+                )
                 bt.logging.info(
                     f"Round {round_id}: scoring {len(ordered_subs)} miners (no assignment, "
-                    f"concurrency={self._scoring_cfg['concurrency']})"
+                    f"concurrency={self._scoring_cfg['concurrency']}, "
+                    f"per-job budget={fallback_job_timeout}s)"
                 )
-                await asyncio.gather(*[_bounded_score(s, False) for s in ordered_subs])
+                await asyncio.gather(*[_bounded_score(s, False, fallback_job_timeout) for s in ordered_subs])
 
             # --- Steps 5 & 6: Backfill + finalize ---
             finalized = await self._finalize_round_scores(
@@ -769,8 +803,12 @@ class Validator:
     async def _score_single_miner(self, round_id, sub, already_scored, work_dir,
                                    bam_path, ref_path, ref_sdf_path, truth_bed_path,
                                    truth_vcf_path, region, scored_hotkeys, submission_times,
-                                   mutations_vcf_path=None):
-        """Run a single miner's tool, score the output, and submit results."""
+                                   mutations_vcf_path=None, job_timeout: Optional[int] = None):
+        """Run a single miner's tool, score the output, and submit results.
+
+        job_timeout caps this miner's wall-clock budget (seconds); None falls
+        back to the full variant_calling_timeout.
+        """
         miner_hotkey = sub.get("miner_hotkey")
         tool_name = sub.get("tool_name")
         if not miner_hotkey or not tool_name:
@@ -812,7 +850,8 @@ class Validator:
                 bam_path=bam_path,
                 ref_path=ref_path,
                 output_vcf_path=miner_vcf_path,
-                region=region
+                region=region,
+                timeout=job_timeout,
             )
 
             if not result.get("success"):
@@ -825,6 +864,17 @@ class Validator:
 
             variant_count = result.get("variant_count", 0)
             print(f"   Variants called: {variant_count}", flush=True)
+
+            # Resource guard: refuse oversized outputs BEFORE hap.py so a huge
+            # VCF cannot consume the scoring window. Same outcome as a tool
+            # failure: no local score, the miner is left for peer backfill.
+            if variant_count > MAX_SCORED_VCF_VARIANTS:
+                bt.logging.warning(
+                    f"Miner {miner_hotkey[:16]}: output VCF has {variant_count} variants "
+                    f"(cap {MAX_SCORED_VCF_VARIANTS}); skipping hap.py; leaving for backfill"
+                )
+                print(f"   Output VCF too large to score ({variant_count} variants)", flush=True)
+                return
 
             # 5. Score with hap.py
             metrics = self.happy_scorer.score_vcf(
@@ -1125,9 +1175,16 @@ class Validator:
         bam_path: Path,
         ref_path: Path,
         output_vcf_path: Path,
-        region: str
+        region: str,
+        timeout: Optional[int] = None,
     ) -> dict:
-        """Run a miner's variant calling tool via templates."""
+        """Run a miner's variant calling tool via templates.
+
+        timeout caps this job's wall-clock budget (seconds); None applies the
+        full variant_calling_timeout. Templates enforce it via their subprocess
+        timeout, so an over-budget job is killed early instead of consuming the
+        whole scoring window.
+        """
         try:
             # Load the template for this tool
             template = load_template(tool_name)
@@ -1147,7 +1204,8 @@ class Validator:
             # SCORING_THREADS / SCORING_MEMORY_GB env vars override there.
             config = {
                 **sanitized_config,  # Miner's quality params FIRST
-                "timeout": GENOMICS_CONFIG.get("variant_calling_timeout", 1800),
+                "timeout": timeout if timeout is not None
+                           else GENOMICS_CONFIG.get("variant_calling_timeout", 1800),
                 "threads": self._scoring_cfg["threads_per_job"],
                 "memory_gb": self._scoring_cfg["mem_per_job_gb"],
                 "ref_build": "GRCh38",  # Standard reference build
