@@ -158,7 +158,7 @@ SNP/INDEL weighting is truth-count-proportional (fallback: 70/30).
 - Miners must participate in ≥ 5 of the last 20 rounds to be eligible for weights; the current round counts
 - Miners below the participation threshold receive 0 weight
 - Reward params come from `/scoring/network-config` (dynamic — check it for the latest). Currently: the highest-scoring eligible current-round miner receives ~90% (`winner_weight = 0.9`), eligible ranks #2 through #20 (`dust_top_n = 20`) split the remaining ~10% as ranked pruning dust using 0.8 geometric decay, and burn is 0% (`burn_rate = 0.0`)
-- Close current-round ties use deterministic submission/canonical-ranking signals so validators converge on the same winner
+- Close current-round ties (gap ≤ 0.1%) defer to the platform's stake-weighted canonical ranking so validators converge on the same winner. A canonical override is only applied when the ranking meets the validator-side coverage gates — at least 3 distinct validators (quorum) at ≥ 5000 TAO each, representing a stake-weighted supermajority (default 2/3) of the subnet's active validator stake as seen in the validator's own metagraph. Below that coverage the validator skips the weight submission (fail-closed) rather than selecting a low-quorum close-call winner
 
 ---
 

@@ -38,9 +38,18 @@ CANONICAL_TIEBREAK_TOLERANCE = 0.001
 
 # Minimum canonical coverage. Platform contributors below the per-validator
 # stake floor are excluded, and the validator requires enough distinct
-# validators before using the canonical ranking.
-CANONICAL_MIN_VALIDATOR_COUNT = int(os.getenv("CANONICAL_MIN_VALIDATOR_COUNT", "2"))
+# validators before using the canonical ranking. The quorum is 3 so a
+# colluding pair can never be the entire close-call tiebreak electorate.
+CANONICAL_MIN_VALIDATOR_COUNT = int(os.getenv("CANONICAL_MIN_VALIDATOR_COUNT", "3"))
 CANONICAL_MIN_VALIDATOR_STAKE = float(os.getenv("CANONICAL_MIN_VALIDATOR_STAKE", "5000"))
+
+# Stake-weighted supermajority of the subnet's active validator stake that the
+# canonical ranking must represent before it may override a local close-call
+# winner. The platform reports total_stake_considered over contributing
+# validators above the per-validator stake floor; the validator compares it
+# against this fraction of the permit-validator stake in its own metagraph so
+# a small stake set cannot arbitrate winner-heavy close rounds alone.
+CANONICAL_STAKE_SUPERMAJORITY = float(os.getenv("CANONICAL_STAKE_SUPERMAJORITY", "0.667"))
 
 # Reward defaults — FALLBACK ONLY. The live validator requires the authoritative
 # values from /scoring/network-config (get_network_config) and ignores these.

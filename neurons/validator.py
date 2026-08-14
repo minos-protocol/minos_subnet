@@ -43,6 +43,7 @@ from utils import (
 from utils.weight_tracking import (
     CANONICAL_MIN_VALIDATOR_COUNT,
     CANONICAL_MIN_VALIDATOR_STAKE,
+    CANONICAL_STAKE_SUPERMAJORITY,
 )
 from utils.scoring import parse_happy_vcf, BCFTOOLS_DOCKER_IMAGE
 from utils.file_utils import compute_sha256
@@ -1355,6 +1356,12 @@ class Validator:
                         CANONICAL_MIN_VALIDATOR_STAKE,
                     )
                 )
+                canonical_stake_supermajority = float(
+                    network_cfg.get(
+                        "canonical_stake_supermajority",
+                        CANONICAL_STAKE_SUPERMAJORITY,
+                    )
+                )
             except (TypeError, ValueError) as exc:
                 bt.logging.error(
                     f"Invalid network reward config {network_cfg}: {exc} — "
@@ -1389,6 +1396,15 @@ class Validator:
             if canonical_min_validator_stake < 0.0:
                 bt.logging.error(
                     f"Invalid canonical_min_validator_stake={canonical_min_validator_stake} "
+                    "— skipping weight submission"
+                )
+                return False
+            # The supermajority gate must stay a strict majority; a value
+            # outside (0, 1] would silently let a minority stake set arbitrate
+            # close-call winners, so fail closed like the other policy fields.
+            if not 0.0 < canonical_stake_supermajority <= 1.0:
+                bt.logging.error(
+                    f"Invalid canonical_stake_supermajority={canonical_stake_supermajority} "
                     "— skipping weight submission"
                 )
                 return False
@@ -1448,6 +1464,17 @@ class Validator:
                 submission_times,
             )
             if canonical_needed:
+                # Stake-weighted supermajority denominator: total stake held by
+                # the subnet's permit validators in the LOCAL metagraph. Using
+                # the chain view (not a platform-reported total) keeps the
+                # override gate auditable on-chain, and counting permit
+                # validators only is the conservative direction — contributors
+                # outside that set shrink the numerator, never the denominator.
+                active_validator_stake = 0.0
+                for uid in range(len(self.metagraph.hotkeys)):
+                    if self.metagraph.validator_permit[uid]:
+                        active_validator_stake += float(self.metagraph.S[uid])
+
                 # Fetch a round-pinned canonical ranking for close-call winner
                 # selection. If the ranking is unavailable or below quorum,
                 # skip this weight update rather than submitting a local-only
@@ -1481,9 +1508,27 @@ class Validator:
                             canonical_min_validator_count
                             * canonical_min_validator_stake
                         )
+                        required_supermajority_stake = (
+                            canonical_stake_supermajority * active_validator_stake
+                        )
                         if not isinstance(v_count, int) or v_count < canonical_min_validator_count:
                             canonical_low_coverage = True
-                        elif not isinstance(stake_total, (int, float)) or stake_total < min_total_stake:
+                        elif (
+                            not isinstance(stake_total, (int, float))
+                            # NaN compares False against every bound, which
+                            # would silently pass both stake gates below.
+                            or not math.isfinite(stake_total)
+                            or stake_total < min_total_stake
+                        ):
+                            canonical_low_coverage = True
+                        elif (
+                            active_validator_stake <= 0.0
+                            or stake_total < required_supermajority_stake
+                        ):
+                            # The canonical ranking must represent a
+                            # stake-weighted supermajority of the active
+                            # validator set before it may override a local
+                            # close-call winner; fail closed otherwise.
                             canonical_low_coverage = True
                         else:
                             for entry in ranking:
@@ -1533,8 +1578,12 @@ class Validator:
                         f"{(canonical_response.get('ranking') or [{}])[0].get('validator_count')}, "
                         f"stake={canonical_response.get('total_stake_considered')}; "
                         f"min={canonical_min_validator_count} validators / "
-                        f"{canonical_min_validator_stake} TAO each). Skipping "
-                        "weight submission to avoid validator divergence."
+                        f"{canonical_min_validator_stake} TAO each; "
+                        f"supermajority needs >="
+                        f"{canonical_stake_supermajority:.3f} of "
+                        f"{active_validator_stake:.0f} TAO active validator "
+                        "stake). Skipping weight submission to avoid "
+                        "validator divergence."
                     )
                     return False
                 elif canonical_ranking:
@@ -1544,7 +1593,9 @@ class Validator:
                         f"round {round_id} "
                         f"(coverage: {canonical_response.get('validator_count')} "
                         f"validators, "
-                        f"{canonical_response.get('total_stake_considered'):.0f} TAO)"
+                        f"{canonical_response.get('total_stake_considered'):.0f} TAO"
+                        f" >= {canonical_stake_supermajority:.3f} supermajority of "
+                        f"{active_validator_stake:.0f} TAO active validator stake)"
                     )
                     local_eligible_positive = {
                         hk
