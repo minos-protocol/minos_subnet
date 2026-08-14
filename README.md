@@ -558,7 +558,7 @@ combined_final = advanced_score / 100.0
 current_score = combined_final
 ```
 
-Only finite scores where `0 < current_score <= 1.0` are eligible for ranking. Rounds with no valid local or backfilled scores fail closed and do not reuse previous-round scores. The validator and platform also filter the synthetic all-zero input fingerprint around 0.25 so empty or invalid calls cannot become winners.
+Only finite scores where `0 < current_score <= 1.0` are eligible for ranking. Rounds with no valid local or backfilled scores fail closed and do not reuse previous-round scores. A score must additionally reach the validator's floor (`MIN_VALID_ROUND_SCORE = 0.30`): an empty or near-empty VCF that matches nothing still collects baseline component credit (around 0.17-0.25), so anything below the floor is discarded as "no valid score" and junk calls cannot bank participation credit toward the eligibility gate.
 
 ### Weight Distribution
 

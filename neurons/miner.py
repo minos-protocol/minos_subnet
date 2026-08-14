@@ -923,7 +923,7 @@ class _PracticeUI:
             if allow_all:
                 print(f"     a. ALL — download every sample", flush=True)
 
-    def result_panel(self, metrics, advanced_score, combined_final, would_record, zero_input):
+    def result_panel(self, metrics, advanced_score, combined_final, would_record, below_floor):
         if not (self.console and self.Panel and self.Table):
             # Plain fallback
             print(f"\n{'='*60}\n   RESULT\n{'='*60}", flush=True)
@@ -934,9 +934,9 @@ class _PracticeUI:
             print(f"\n   ADVANCED SCORE:   {advanced_score:.4f} / 100", flush=True)
             if would_record:
                 print(f"   COMBINED_FINAL:   {combined_final:.6f}   <-- what a validator records", flush=True)
-            elif zero_input:
-                print(f"   COMBINED_FINAL:   {combined_final:.6f}   <-- ZERO-INPUT: a validator discards this "
-                      f"(called nothing on-target).", flush=True)
+            elif below_floor:
+                print(f"   COMBINED_FINAL:   {combined_final:.6f}   <-- BELOW FLOOR: a validator discards this "
+                      f"(zero-input or near-empty junk earns no valid score).", flush=True)
             else:
                 print(f"   COMBINED_FINAL:   {combined_final:.6f}   <-- out of range; a validator discards this.",
                       flush=True)
@@ -963,10 +963,10 @@ class _PracticeUI:
         if would_record:
             verdict = f"[bold {band}]COMBINED_FINAL  {combined_final:.6f}[/]\n[dim]This is exactly what a validator would record.[/]"
             border = band
-        elif zero_input:
+        elif below_floor:
             verdict = (f"[bold red]COMBINED_FINAL  {combined_final:.6f}[/]\n"
-                       "[red]ZERO-INPUT — a validator DISCARDS this.[/] "
-                       "[dim]Your config called nothing on-target; it earns no on-chain score.[/]")
+                       "[red]BELOW SCORE FLOOR — a validator DISCARDS this.[/] "
+                       "[dim]Zero-input or near-empty junk earns no valid score and no on-chain score.[/]")
             border = "red"
         else:
             verdict = (f"[bold red]COMBINED_FINAL  {combined_final:.6f}[/]\n"
@@ -1234,26 +1234,21 @@ def _run_and_score(tool, tool_config, bam_path, ref_path, truth_path,
 
     # Two guards match what a validator applies before recording a score:
     #   1. combined_final must be a finite number in (0, 1].
-    #   2. a config that calls nothing on-target (SNP and indel F1 both 0) is
-    #      not a scorable result — it is discarded rather than recorded, so it
-    #      earns no on-chain score. Report that honestly instead of implying
-    #      the number would count.
+    #   2. combined_final must reach the validator's score floor. Zero-input
+    #      and near-empty junk VCFs still collect baseline component credit
+    #      around 0.17-0.25, so anything below the floor is "no valid score":
+    #      discarded rather than recorded, earning no on-chain score. Report
+    #      that honestly instead of implying the number would count.
     valid_range = (isinstance(combined_final, float) and combined_final == combined_final
                    and 0.0 < combined_final <= 1.0)
-    # Match the validator's empty-on-target discard EXACTLY (see the validator's
-    # _is_zero_input_advanced_fingerprint): both F1s zero AND the fused score in
-    # the all-zero band. Using only the F1s would over-report "discarded" for a
-    # zero-F1 config that still made calls (germline/FP) — the validator records
-    # those, so the local preview must not claim otherwise.
-    zero_input = (
-        (metrics.get("f1_snp") or 0.0) == 0.0
-        and (metrics.get("f1_indel") or 0.0) == 0.0
-        and 0.24999 <= combined_final <= 0.25001
-    )
-    would_record = valid_range and not zero_input
+    # Match the validator's score floor EXACTLY (see the validator's
+    # MIN_VALID_ROUND_SCORE / _valid_round_score).
+    MIN_VALID_ROUND_SCORE = 0.30
+    below_floor = valid_range and combined_final < MIN_VALID_ROUND_SCORE
+    would_record = valid_range and not below_floor
 
     # --- Report (mirror the validator's component breakdown), styled ---
-    _UI.result_panel(metrics, advanced_score, combined_final, would_record, zero_input)
+    _UI.result_panel(metrics, advanced_score, combined_final, would_record, below_floor)
     return combined_final
 
 

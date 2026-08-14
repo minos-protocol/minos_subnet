@@ -68,6 +68,16 @@ MAX_SLEEP_SECONDS = 120
 SCORE_GRACE_SECONDS = int(os.getenv("SCORE_GRACE_SECONDS", "60"))
 SCORE_FINALIZATION_DELAY_SECONDS = int(os.getenv("SCORE_FINALIZATION_DELAY_SECONDS", "5"))
 
+# Minimum combined_final that counts as a valid round score. Zero-input and
+# near-empty junk VCFs earn no F1 credit but still collect baseline
+# AdvancedScorer component credit (coverage, FP-size term, ratio defaults)
+# and land around 0.17-0.25, so anything below the floor is treated as "no
+# valid score". An exact-zero fingerprint (0.25 within 2e-5) was evaded by
+# adding a couple of off-target junk FPs, which banked participation credit
+# (any score > 0 feeds the 5-of-20 eligibility gate) for hotkeys that never
+# ran a real pipeline.
+MIN_VALID_ROUND_SCORE = 0.30
+
 
 def _valid_round_score(value, *, label: str) -> Optional[float]:
     try:
@@ -80,15 +90,14 @@ def _valid_round_score(value, *, label: str) -> Optional[float]:
         bt.logging.warning(f"Skipping {label}: out-of-range combined_final={score!r}")
         return None
 
+    if score < MIN_VALID_ROUND_SCORE:
+        bt.logging.warning(
+            f"Skipping {label}: combined_final={score!r} below floor "
+            f"{MIN_VALID_ROUND_SCORE}; zero-input or near-empty junk"
+        )
+        return None
+
     return score
-
-
-def _is_zero_input_advanced_fingerprint(metrics: dict, combined_final: float) -> bool:
-    return (
-        (metrics.get("f1_snp") or 0.0) == 0.0
-        and (metrics.get("f1_indel") or 0.0) == 0.0
-        and 0.24999 <= combined_final <= 0.25001
-    )
 
 
 def auto_scoring_config():
@@ -895,13 +904,6 @@ class Validator:
             if combined_final is None:
                 print("   Invalid score; no local score recorded", flush=True)
                 return
-            if _is_zero_input_advanced_fingerprint(metrics, combined_final):
-                bt.logging.warning(
-                    f"Miner {miner_hotkey[:16]}: AdvancedScorer all-zero-input fingerprint; "
-                    "not submitting or ranking locally"
-                )
-                print("   Invalid zero-input score; no local score recorded", flush=True)
-                return
 
             score_result = await self._submit_miner_score(
                 round_id, miner_hotkey, metrics, scoring_elapsed,
@@ -1243,12 +1245,6 @@ class Validator:
                     label=f"platform submission for {miner_hotkey[:16]}...",
                 )
                 if combined_final is None:
-                    return None
-                if _is_zero_input_advanced_fingerprint(metrics, combined_final):
-                    bt.logging.warning(
-                        f"No score submitted for {miner_hotkey[:16]}: "
-                        "AdvancedScorer all-zero-input fingerprint"
-                    )
                     return None
                 snp_final = metrics.get("f1_snp", 0.0)
                 indel_final = metrics.get("f1_indel", 0.0)
