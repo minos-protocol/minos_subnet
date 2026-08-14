@@ -84,10 +84,13 @@ def _valid_round_score(value, *, label: str) -> Optional[float]:
 
 
 def _is_zero_input_advanced_fingerprint(metrics: dict, combined_final: float) -> bool:
+    # All-zero band on the synthetic path: core and completeness contribute 0
+    # (completeness measures recall only there), leaving the FP-size default
+    # 15 * (1 + exp(-10)) / 2 plus the quality default 10, i.e. ~0.17500340.
     return (
         (metrics.get("f1_snp") or 0.0) == 0.0
         and (metrics.get("f1_indel") or 0.0) == 0.0
-        and 0.24999 <= combined_final <= 0.25001
+        and 0.17499 <= combined_final <= 0.17501
     )
 
 

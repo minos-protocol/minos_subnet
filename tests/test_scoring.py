@@ -280,6 +280,37 @@ class TestComputeAdvancedScore:
         score_high_na = AdvancedScorer.compute_advanced_score(metrics_high_na)
         assert score_low_na > score_high_na
 
+    def test_synthetic_only_completeness_is_recall_only(self):
+        """Synthetic-only metrics must not earn the coverage half of Completeness.
+
+        On the synthetic path coverage is structurally 1.0, so counting it
+        would hand every miner a constant ~+7.5 points of dead weight.
+        """
+        metrics = {
+            'f1_snp': 0.0, 'f1_indel': 0.0,
+            'recall_snp': 0.0, 'recall_indel': 0.0,
+            'truth_total_snp': 100, 'truth_total_indel': 50,
+            'query_total_snp': 0, 'query_total_indel': 0,
+            'fp_snp': 0, 'fp_indel': 0,
+            'frac_na_snp': 0.0, 'frac_na_indel': 0.0,
+            'is_synthetic_only': True,
+        }
+        score = AdvancedScorer.compute_advanced_score(metrics)
+        # Core 0 and Completeness 0 (recall-only, no constant coverage credit);
+        # what remains is the FP-size default 15 * (1 + exp(-10)) / 2 and the
+        # quality default 10.
+        expected = 100.0 * (0.15 * (1.0 + math.exp(-10.0)) / 2.0 + 0.10)
+        assert score == pytest.approx(expected)
+
+    def test_synthetic_only_score_ignores_frac_na(self, sample_happy_metrics):
+        """frac_na carries no signal on the synthetic path and must not move the score."""
+        base = {**sample_happy_metrics, 'is_synthetic_only': True}
+        clean = {**base, 'frac_na_snp': 0.0, 'frac_na_indel': 0.0}
+        noisy = {**base, 'frac_na_snp': 0.6, 'frac_na_indel': 0.6}
+        assert AdvancedScorer.compute_advanced_score(clean) == pytest.approx(
+            AdvancedScorer.compute_advanced_score(noisy)
+        )
+
     def test_matching_ratios_quality_near_one(self):
         """When query ratios exactly match truth ratios, quality component ~ 1.0."""
         metrics = {

@@ -82,3 +82,30 @@ def test_finalize_round_with_no_valid_scores_does_not_reuse_previous_round(monke
     assert tracker.last_raw_scores == {}
 
     sys.modules.pop("neurons.validator", None)
+
+
+def test_zero_input_synthetic_metrics_still_match_discard_fingerprint(monkeypatch):
+    """Zero on-target input must keep hitting the discard fingerprint.
+
+    Dropping the constant coverage credit from the synthetic path moved the
+    all-zero fused score from ~0.25 to ~0.175; the validator fingerprint band
+    must track it so empty calls still earn no score.
+    """
+    from utils.scoring import AdvancedScorer
+
+    validator_module = _import_validator_with_runtime_stubs(monkeypatch)
+
+    metrics = {
+        'f1_snp': 0.0, 'f1_indel': 0.0,
+        'recall_snp': 0.0, 'recall_indel': 0.0,
+        'truth_total_snp': 100, 'truth_total_indel': 50,
+        'query_total_snp': 0, 'query_total_indel': 0,
+        'fp_snp': 0, 'fp_indel': 0,
+        'frac_na_snp': 0.0, 'frac_na_indel': 0.0,
+        'is_synthetic_only': True,
+    }
+    combined_final = AdvancedScorer.compute_advanced_score(metrics) / 100.0
+
+    assert validator_module._is_zero_input_advanced_fingerprint(metrics, combined_final)
+
+    sys.modules.pop("neurons.validator", None)

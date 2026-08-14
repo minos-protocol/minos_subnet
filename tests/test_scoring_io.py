@@ -3,6 +3,7 @@ Tests for I/O and parsing functions in utils.scoring:
   - generate_synthetic_regions_bed
   - subset_bed
   - parse_happy_vcf_assessed_metrics
+  - compute_synthetic_only_metrics
   - HappyScorer CSV parsing (via mocked subprocess)
 """
 
@@ -14,6 +15,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from utils.scoring import (
+    compute_synthetic_only_metrics,
     generate_challenge_region_bed,
     generate_synthetic_regions_bed,
     parse_region_overcall_metrics,
@@ -474,3 +476,32 @@ class TestHappyScorerCsvParsing:
             )
 
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# TestComputeSyntheticOnlyMetrics
+# ---------------------------------------------------------------------------
+
+class TestComputeSyntheticOnlyMetrics:
+    """Tests for compute_synthetic_only_metrics."""
+
+    def test_tags_metrics_as_synthetic_only(self, tmp_path):
+        """Synthetic-path metrics must be tagged so the scorer can drop the
+        coverage sub-term (coverage is structurally 1.0 on this path)."""
+        happy = tmp_path / "happy.vcf.gz"
+        mutations = tmp_path / "mutations.vcf"
+        _write_happy_vcf(happy, [
+            "chr20\t10000100\t.\tA\tG\t50\tPASS\t.\tBD:BVT\tTP:SNP\tTP:SNP\n",
+        ])
+        _write_vcf(mutations, [
+            "chr20\t10000100\t.\tA\tG\t50\tPASS\tSYNTHETIC\tGT\t0/1\n",
+        ])
+
+        metrics = compute_synthetic_only_metrics(str(happy), str(mutations))
+
+        assert metrics is not None
+        assert metrics['tp_snp'] == 1.0
+        assert metrics['f1_snp'] == pytest.approx(1.0)
+        assert metrics['is_synthetic_only'] is True
+        assert metrics['frac_na_snp'] == 0.0
+        assert metrics['frac_na_indel'] == 0.0

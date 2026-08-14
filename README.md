@@ -548,6 +548,8 @@ Validators run each miner's tool config and score the resulting VCF from that ag
 | FP Rate      | 15%    |
 | Quality      | 10%    |
 
+`Completeness` blends recall and coverage. On live synthetic rounds coverage carries no signal (every assessed variant lies inside the planted target set, so coverage is structurally 1.0), and the scorer measures recall only there instead of awarding every miner the same constant coverage credit.
+
 ### Round Score Tracking
 
 The raw AdvancedScorer output (0-100) is normalized to a 0-1 scale and used as the miner's score for that round. Winners are selected from the current round's valid Advanced Score only; historical score carryover is not used.
@@ -558,7 +560,7 @@ combined_final = advanced_score / 100.0
 current_score = combined_final
 ```
 
-Only finite scores where `0 < current_score <= 1.0` are eligible for ranking. Rounds with no valid local or backfilled scores fail closed and do not reuse previous-round scores. The validator and platform also filter the synthetic all-zero input fingerprint around 0.25 so empty or invalid calls cannot become winners.
+Only finite scores where `0 < current_score <= 1.0` are eligible for ranking. Rounds with no valid local or backfilled scores fail closed and do not reuse previous-round scores. The validator and platform also filter the synthetic all-zero input fingerprint (around 0.175 on the recall-only synthetic path) so empty or invalid calls cannot become winners.
 
 ### Weight Distribution
 

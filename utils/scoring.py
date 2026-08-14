@@ -252,11 +252,16 @@ def generate_challenge_region_bed(region: str, output_bed: str) -> bool:
 
 
 def compute_synthetic_only_metrics(happy_vcf_path: str, mutations_vcf_path: str,
-                                    position_tolerance: int = 10) -> Optional[Dict[str, float]]:
+                                    position_tolerance: int = 10) -> Optional[Dict[str, Any]]:
     """Filter hap.py results to only count variants matching the mutations VCF.
 
     SNPs are matched by exact (chrom, pos, ref, alt). INDELs use position tolerance
     to handle normalization differences.
+
+    The result is tagged ``is_synthetic_only`` because coverage carries no signal
+    on this path: every assessed variant lies inside the planted target set, so
+    ``frac_na`` is 0.0 by construction and AdvancedScorer measures recall only
+    for these metrics instead of awarding a constant coverage credit.
     """
     try:
         happy_path = Path(happy_vcf_path)
@@ -353,6 +358,7 @@ def compute_synthetic_only_metrics(happy_vcf_path: str, mutations_vcf_path: str,
             'truth_total_snp': float(tp_s + fn_s), 'truth_total_indel': float(tp_i + fn_i),
             'query_total_snp': float(tp_s + fp_s), 'query_total_indel': float(tp_i + fp_i),
             'frac_na_snp': 0.0, 'frac_na_indel': 0.0,
+            'is_synthetic_only': True,
             'weighted_f1': 0.7 * f1_snp + 0.3 * f1_indel,
         }
 
@@ -948,7 +954,9 @@ class AdvancedScorer:
 
         Components:
         - Core (60%): Truth-weighted F1 with emphasis (γ=0.5)
-        - Completeness (15%): Average recall (γ=3.0) + coverage (γ=2.0)
+        - Completeness (15%): Average recall (γ=3.0) + coverage (γ=2.0).
+          Metrics tagged ``is_synthetic_only`` measure recall only, because
+          coverage is structurally 1.0 on the synthetic path.
         - FP Rate (15%): Penalizes FP > 0.2% and call count != truth count
         - Quality (10%): Ti/Tv and Het/Hom ratio match penalties
 
@@ -988,14 +996,23 @@ class AdvancedScorer:
         weighted_f1 = (f1_snp * truth_total_snp + f1_indel * truth_total_indel) / total_truth
         core_component = AdvancedScorer.emphasis(weighted_f1, gamma=0.5)
 
-        # Component 2: Completeness (15% weight) - recall + coverage
+        # Component 2: Completeness (15% weight) - recall + coverage.
+        # Synthetic-only metrics (live rounds scored against the planted
+        # mutations) carry no coverage signal: compute_synthetic_only_metrics
+        # reports frac_na=0.0 because every assessed variant lies inside the
+        # target set by construction. Counting coverage there would hand every
+        # miner the same constant ~+7.5 points, so those metrics measure
+        # recall only.
         avg_recall = (recall_snp + recall_indel) / 2
-        frac_na = max(frac_na_snp, frac_na_indel)
-        coverage = 1.0 - frac_na
-        completeness_component = (
-            AdvancedScorer.emphasis(avg_recall, gamma=3.0) +
-            AdvancedScorer.emphasis(coverage, gamma=2.0)
-        ) / 2.0
+        recall_term = AdvancedScorer.emphasis(avg_recall, gamma=3.0)
+        if metrics.get('is_synthetic_only'):
+            completeness_component = recall_term
+        else:
+            frac_na = max(frac_na_snp, frac_na_indel)
+            coverage = 1.0 - frac_na
+            completeness_component = (
+                recall_term + AdvancedScorer.emphasis(coverage, gamma=2.0)
+            ) / 2.0
 
         # Component 3: FP Rate (15% weight) - penalize high FP and wrong call count
         total_fp = fp_snp + fp_indel
