@@ -435,3 +435,129 @@ class TestValidateAndBuildFlags:
         # The valid params still produce flags
         assert "--min-base-quality-score 20" in result["flags"]
         assert "--min-pruning 5" in result["flags"]
+
+
+# ---------------------------------------------------------------------------
+# Non-finite and bool-as-numeric rejection
+# ---------------------------------------------------------------------------
+
+class TestNonFiniteAndBoolNumericParams:
+    """Non-finite floats and bools must not pass numeric range validation.
+
+    NaN fails every < / > comparison, so it used to slip through the
+    min/max range checks and render as "nan" in tool flags (crashing the
+    tool run on the validator). bool is a subclass of int in Python, so
+    True/False used to validate as ints and render as "True"/"False".
+    """
+
+    # -- Non-finite floats --
+
+    def test_gatk_float_nan_rejected(self):
+        result = validate_and_build_flags(
+            "gatk", {"standard_min_confidence_threshold_for_calling": float("nan")}
+        )
+        assert result["valid"] is False
+        assert any("not finite" in e for e in result["errors"])
+        assert result["flags"] == []
+
+    def test_gatk_float_positive_infinity_rejected(self):
+        result = validate_and_build_flags(
+            "gatk", {"standard_min_confidence_threshold_for_calling": float("inf")}
+        )
+        assert result["valid"] is False
+        assert any("not finite" in e for e in result["errors"])
+        assert result["flags"] == []
+
+    def test_gatk_float_negative_infinity_rejected(self):
+        result = validate_and_build_flags(
+            "gatk", {"standard_min_confidence_threshold_for_calling": float("-inf")}
+        )
+        assert result["valid"] is False
+        assert any("not finite" in e for e in result["errors"])
+        assert result["flags"] == []
+
+    def test_bcftools_float_nan_rejected(self):
+        # bcftools flags are interpolated into an `sh -lc` pipeline string,
+        # so a "nan" value must never reach flag building.
+        result = validate_and_build_flags("bcftools", {"prior": float("nan")})
+        assert result["valid"] is False
+        assert any("not finite" in e for e in result["errors"])
+        assert result["flags"] == []
+
+    def test_deepvariant_float_nan_rejected(self):
+        result = validate_and_build_flags(
+            "deepvariant", {"vsc_min_fraction_snps": float("nan")}
+        )
+        assert result["valid"] is False
+        assert any("not finite" in e for e in result["errors"])
+        assert result["flags"] == []
+
+    # -- bool passed where int is expected --
+
+    def test_gatk_int_bool_true_rejected(self):
+        result = validate_and_build_flags("gatk", {"min_base_quality_score": True})
+        assert result["valid"] is False
+        assert any("must be int" in e for e in result["errors"])
+        assert result["flags"] == []
+
+    def test_gatk_int_bool_false_rejected(self):
+        result = validate_and_build_flags("gatk", {"min_base_quality_score": False})
+        assert result["valid"] is False
+        assert any("must be int" in e for e in result["errors"])
+        assert result["flags"] == []
+
+    def test_bcftools_int_bool_rejected(self):
+        result = validate_and_build_flags("bcftools", {"min_MQ": True})
+        assert result["valid"] is False
+        assert any("must be int" in e for e in result["errors"])
+        assert result["flags"] == []
+
+    def test_freebayes_int_bool_rejected(self):
+        result = validate_and_build_flags("freebayes", {"min_mapping_quality": True})
+        assert result["valid"] is False
+        assert any("must be int" in e for e in result["errors"])
+        assert result["flags"] == []
+
+    # -- bool passed where float is expected --
+
+    def test_gatk_float_bool_rejected(self):
+        result = validate_and_build_flags(
+            "gatk", {"standard_min_confidence_threshold_for_calling": True}
+        )
+        assert result["valid"] is False
+        assert any("must be float" in e for e in result["errors"])
+        assert result["flags"] == []
+
+    def test_freebayes_float_bool_rejected(self):
+        result = validate_and_build_flags(
+            "freebayes", {"min_alternate_fraction": False}
+        )
+        assert result["valid"] is False
+        assert any("must be float" in e for e in result["errors"])
+        assert result["flags"] == []
+
+    # -- Guards: neighbouring paths stay closed / valid values still pass --
+
+    def test_bcftools_int_nan_rejected(self):
+        # NaN is not an int; the existing type check must keep rejecting it.
+        result = validate_and_build_flags("bcftools", {"min_MQ": float("nan")})
+        assert result["valid"] is False
+        assert result["flags"] == []
+
+    def test_bcftools_ploidy_bool_rejected(self):
+        # bool must not normalize into a numeric ploidy preset either.
+        result = validate_and_build_flags("bcftools", {"ploidy": True})
+        assert result["valid"] is False
+        assert result["flags"] == []
+
+    def test_valid_numeric_params_still_accepted(self):
+        result = validate_and_build_flags(
+            "gatk",
+            {
+                "min_base_quality_score": 20,
+                "standard_min_confidence_threshold_for_calling": 30.0,
+            },
+        )
+        assert result["valid"] is True
+        assert "--min-base-quality-score 20" in result["flags"]
+        assert "--standard-min-confidence-threshold-for-calling 30.0" in result["flags"]

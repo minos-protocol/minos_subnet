@@ -8,6 +8,7 @@ Each parameter includes:
 - min/max: for numeric types
 - flag_format: how to format the command-line flag
 """
+import math
 import re
 from datetime import datetime
 from typing import Dict, Any
@@ -938,7 +939,9 @@ def validate_and_build_flags(tool_name: str, tool_options: dict) -> dict:
 
         # Validate by type
         if param_def["type"] == "int":
-            if not isinstance(param_value, int):
+            # bool is a subclass of int; reject it explicitly so True/False
+            # cannot pass validation and render as "True"/"False" in flags.
+            if isinstance(param_value, bool) or not isinstance(param_value, int):
                 errors.append(f"Parameter '{param_name}' must be int, got {type(param_value)}")
                 continue
             if param_value < param_def["min"] or param_value > param_def["max"]:
@@ -946,8 +949,14 @@ def validate_and_build_flags(tool_name: str, tool_options: dict) -> dict:
                 continue
 
         elif param_def["type"] == "float":
-            if not isinstance(param_value, (int, float)):
+            if isinstance(param_value, bool) or not isinstance(param_value, (int, float)):
                 errors.append(f"Parameter '{param_name}' must be float, got {type(param_value)}")
+                continue
+            # NaN compares False against every bound, so it would slip past
+            # the range check and render as "nan" in tool flags; inf/-inf
+            # render too. Require a finite value before the range check.
+            if not math.isfinite(param_value):
+                errors.append(f"Parameter '{param_name}' value {param_value} is not finite")
                 continue
             if param_value < param_def["min"] or param_value > param_def["max"]:
                 errors.append(f"Parameter '{param_name}' value {param_value} out of range [{param_def['min']}, {param_def['max']}]")
