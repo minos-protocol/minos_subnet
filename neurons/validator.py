@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import time
 import bittensor as bt
+from bittensor_wallet import Keypair
 import argparse
 import numpy as np
 import asyncio
@@ -24,15 +25,11 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-from neurons import __SPEC_VERSION__
+from neurons import __SPEC_VERSION__, safe_chrom
 
-# Bittensor v9/v10 compatibility — v10 removed lowercase aliases
-if not hasattr(bt, "subtensor"):
-    bt.subtensor = bt.Subtensor
-if not hasattr(bt, "wallet"):
-    bt.wallet = bt.Wallet
-if not hasattr(bt, "config"):
-    bt.config = bt.Config
+# Bittensor SDK compatibility — importing utils.bt_compat restores the
+# lowercase bt.subtensor/wallet/config aliases and supplies the wrappers used below.
+from utils import bt_compat
 
 from base import GENOMICS_CONFIG, VALIDATOR_CONFIG, is_docker_available, require_docker, BASE_DIR
 from utils import (
@@ -41,16 +38,29 @@ from utils import (
     AdvancedScorer,
 )
 from utils.weight_tracking import (
+    parse_submitted_at,
+    parse_deadline,
     CANONICAL_MIN_VALIDATOR_COUNT,
     CANONICAL_MIN_VALIDATOR_STAKE,
 )
-from utils.scoring import parse_happy_vcf, BCFTOOLS_DOCKER_IMAGE
+from utils.candidate_normalization import (
+    POLICY_VERSION as CANDIDATE_NORMALIZATION_POLICY_VERSION,
+    CandidateNormalizationError,
+    normalize_candidates,
+    validate_context_payload,
+)
+from utils.scoring import (
+    parse_happy_vcf,
+    difficulty_class_counts,
+    BCFTOOLS_DOCKER_IMAGE,
+)
 from utils.file_utils import compute_sha256
 from utils.file_utils import download_file_with_fallback
 from utils.path_utils import safe_round_dir_name
 from utils.platform_client import ValidatorPlatformClient, PlatformConfig, PlatformClientError
 from utils.subset_scoring import should_stop_secondary_scoring
-from templates import load_template
+from utils import scoring_version as scoring_version_util
+from templates import DEPRECATED_TEMPLATES, load_template
 from templates.tool_params import validate_round_id
 
 sys.stdout.reconfigure(line_buffering=True)
@@ -59,6 +69,12 @@ load_dotenv()
 
 # Neurons with validator_permit are excluded from the miner weight list
 # (only miners — those without permit — receive weight/emissions)
+
+# Identifies the scoring formula a submitted score was produced by. Bump this
+# whenever a change alters the number compute_score_v2 returns for the
+# same metrics, so peer scores from a differently-versioned validator are
+# recognisable rather than ranked against local ones as if comparable.
+SCORE_SCHEMA_VERSION = "0.3.0"
 
 # Round timing constants
 MAX_WAIT_SECONDS = 14400
@@ -69,14 +85,45 @@ SCORE_GRACE_SECONDS = int(os.getenv("SCORE_GRACE_SECONDS", "60"))
 SCORE_FINALIZATION_DELAY_SECONDS = int(os.getenv("SCORE_FINALIZATION_DELAY_SECONDS", "5"))
 
 
-def _valid_round_score(value, *, label: str) -> Optional[float]:
+def _verify_candidate_context_signature(
+    validator_hotkey: str, message: bytes, signature_hex: str
+) -> bool:
+    """Verify one configured validator attestation over a private context."""
+    try:
+        keypair = Keypair(ss58_address=validator_hotkey)
+        return bool(keypair.verify(message, bytes.fromhex(signature_hex)))
+    except Exception:
+        return False
+
+
+def _mismatched_backfill_score_versions(backfill_scores) -> set:
+    """Return every missing/non-v2 schema marker in a backfill payload."""
+    mismatches = set()
+    for entry in backfill_scores or []:
+        if not isinstance(entry, dict):
+            mismatches.add("<invalid-entry>")
+            continue
+        version = entry.get("score_schema_version")
+        if version != SCORE_SCHEMA_VERSION:
+            mismatches.add(str(version))
+    return mismatches
+
+
+
+def _valid_round_score(value, *, label: str, allow_zero: bool = False) -> Optional[float]:
+    """Return the score as a float, or None if it is out of range.
+
+    Valid range is (0, 1], or [0, 1] with ``allow_zero`` — set only where a
+    zero was produced deliberately; elsewhere zero means a broken metric.
+    """
     try:
         score = float(value)
     except (TypeError, ValueError):
         bt.logging.warning(f"Skipping {label}: invalid combined_final={value!r}")
         return None
 
-    if not math.isfinite(score) or score <= 0.0 or score > 1.0:
+    floor_ok = score >= 0.0 if allow_zero else score > 0.0
+    if not math.isfinite(score) or not floor_ok or score > 1.0:
         bt.logging.warning(f"Skipping {label}: out-of-range combined_final={score!r}")
         return None
 
@@ -84,11 +131,14 @@ def _valid_round_score(value, *, label: str) -> Optional[float]:
 
 
 def _is_zero_input_advanced_fingerprint(metrics: dict, combined_final: float) -> bool:
-    return (
-        (metrics.get("f1_snp") or 0.0) == 0.0
-        and (metrics.get("f1_indel") or 0.0) == 0.0
-        and 0.24999 <= combined_final <= 0.25001
-    )
+    """True when a submission produced no calls against a non-empty truth set.
+
+    Derived from the metrics rather than from a score value, so component
+    reweighting cannot invalidate it.
+    """
+    query_total = (metrics.get("query_total_snp") or 0) + (metrics.get("query_total_indel") or 0)
+    truth_total = (metrics.get("truth_total_snp") or 0) + (metrics.get("truth_total_indel") or 0)
+    return truth_total > 0 and query_total <= 0
 
 
 def auto_scoring_config():
@@ -133,6 +183,41 @@ def auto_scoring_config():
 class Validator:
     """Minos validator for genomics variant calling tasks."""
 
+    async def _scoring_version(self, round_id: Optional[str] = None) -> str:
+        """The formula to score with, resolved once per round.
+
+        Cached per round deliberately: resolving per miner would let a platform
+        change land mid-round and score some miners on one scale and the rest on
+        another — the exact mixture this mechanism exists to prevent, produced
+        inside a single round rather than across the fleet.
+
+        ``round_id`` is what makes the cache expire. Keying on an attribute the
+        validator never sets would freeze the version for the life of the
+        process, so a platform flip would not reach a running validator until it
+        was restarted — which is most of the point of putting the switch on the
+        platform.
+        """
+        cached = getattr(self, "_scoring_version_cache", None)
+        if cached is not None and cached[0] == round_id:
+            return cached[1]
+
+        # Fetched HERE, not read from a cache. The cached config is refreshed
+        # during finalization — after this round was scored — so relying on it
+        # made a fresh validator score its first round on the fallback rather
+        # than on what the platform actually advertises.
+        network_config = None
+        try:
+            network_config = await self.platform_client.get_network_config()
+            if isinstance(network_config, dict):
+                self._last_network_config = network_config
+        except Exception as e:  # noqa: BLE001 - resolve() handles None
+            bt.logging.warning(f"Could not read the scoring version ({e}); using the last known")
+            network_config = getattr(self, "_last_network_config", None)
+
+        version = scoring_version_util.resolve(network_config, logger=bt.logging)
+        self._scoring_version_cache = (round_id, version)
+        return version
+
     def __init__(self, config=None):
         self.config = config or self.get_config()
 
@@ -147,15 +232,15 @@ class Validator:
             sys.exit(1)
 
         bt.logging.info(f"Loading wallet: {self.config.wallet.name}/{self.config.wallet.hotkey}")
-        self.wallet = bt.wallet(config=self.config)
+        self.wallet = bt_compat.make_wallet(config=self.config)
         bt.logging.info(f"Wallet loaded: {self.wallet.hotkey.ss58_address}")
 
         bt.logging.info(f"Connecting to network: {self.config.subtensor.network}")
-        self.subtensor = bt.subtensor(config=self.config)
+        self.subtensor = bt_compat.make_subtensor(config=self.config)
         bt.logging.info(f"Connected to {self.config.subtensor.network}")
 
         bt.logging.info(f"Loading metagraph for netuid: {self.config.netuid}")
-        self.metagraph = self.subtensor.metagraph(self.config.netuid)
+        self.metagraph = bt_compat.get_metagraph(self.subtensor, self.config.netuid)
         bt.logging.info(f"Metagraph loaded: {len(self.metagraph.hotkeys)} neurons")
 
         self.is_registered = self.wallet.hotkey.ss58_address in self.metagraph.hotkeys
@@ -288,14 +373,12 @@ class Validator:
             Seconds to wait (minimum 60 seconds)
         """
         try:
-            # Parse the ISO datetime string
-            if next_scoring_window.endswith('Z'):
-                next_scoring_window = next_scoring_window[:-1] + '+00:00'
-            next_scoring_dt = datetime.fromisoformat(next_scoring_window)
+            next_scoring_dt = parse_deadline(next_scoring_window)
+            if next_scoring_dt is None:
+                return GENOMICS_CONFIG["task_interval"]
 
-            # Calculate seconds until that time
-            now = datetime.now(next_scoring_dt.tzinfo)
-            delta = (next_scoring_dt - now).total_seconds()
+            # Both sides in UTC — the platform may send a naive timestamp.
+            delta = (next_scoring_dt - datetime.now(timezone.utc)).total_seconds()
 
             # Return at least MIN_WAIT_SECONDS, at most MAX_WAIT_SECONDS
             return max(MIN_WAIT_SECONDS, min(int(delta), MAX_WAIT_SECONDS))
@@ -319,11 +402,11 @@ class Validator:
             help="Subnet UID to validate on"
         )
 
-        bt.subtensor.add_args(parser)
+        bt_compat.add_subtensor_args(parser)
         bt.logging.add_args(parser)
-        bt.wallet.add_args(parser)
+        bt_compat.add_wallet_args(parser)
 
-        config = bt.config(parser)
+        config = bt_compat.make_config(parser)
         env_network = os.getenv("NETWORK")
         if env_network:
             config.subtensor.network = env_network
@@ -384,7 +467,9 @@ class Validator:
                 if not round_id:
                     bt.logging.warning(f"Skipping scoring round with missing round_id: {round_info}")
                     continue
-                submission_count = round_info.get("submission_count", 0)
+                # Absent means unknown, not zero: only a reported 0 may mark the
+                # round done without scoring it.
+                submission_count = round_info.get("submission_count")
 
                 # Skip rounds we've already scored in this session
                 if round_id in self.scored_rounds:
@@ -396,9 +481,19 @@ class Validator:
                     self.scored_rounds.add(round_id)  # Mark as done even if no submissions
                     continue
 
+                if submission_count is None:
+                    bt.logging.warning(
+                        f"Round {round_id}: listing reported no submission_count; "
+                        "scoring the round rather than assuming it is empty"
+                    )
+
                 print(f"\n   Scoring round: {round_id}", flush=True)
                 print(f"   Region: {round_info.get('region', 'unknown')}", flush=True)
-                print(f"   Submissions: {submission_count}", flush=True)
+                print(
+                    f"   Submissions: "
+                    f"{submission_count if submission_count is not None else 'unknown'}",
+                    flush=True,
+                )
 
                 finalized = await self._score_round_submissions(round_id)
                 if finalized:
@@ -448,17 +543,17 @@ class Validator:
                 assignment = await self.platform_client.get_assignment(round_id)
                 primary_hotkeys = set(assignment.get("primary_miner_hotkeys", []))
                 secondary_hotkeys_ordered = assignment.get("secondary_miner_hotkeys", [])
-                deadline_str = assignment.get("scoring_deadline")
-                if deadline_str:
-                    scoring_deadline = datetime.fromisoformat(
-                        deadline_str.replace("Z", "+00:00")
-                    )
+                # None here means "no deadline" and the guards below fail open on
+                # it, so a malformed value must raise rather than be swallowed.
+                scoring_deadline = parse_deadline(assignment.get("scoring_deadline"))
                 bt.logging.info(
                     f"Round {round_id}: assignment received — "
                     f"primary={len(primary_hotkeys)} miners, "
                     f"secondary={len(secondary_hotkeys_ordered)} miners"
                 )
-            except PlatformClientError as e:
+            except (PlatformClientError, TypeError, ValueError) as e:
+                # A malformed-but-successful payload (null hotkey list, non-ISO
+                # deadline) must degrade to the fallback below, not lose the round.
                 bt.logging.warning(
                     f"Round {round_id}: failed to get assignment ({e}). "
                     f"Falling back to scoring all miners."
@@ -475,8 +570,34 @@ class Validator:
                 bt.logging.info(f"Round {round_id}: no submissions")
                 return False
 
+            # Round files may not be ready at round start. Retry rather than skip
+            # the round, re-pulling round data each attempt so repaired files and
+            # fresh presigned URLs are picked up.
             download_result = self._download_round_files(round_id, round_data)
+            _dl_attempt = 1
+            while download_result is None and _dl_attempt < 10:
+                # Give up while enough of the window remains to score the next
+                # round. scoring_deadline is None without an assignment; the
+                # deadline guards fail open on None by design.
+                if should_stop_secondary_scoring(scoring_deadline, buffer_seconds=900):
+                    bt.logging.error(
+                        f"Round {round_id}: files still not ready and <15 min of the "
+                        f"scoring window remains — abandoning round to protect the next"
+                    )
+                    return False
+                bt.logging.warning(
+                    f"Round {round_id}: files not ready (attempt {_dl_attempt}/10) — retrying in 2 min"
+                )
+                print(f"   Files not ready (attempt {_dl_attempt}/10); retrying in 2 min...", flush=True)
+                await asyncio.sleep(120)
+                _dl_attempt += 1
+                try:
+                    round_data = await self.platform_client.get_round_submissions(round_id)
+                except Exception as e:
+                    bt.logging.warning(f"Round {round_id}: round-data refresh failed ({e}); reusing previous")
+                download_result = self._download_round_files(round_id, round_data)
             if download_result is None:
+                bt.logging.error(f"Round {round_id}: files still not ready after 10 attempts — skipping round")
                 return False
 
             work_dir = download_result["work_dir"]
@@ -565,12 +686,36 @@ class Validator:
                         )
                         await asyncio.gather(*[_bounded_score(s, True) for s in secondary_subs_only])
             else:
-                # No assignment (fallback / single-validator) — score everyone concurrently
+                # No assignment (fallback / single-validator) — mirror the assigned
+                # path: a bounded head is always scored, the tail is deadline-guarded,
+                # so falling behind costs tail coverage rather than the whole round.
+                # Head size mirrors the platform's sharding in
+                # utils/assignment.compute_assignments; MINOS_FALLBACK_PRIMARY_N overrides.
+                n_validators = 1
+                try:
+                    permits = getattr(self.metagraph, "validator_permit", None)
+                    if permits is not None:
+                        n_validators = max(1, sum(1 for p in permits if bool(p)))
+                except Exception:
+                    n_validators = 1
+                auto_head = max(1, len(ordered_subs) // n_validators)
+                head_n = max(1, int(os.getenv("MINOS_FALLBACK_PRIMARY_N") or auto_head))
+                head = ordered_subs[:head_n]
+                tail = ordered_subs[head_n:]
                 bt.logging.info(
-                    f"Round {round_id}: scoring {len(ordered_subs)} miners (no assignment, "
+                    f"Round {round_id}: no assignment — scoring {len(head)} miners as "
+                    f"primary, {len(tail)} deadline-guarded (validators={n_validators}, "
                     f"concurrency={self._scoring_cfg['concurrency']})"
                 )
-                await asyncio.gather(*[_bounded_score(s, False) for s in ordered_subs])
+                await asyncio.gather(*[_bounded_score(s, False) for s in head])
+                if tail:
+                    if should_stop_secondary_scoring(scoring_deadline, buffer_seconds=180):
+                        bt.logging.info(
+                            f"Round {round_id}: approaching deadline — skipping "
+                            f"{len(tail)} fallback secondary miners"
+                        )
+                    else:
+                        await asyncio.gather(*[_bounded_score(s, True) for s in tail])
 
             # --- Steps 5 & 6: Backfill + finalize ---
             finalized = await self._finalize_round_scores(
@@ -654,8 +799,17 @@ class Validator:
         if bam_index_url or bam_index_url_backup:
             print(f"   Downloading BAM index...", flush=True)
             if not download_file_with_fallback(bam_index_url, bam_index_path, backup_url=bam_index_url_backup, show_progress=False):
-                bt.logging.warning(f"Round {round_id}: failed to download BAM index (variant calling may still work)")
-                # Don't fail - some tools can work without index, and samtools can regenerate it
+                bt.logging.warning(f"Round {round_id}: failed to download BAM index; will build it locally")
+
+        # Build the index locally when none was provided or the download failed;
+        # a missing .bai must not block scoring.
+        if not bam_index_path.exists():
+            print(f"   Building BAM index locally (pysam)...", flush=True)
+            try:
+                import pysam
+                pysam.index(str(bam_path))  # writes round.bam.bai next to the BAM
+            except Exception as e:
+                bt.logging.warning(f"Round {round_id}: BAM index build failed (continuing): {e}")
 
         print(f"   Downloading truth VCF...", flush=True)
         if not download_file_with_fallback(truth_vcf_url, truth_vcf_path, backup_url=truth_vcf_url_backup, expected_sha256=truth_vcf_sha256):
@@ -670,21 +824,13 @@ class Validator:
                 bt.logging.warning(f"Round {round_id}: failed to download truth VCF index, will re-create locally")
 
         if not truth_vcf_index.exists():
-            print(f"   Indexing truth VCF...", flush=True)
+            print(f"   Building truth VCF index locally (pysam)...", flush=True)
             try:
-                index_cmd = [
-                    "docker", "run", "--rm",
-                    "-v", f"{work_dir}:/data",
-                    BCFTOOLS_DOCKER_IMAGE,
-                    "bcftools", "index", "-t", "/data/truth.vcf.gz",
-                ]
-                result = subprocess.run(index_cmd, capture_output=True, text=True, timeout=120)
-                if result.returncode != 0:
-                    bt.logging.warning(f"Truth VCF indexing failed: {result.stderr}")
-                else:
-                    print(f"   Truth VCF indexed successfully", flush=True)
+                import pysam
+                pysam.tabix_index(str(truth_vcf_path), preset="vcf", force=True)
+                print(f"   Truth VCF indexed successfully", flush=True)
             except Exception as e:
-                bt.logging.warning(f"Failed to index truth VCF: {e}")
+                bt.logging.warning(f"Round {round_id}: truth VCF index build failed (continuing): {e}")
 
         # Download mutations-only VCF for scoring precision.
         mutations_vcf_path = None
@@ -705,9 +851,17 @@ class Validator:
         print(f"   BAM: {bam_path.stat().st_size / (1024**3):.2f} GB", flush=True)
         print(f"   Processing {len(round_data.get('submissions', []))} submissions...", flush=True)
 
-        # Extract chromosome from region for dynamic path resolution
+        # Extract chromosome from region for dynamic path resolution.
+        # The chromosome is interpolated into dataset paths below, so it must be
+        # an allowlisted name before any path is built from it.
         region = round_data.get("region", "")
-        chrom = region.split(":")[0] if region else "chr20"
+        chrom = safe_chrom(region)
+        if chrom is None:
+            bt.logging.error(
+                f"Round {round_id}: region {region!r} does not name a supported "
+                f"chromosome (chr1-22, chrX, chrY, chrM) — refusing to build paths from it"
+            )
+            return None
 
         # Reference path (local dataset — multi-chromosome aware)
         ref_path = BASE_DIR / "datasets" / "reference" / chrom / f"{chrom}.fa"
@@ -782,21 +936,15 @@ class Validator:
         if miner_hotkey in already_scored:
             bt.logging.debug(f"Skipping {miner_hotkey[:16]}... (already scored)")
             # Capture submission time for tiebreaking even for restored miners
-            if sub.get("submitted_at"):
-                try:
-                    submission_times[miner_hotkey] = datetime.fromisoformat(sub["submitted_at"]).timestamp()
-                except (ValueError, TypeError):
-                    pass
+            _ts = parse_submitted_at(sub.get("submitted_at"))
+            if _ts is not None:
+                submission_times[miner_hotkey] = _ts
             return
 
         # Capture submission timestamp for tiebreaking
-        if sub.get("submitted_at"):
-            try:
-                submitted_at = sub["submitted_at"]
-                # Handle ISO format with timezone (e.g. "2026-02-15T12:00:00+00:00")
-                submission_times[miner_hotkey] = datetime.fromisoformat(submitted_at).timestamp()
-            except (ValueError, TypeError):
-                pass
+        _ts = parse_submitted_at(sub.get("submitted_at"))
+        if _ts is not None:
+            submission_times[miner_hotkey] = _ts
 
         print(f"\n   --- Miner {miner_hotkey[:16]}... ({tool_name}) ---", flush=True)
 
@@ -826,15 +974,21 @@ class Validator:
             variant_count = result.get("variant_count", 0)
             print(f"   Variants called: {variant_count}", flush=True)
 
-            # 5. Score with hap.py
-            metrics = self.happy_scorer.score_vcf(
-                truth_vcf=str(truth_vcf_path),
-                query_vcf=str(miner_vcf_path),
-                reference_fasta=str(ref_path),
-                confident_bed=str(truth_bed_path) if truth_bed_path and truth_bed_path.exists() else None,
-                region=region,
-                reference_sdf=str(ref_sdf_path) if ref_sdf_path.exists() else None,
-                mutations_vcf=str(mutations_vcf_path) if mutations_vcf_path else None
+            # 5. Score with hap.py, off-loop like variant calling below: score_vcf
+            # blocks on a docker subprocess, and running it inline would serialise
+            # the fan-out above and stall the deadline checks.
+            _loop = asyncio.get_running_loop()
+            metrics = await _loop.run_in_executor(
+                None,
+                lambda: self.happy_scorer.score_vcf(
+                    truth_vcf=str(truth_vcf_path),
+                    query_vcf=str(miner_vcf_path),
+                    reference_fasta=str(ref_path),
+                    confident_bed=str(truth_bed_path) if truth_bed_path and truth_bed_path.exists() else None,
+                    region=region,
+                    reference_sdf=str(ref_sdf_path) if ref_sdf_path.exists() else None,
+                    mutations_vcf=str(mutations_vcf_path) if mutations_vcf_path else None
+                ),
             )
 
             scoring_elapsed = time.time() - scoring_start
@@ -887,10 +1041,66 @@ class Validator:
 
             # 7. Validate and submit score to platform (with VCF S3 keys)
             print(f"   SNP F1={metrics.get('f1_snp', 0):.4f}  INDEL F1={metrics.get('f1_indel', 0):.4f}", flush=True)
-            advanced_score = AdvancedScorer.compute_advanced_score(metrics)
+            # WHICH SCORER RUNS IS THE PLATFORM'S DECISION, not this node's.
+            # v1 and v2 are different scales, so a fleet split across them
+            # produces a meaningless ranking. See utils/scoring_version: an
+            # unreachable platform keeps whatever this validator used last
+            # rather than snapping back to v1 and diverging mid-rollout.
+            scoring_version = await self._scoring_version(round_id)
+
+            legacy_score_v1 = None
+            try:
+                legacy_score_v1 = AdvancedScorer.compute_advanced_score(metrics)
+            except Exception as e:
+                bt.logging.warning(f"v1 score unavailable for {miner_hotkey[:16]} ({e})")
+
+            score_v2 = None
+            if scoring_version == scoring_version_util.V2:
+                try:
+                    if happy_vcf_path.exists():
+                        _recs = parse_happy_vcf(
+                            str(happy_vcf_path), truth_vcf_path=str(truth_vcf_path)
+                        )
+                        if _recs:
+                            score_v2 = AdvancedScorer.compute_score_v2(
+                                metrics, difficulty_class_counts(_recs)
+                            )
+                except Exception as e:
+                    bt.logging.warning(f"v2 score unavailable for {miner_hotkey[:16]} ({e})")
+
+                if score_v2 is None:
+                    # Never fall back to v1 here: the rest of the fleet is on v2
+                    # this round, and one v1 score mixed into that ranking is
+                    # worse than one missing score.
+                    bt.logging.error(
+                        f"Platform selected v2 but it is unavailable for "
+                        f"{miner_hotkey[:16]}; refusing to fall back to v1 "
+                        f"(incomparable scales). Miner not scored."
+                    )
+                    print("   v2 unavailable; no local score recorded", flush=True)
+                    return
+                if legacy_score_v1 is not None:
+                    bt.logging.info(
+                        f"score v2={score_v2:.4f} (v1={legacy_score_v1:.4f} "
+                        f"delta={score_v2 - legacy_score_v1:+.4f}) "
+                        f"miner={miner_hotkey[:16]}"
+                    )
+                advanced_score = score_v2
+            else:
+                if legacy_score_v1 is None:
+                    bt.logging.error(
+                        f"v1 score unavailable for {miner_hotkey[:16]}; not scored."
+                    )
+                    print("   v1 unavailable; no local score recorded", flush=True)
+                    return
+                bt.logging.info(f"score v1={legacy_score_v1:.4f} miner={miner_hotkey[:16]}")
+                advanced_score = legacy_score_v1
+
             combined_final = _valid_round_score(
                 advanced_score / 100.0,
                 label=f"local score for {miner_hotkey[:16]}...",
+                # v2 scores an implausible callset exactly 0.0.
+                allow_zero=True,
             )
             if combined_final is None:
                 print("   Invalid score; no local score recorded", flush=True)
@@ -905,9 +1115,12 @@ class Validator:
 
             score_result = await self._submit_miner_score(
                 round_id, miner_hotkey, metrics, scoring_elapsed,
+                advanced_score=advanced_score,
+                combined_final=combined_final,
                 output_vcf_s3_key=output_vcf_s3_key,
                 output_vcf_sha256=output_vcf_sha256_val,
                 happy_output_s3_key=happy_output_s3_key,
+                scoring_version=scoring_version,
             )
             if not score_result:
                 bt.logging.warning(
@@ -970,6 +1183,11 @@ class Validator:
         if self.platform_client:
             try:
                 network_cfg = await self.platform_client.get_network_config()
+                # Kept so _scoring_version can read the advertised formula. It
+                # is only ever REPLACED on a successful fetch, so a failed one
+                # leaves the last good config in place rather than clearing it.
+                if isinstance(network_cfg, dict):
+                    self._last_network_config = network_cfg
                 if isinstance(network_cfg, dict):
                     platform_grace = int(
                         network_cfg.get("score_grace_seconds", score_grace_seconds)
@@ -995,14 +1213,24 @@ class Validator:
 
         if scoring_deadline is not None:
             now = datetime.now(timezone.utc)
-            # Ensure deadline is tz-aware
-            if scoring_deadline.tzinfo is None:
-                scoring_deadline = scoring_deadline.replace(tzinfo=timezone.utc)
+            # Same helper as the parse sites, so "naive means UTC" is stated once.
+            scoring_deadline = parse_deadline(scoring_deadline)
             final_score_deadline = scoring_deadline + timedelta(
                 seconds=score_grace_seconds + finalization_delay_seconds
             )
             wait_secs = (final_score_deadline - now).total_seconds()
             if wait_secs > 0:
+                # The deadline is unvalidated platform input and this is the
+                # single-task main loop, so an absurd value must not park the
+                # validator indefinitely. Clamp as _calculate_wait_until_scoring does.
+                if wait_secs > MAX_WAIT_SECONDS:
+                    bt.logging.error(
+                        f"Round {round_id}: scoring deadline implies a "
+                        f"{wait_secs:.0f}s wait, beyond the {MAX_WAIT_SECONDS}s "
+                        f"ceiling. Clamping — the platform deadline "
+                        f"({final_score_deadline.isoformat()}) is almost certainly wrong."
+                    )
+                    wait_secs = MAX_WAIT_SECONDS
                 bt.logging.info(
                     f"Round {round_id}: waiting {wait_secs:.0f}s for score grace "
                     f"+ finalization delay before fetching backfill/canonical scores"
@@ -1040,11 +1268,23 @@ class Validator:
                 unscored = backfill_response.get("unscored_miner_hotkeys", [])
 
                 # --- Step 3: Feed backfill into ScoreTracker ---
+                mismatched_versions = _mismatched_backfill_score_versions(
+                    backfill_scores
+                )
+                if mismatched_versions:
+                    bt.logging.error(
+                        f"Round {round_id}: backfill contains missing/mismatched "
+                        f"score schema version(s) {sorted(mismatched_versions)}; "
+                        f"required {SCORE_SCHEMA_VERSION}. Skipping weight "
+                        "submission rather than mixing v1/v2 scores."
+                    )
+                    return False
                 for entry in backfill_scores:
                     hk = entry.get("miner_hotkey")
                     combined_final = _valid_round_score(
                         entry.get("combined_final"),
                         label=f"backfill score for {hk[:16] if hk else '?'}...",
+                        allow_zero=True,
                     )
                     if combined_final is None:
                         continue
@@ -1054,12 +1294,8 @@ class Validator:
                         # Capture submitted_at for tiebreaking
                         submitted_at = entry.get("submitted_at")
                         if submitted_at and hk not in submission_times:
-                            try:
-                                submission_times[hk] = datetime.fromisoformat(
-                                    submitted_at.replace("Z", "+00:00")
-                                ).timestamp()
-                            except (ValueError, TypeError):
-                                submission_times[hk] = float("inf")
+                            _ts = parse_submitted_at(submitted_at)
+                            submission_times[hk] = _ts if _ts is not None else float("inf")
 
                         source = entry.get("primary_validator_hotkey", "?")
                         bt.logging.info(
@@ -1129,6 +1365,14 @@ class Validator:
     ) -> dict:
         """Run a miner's variant calling tool via templates."""
         try:
+            # Deprecated tools stay runnable: submissions made before the cutover
+            # must remain scorable. Log so late arrivals stay visible.
+            if tool_name in DEPRECATED_TEMPLATES:
+                bt.logging.warning(
+                    f"Scoring submission with deprecated tool '{tool_name}': "
+                    f"{DEPRECATED_TEMPLATES[tool_name]}"
+                )
+
             # Load the template for this tool
             template = load_template(tool_name)
 
@@ -1179,14 +1423,17 @@ class Validator:
         miner_hotkey: str,
         metrics: dict,
         validation_runtime: float,
+        advanced_score: float,
+        combined_final: float,
         output_vcf_s3_key: str = None,
         output_vcf_sha256: str = None,
         happy_output_s3_key: str = None,
+        scoring_version: str = None,
     ):
         """Submit scoring results to platform.
 
-        Uses AdvancedScorer (whitepaper formula) so platform dashboard scores
-        match on-chain weights.
+        Submits the already-computed v2 consensus score so platform history,
+        backfill, and on-chain ranking use exactly the same value.
 
         Returns:
             Dict with score_id on success, None on failure.
@@ -1208,8 +1455,15 @@ class Validator:
             indel_final: float,
         ) -> dict:
             payload = {
-                "scorer": "Advanced",
-                "score_schema_version": "0.1.1",
+                # The scorer that ACTUALLY ran. Hardcoding a name mislabels
+                # every v1 score as v2, and the label is what a reader uses to
+                # tell two incomparable scales apart.
+                "scorer": (
+                    "AdvancedV2"
+                    if scoring_version == scoring_version_util.V2
+                    else "AdvancedV1"
+                ),
+                "score_schema_version": SCORE_SCHEMA_VERSION,
                 "scoring_status": "scored",
                 "advanced_score": advanced_score,
                 "combined_final": combined_final,
@@ -1237,12 +1491,29 @@ class Validator:
                 )
                 return None
             else:
-                advanced_score = AdvancedScorer.compute_advanced_score(metrics)
+                try:
+                    advanced_score = float(advanced_score)
+                except (TypeError, ValueError):
+                    return None
+                if not math.isfinite(advanced_score) or not 0.0 <= advanced_score <= 100.0:
+                    return None
                 combined_final = _valid_round_score(
-                    advanced_score / 100.0,
+                    combined_final,
                     label=f"platform submission for {miner_hotkey[:16]}...",
+                    allow_zero=True,
                 )
                 if combined_final is None:
+                    return None
+                if not math.isclose(
+                    combined_final,
+                    advanced_score / 100.0,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                ):
+                    bt.logging.error(
+                        f"No score submitted for {miner_hotkey[:16]}: v2 score "
+                        "and combined_final disagree"
+                    )
                     return None
                 if _is_zero_input_advanced_fingerprint(metrics, combined_final):
                     bt.logging.warning(
@@ -1253,7 +1524,7 @@ class Validator:
                 snp_final = metrics.get("f1_snp", 0.0)
                 indel_final = metrics.get("f1_indel", 0.0)
 
-                bt.logging.info(f"Platform score (Advanced): combined_final={combined_final:.4f}, "
+                bt.logging.info(f"Platform score (AdvancedV2): combined_final={combined_final:.4f}, "
                                f"snp_final={snp_final:.4f}, indel_final={indel_final:.4f}")
 
                 result = await self.platform_client.submit_score(
@@ -1307,10 +1578,30 @@ class Validator:
                 bt.logging.info("No miners scored — skipping weight assignment")
                 return False
 
+            # Refresh the participation window from the platform right before
+            # weighting so eligibility never rides on stale in-memory state.
+            # Best-effort: on failure keep the in-memory window.
+            try:
+                _state = await self.platform_client.get_validator_state()
+                if self.score_tracker.refresh_participation_window(_state.get("round_history", [])):
+                    # Re-count this just-finalized round in case the snapshot predates it.
+                    self.score_tracker.record_round(round_id, tracked_miners)
+                    _eligible_n = sum(
+                        1 for hk in tracked_miners if self.score_tracker.is_eligible(hk)
+                    )
+                    bt.logging.info(
+                        f"Eligibility refreshed from platform: "
+                        f"{_eligible_n}/{len(tracked_miners)} current-round miners eligible"
+                    )
+            except Exception as e:
+                bt.logging.warning(f"Participation refresh failed (using in-memory window): {e}")
+
             # Network reward params are authoritative. If the platform cannot
             # provide a complete policy, fail closed instead of silently using
             # stale local defaults.
             network_cfg = await self.platform_client.get_network_config()
+            if isinstance(network_cfg, dict):
+                self._last_network_config = network_cfg
             required_policy_fields = {
                 "burn_rate",
                 "burn_uid",
@@ -1361,6 +1652,73 @@ class Validator:
                     "skipping weight submission"
                 )
                 return False
+
+            # Candidate normalization is an explicit coordinated cutover, not
+            # an environment-variable toggle.  Absence means disabled.  Once
+            # enabled, any malformed/missing private context fails this round
+            # closed rather than silently falling back to identity-multiplied
+            # ranking.
+            normalization_policy = network_cfg.get("candidate_normalization")
+            normalization_enabled = False
+            normalization_attesters = ()
+            normalization_min_attestations = 0
+            if normalization_policy is not None:
+                if not isinstance(normalization_policy, dict):
+                    bt.logging.error(
+                        "candidate_normalization policy must be an object — "
+                        "skipping weight submission"
+                    )
+                    return False
+                enabled_value = normalization_policy.get("enabled", False)
+                if not isinstance(enabled_value, bool):
+                    bt.logging.error(
+                        "candidate_normalization.enabled must be a boolean — "
+                        "skipping weight submission"
+                    )
+                    return False
+                normalization_enabled = enabled_value
+                if normalization_enabled and normalization_policy.get("policy_version") != (
+                    CANDIDATE_NORMALIZATION_POLICY_VERSION
+                ):
+                    bt.logging.error(
+                        "Unsupported candidate-normalization policy version "
+                        f"{normalization_policy.get('policy_version')!r}; expected "
+                        f"{CANDIDATE_NORMALIZATION_POLICY_VERSION}. Skipping "
+                        "weight submission."
+                    )
+                    return False
+                if normalization_enabled:
+                    raw_attesters = normalization_policy.get("attesters")
+                    raw_quorum = normalization_policy.get("min_attestations")
+                    if (
+                        not isinstance(raw_attesters, list)
+                        or len(raw_attesters) < 2
+                        or not all(
+                            isinstance(hotkey, str) and hotkey
+                            for hotkey in raw_attesters
+                        )
+                        or len(set(raw_attesters)) != len(raw_attesters)
+                    ):
+                        bt.logging.error(
+                            "candidate_normalization.attesters must contain at "
+                            "least two unique validator hotkeys — skipping "
+                            "weight submission"
+                        )
+                        return False
+                    if (
+                        isinstance(raw_quorum, bool)
+                        or not isinstance(raw_quorum, int)
+                        or raw_quorum < 2
+                        or raw_quorum > len(raw_attesters)
+                    ):
+                        bt.logging.error(
+                            "candidate_normalization.min_attestations must be "
+                            "between 2 and the attester count — skipping weight "
+                            "submission"
+                        )
+                        return False
+                    normalization_attesters = tuple(raw_attesters)
+                    normalization_min_attestations = raw_quorum
             miner_budget = 1.0 - burn_rate
             if not 0.0 <= burn_rate <= 1.0:
                 bt.logging.error(f"Invalid burn_rate={burn_rate} — skipping weight submission")
@@ -1442,10 +1800,86 @@ class Validator:
                     f"recipients (sample: {sample})"
                 )
 
+            reward_candidates = list(chain_eligible_tracked_miners)
+            reward_submission_times = dict(submission_times or {})
+            reward_ranking_scores = None
+            normalization_result = None
+            if normalization_enabled:
+                normalization_population = [
+                    hk
+                    for hk in chain_eligible_tracked_miners
+                    if self.score_tracker.is_eligible(hk)
+                    and self.score_tracker.round_scores.get(hk, 0.0) > 0.0
+                ]
+                try:
+                    private_payload = (
+                        await self.platform_client.get_candidate_normalization_context(
+                            round_id=round_id
+                        )
+                    )
+                    private_context = validate_context_payload(
+                        private_payload,
+                        expected_round_id=round_id,
+                        expected_score_schema_version=SCORE_SCHEMA_VERSION,
+                        required_hotkeys=normalization_population,
+                        authorized_attesters=normalization_attesters,
+                        min_attestations=normalization_min_attestations,
+                        verify_signature=_verify_candidate_context_signature,
+                    )
+                    normalization_result = normalize_candidates(
+                        round_id=round_id,
+                        candidate_hotkeys=normalization_population,
+                        owner_by_hotkey=private_context.owner_by_hotkey,
+                        reward_designated_by_hotkey=(
+                            private_context.reward_designated_by_hotkey
+                        ),
+                        selection_score_by_hotkey=(
+                            private_context.selection_score_by_hotkey
+                        ),
+                        selection_time_by_hotkey=(
+                            private_context.selection_time_by_hotkey
+                        ),
+                    )
+                except (CandidateNormalizationError, PlatformClientError) as exc:
+                    bt.logging.error(
+                        f"Round {round_id}: private candidate normalization "
+                        f"unavailable/invalid ({exc}); skipping weight submission "
+                        "instead of falling back to unnormalized ranking."
+                    )
+                    return False
+                except Exception as exc:
+                    bt.logging.error(
+                        f"Round {round_id}: unexpected candidate-normalization "
+                        f"failure ({exc}); skipping weight submission."
+                    )
+                    return False
+
+                reward_candidates = list(normalization_result.selected_hotkeys)
+                reward_ranking_scores = {
+                    hotkey: private_context.selection_score_by_hotkey[hotkey]
+                    for hotkey in reward_candidates
+                }
+                reward_submission_times.update(
+                    private_context.selection_time_by_hotkey
+                )
+                bt.logging.info(
+                    f"Candidate normalization {CANDIDATE_NORMALIZATION_POLICY_VERSION}: "
+                    f"{normalization_result.candidate_count} eligible submissions -> "
+                    f"{normalization_result.unique_owner_count} pre-score owner "
+                    f"designations -> {normalization_result.unique_solution_count} "
+                    f"private solution candidates; "
+                    f"attestations={len(private_context.attesting_hotkeys)}/"
+                    f"{normalization_min_attestations}, "
+                    f"snapshot_block={private_context.snapshot_block}, "
+                    f"context={private_context.context_digest[:12]}..., "
+                    f"audit={normalization_result.audit_digest[:12]}..."
+                )
+
             canonical_ranking = None
             canonical_needed = self.score_tracker.needs_canonical_tiebreak(
-                chain_eligible_tracked_miners,
-                submission_times,
+                reward_candidates,
+                reward_submission_times,
+                ranking_scores=reward_ranking_scores,
             )
             if canonical_needed:
                 # Fetch a round-pinned canonical ranking for close-call winner
@@ -1455,11 +1889,14 @@ class Validator:
                 # "latest completed" rounds during the scheduler's
                 # status-promotion interval.
                 canonical_response = await self.platform_client.get_canonical_ranking(
-                    round_id=round_id
+                    round_id=round_id,
+                    top_n=min(256, max(10, len(chain_eligible_tracked_miners))),
                 )
                 canonical_ranking = []
                 canonical_parse_failed = False
                 canonical_low_coverage = False
+                canonical_schema_invalid = False
+                canonical_schema_received = None
                 if canonical_response is None:
                     # Transport errors and unavailable responses are handled
                     # below by skipping this weight update.
@@ -1467,8 +1904,15 @@ class Validator:
                 elif not isinstance(canonical_response, dict):
                     canonical_parse_failed = True
                 else:
+                    canonical_schema_received = canonical_response.get(
+                        "score_schema_version"
+                    )
+                    if canonical_schema_received != SCORE_SCHEMA_VERSION:
+                        canonical_schema_invalid = True
                     ranking = canonical_response.get("ranking")
-                    if not isinstance(ranking, list):
+                    if canonical_schema_invalid:
+                        pass
+                    elif not isinstance(ranking, list):
                         canonical_parse_failed = True
                     elif not ranking:
                         canonical_low_coverage = True
@@ -1516,7 +1960,15 @@ class Validator:
                                 # No ranked miner met the validator-side quorum.
                                 canonical_low_coverage = True
 
-                if canonical_parse_failed:
+                if canonical_schema_invalid:
+                    bt.logging.error(
+                        f"Canonical ranking for round {round_id} has score "
+                        f"schema {canonical_schema_received!r}; required "
+                        f"{SCORE_SCHEMA_VERSION}. Skipping weight submission "
+                        "rather than using a v1/mixed-schema tiebreak."
+                    )
+                    return False
+                elif canonical_parse_failed:
                     bt.logging.error(
                         f"Canonical ranking response malformed "
                         f"(shape={type(canonical_response).__name__}); "
@@ -1548,9 +2000,13 @@ class Validator:
                     )
                     local_eligible_positive = {
                         hk
-                        for hk in chain_eligible_tracked_miners
+                        for hk in reward_candidates
                         if self.score_tracker.is_eligible(hk)
-                        and self.score_tracker.round_scores.get(hk, 0.0) > 0
+                        and (
+                            reward_ranking_scores.get(hk, 0.0)
+                            if reward_ranking_scores is not None
+                            else self.score_tracker.round_scores.get(hk, 0.0)
+                        ) > 0
                     }
                     if not any(hk in local_eligible_positive for hk in canonical_ranking):
                         bt.logging.error(
@@ -1567,15 +2023,22 @@ class Validator:
                     )
                     return False
 
-            weights = self.score_tracker.get_winner_heavy_pruning_dust_weights(
-                chain_eligible_tracked_miners,
-                submission_times,
+            candidate_weights = self.score_tracker.get_winner_heavy_pruning_dust_weights(
+                reward_candidates,
+                reward_submission_times,
                 burn_rate=burn_rate,
                 winner_weight=winner_weight,
                 dust_top_n=dust_top_n,
                 dust_decay=dust_decay,
                 canonical_ranking=canonical_ranking or None,
+                ranking_scores=reward_ranking_scores,
             )
+            # Keep every chain-eligible tracked miner in telemetry with an
+            # explicit zero.  Only normalized candidates may receive reward.
+            weights = {
+                hk: candidate_weights.get(hk, 0.0)
+                for hk in chain_eligible_tracked_miners
+            }
 
             burn_weight = max(0.0, 1.0 - sum(weights.values()))
             weights[burn_hotkey] = weights.get(burn_hotkey, 0.0) + burn_weight
@@ -1589,12 +2052,18 @@ class Validator:
             stats = self.score_tracker.get_stats()
             recipients = [hk for hk, w in weights.items() if w > 0]
             mode_label = "round-only winner-heavy + pruning dust"
+            if normalization_enabled:
+                mode_label += " + private candidate normalization"
             print(f"\n   Weight distribution ({mode_label}):", flush=True)
             print(f"   Eligible current-round miners: {stats['eligible_count']}/{len(tracked_miners)}", flush=True)
             if recipients:
                 for r_hk in recipients:
                     r_w = weights[r_hk]
-                    r_score = self.score_tracker.round_scores.get(r_hk, 0)
+                    r_score = (
+                        reward_ranking_scores.get(r_hk, 0.0)
+                        if reward_ranking_scores is not None
+                        else self.score_tracker.round_scores.get(r_hk, 0.0)
+                    )
                     print(f"   {r_hk[:16]}... score={r_score:.4f} weight={r_w:.6f}", flush=True)
             else:
                 print(f"   No recipients — weights submission skipped (fail-closed)", flush=True)
@@ -1602,8 +2071,13 @@ class Validator:
             # POST weight history to platform (always — telemetry for the dashboard)
             try:
                 validator_hotkey = self.wallet.hotkey.ss58_address
+                # Same population and tiebreak order the weights were computed
+                # from, or the reported ranks contradict the weights set on chain.
                 entries = self.score_tracker.build_weight_history(
-                    round_id, validator_hotkey, tracked_miners, weights
+                    round_id, validator_hotkey, chain_eligible_tracked_miners, weights,
+                    submission_times=reward_submission_times,
+                    ranking_hotkeys=reward_candidates,
+                    ranking_scores=reward_ranking_scores,
                 )
                 await self.platform_client.submit_weight_history(
                     round_id=round_id,
@@ -1612,8 +2086,12 @@ class Validator:
                 )
                 bt.logging.info(f"Weight history submitted to platform for round {round_id}")
             except Exception as e:
-                bt.logging.error(f"Failed to POST weight history: {e}")
-                return False
+                # Telemetry only — a failed dashboard POST must never prevent the
+                # on-chain weight submission below.
+                bt.logging.error(
+                    f"Failed to POST weight history (telemetry only, continuing "
+                    f"to on-chain weight submission): {e}"
+                )
 
             # Set weights on chain — only if this validator is registered. Skip in
             # preprod/demo mode but still keep the platform submission above.
@@ -1744,7 +2222,7 @@ class Validator:
 
             # Check commit-reveal status (for logging only)
             try:
-                commit_reveal_enabled = self.subtensor.commit_reveal_enabled(self.config.netuid)
+                commit_reveal_enabled = bt_compat.commit_reveal_enabled(self.subtensor, self.config.netuid)
                 print(f"   Commit-reveal enabled: {commit_reveal_enabled}", flush=True)
                 if commit_reveal_enabled:
                     print(f"   Note: SDK handles commit-reveal automatically via set_weights", flush=True)
@@ -1776,7 +2254,7 @@ class Validator:
 
         # Get current block for version_key
         try:
-            current_block = self.subtensor.get_current_block()
+            current_block = bt_compat.current_block(self.subtensor)
             print(f"   Current block: {current_block}", flush=True)
         except Exception as e:
             bt.logging.debug(f"Could not get block: {e}")
@@ -1784,14 +2262,23 @@ class Validator:
 
         # Check rate limit
         try:
-            blocks_since_last = self.subtensor.blocks_since_last_update(
+            blocks_since_last = bt_compat.blocks_since_last_update(
+                self.subtensor,
                 netuid=self.config.netuid,
-                uid=self.my_subnet_uid
+                uid=self.my_subnet_uid,
             )
-            weights_rate_limit = self.subtensor.weights_rate_limit(netuid=self.config.netuid)
+            weights_rate_limit = bt_compat.weights_rate_limit(self.subtensor, netuid=self.config.netuid)
             print(f"   Blocks since last: {blocks_since_last}, Rate limit: {weights_rate_limit}", flush=True)
 
-            if blocks_since_last is not None and blocks_since_last < weights_rate_limit:
+            # Both are Optional: bt_compat returns None when the SDK lacks the
+            # method or the call fails. Guarding only the left operand raises
+            # TypeError comparing int < None, which would take the validator
+            # down in its weight-setting path.
+            if (
+                blocks_since_last is not None
+                and weights_rate_limit is not None
+                and blocks_since_last < weights_rate_limit
+            ):
                 wait_blocks = weights_rate_limit - blocks_since_last
                 wait_seconds = wait_blocks * BITTENSOR_BLOCK_TIME_SECONDS
                 print(f"   Rate limited: wait {wait_blocks} blocks (~{wait_seconds}s)", flush=True)
@@ -1813,7 +2300,8 @@ class Validator:
 
         print(f"   Calling set_weights for {len(uids)} miners...", flush=True)
         try:
-            success, msg = self.subtensor.set_weights(
+            success, msg = bt_compat.set_weights(
+                self.subtensor,
                 wallet=self.wallet,
                 netuid=self.config.netuid,
                 uids=uids,
@@ -1906,9 +2394,19 @@ class Validator:
 
         try:
             while True:
+                round_start = time.time()
                 try:
-                    round_start = time.time()
                     bt.logging.info(f"Round {step} started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+                    # use_platform must not latch off: re-probe so a validator that
+                    # started during a platform outage resumes scoring on its own.
+                    if self.platform_client and not self.use_platform:
+                        healthy, reason = await self.platform_client.health_check_detail()
+                        if healthy:
+                            bt.logging.warning("Platform reachable again; resuming scoring")
+                            self.use_platform = True
+                        else:
+                            bt.logging.warning(f"Platform still unreachable ({reason}); degraded")
 
                     if self.use_platform:
                         result = await self.score_platform_rounds()
@@ -1921,63 +2419,66 @@ class Validator:
                                        f"Rounds tracked: {stats['rounds_tracked']}")
 
                     # Sync metagraph every round to catch new/removed miners quickly
-                    self.metagraph.sync(subtensor=self.subtensor)
+                    bt_compat.sync_metagraph(self.metagraph, self.subtensor)
                     bt.logging.debug(f"Metagraph synced - {len(self.metagraph.hotkeys)} neurons")
 
                     # Cleanup old files every 2 rounds (5h keeps files for full round lifecycle)
                     if step % 2 == 0:
                         self._cleanup_old_files()
 
-                    round_elapsed = time.time() - round_start
-                    step += 1
-
-                    next_round = datetime.now().timestamp() + GENOMICS_CONFIG["task_interval"]
-                    next_round_str = datetime.fromtimestamp(next_round).strftime('%H:%M:%S')
-
-                    bt.logging.info(f"Round {step-1} complete in {round_elapsed:.1f}s. "
-                                   f"Next round at {next_round_str} (in {task_interval_mins} min)")
-
-                    # Smart scheduling: if platform provided next scoring window, wait until then
-                    # Otherwise fall back to fixed interval
-                    if self.use_platform and next_scoring_window:
-                        bt.logging.info(f"Smart scheduling: next_scoring_window={next_scoring_window}")
-                        total_wait = self._calculate_wait_until_scoring(next_scoring_window)
-                        if total_wait <= 0:
-                            # Scoring window is now or in the past, use minimum wait
-                            total_wait = MIN_WAIT_SECONDS
-                        wait_reason = "scoring window"
-                        bt.logging.info(f"Waiting {total_wait}s until next scoring window")
-                    else:
-                        bt.logging.debug(f"No smart scheduling: use_platform={self.use_platform}, next_scoring_window={next_scoring_window}")
-                        total_wait = GENOMICS_CONFIG["task_interval"]
-                        wait_reason = "task interval"
-
-                    countdown_interval = 300  # 5 minutes
-                    elapsed_wait = 0
-
-                    next_check_time = datetime.now() + timedelta(seconds=total_wait)
-                    next_check_str = next_check_time.strftime('%H:%M:%S')
-                    wait_mins = total_wait // 60
-
-                    print(f"\n   Waiting for next {wait_reason}...", flush=True)
-                    print(f"   Next check at: {next_check_str}", flush=True)
-                    print(f"   Time remaining: {wait_mins} minutes\n", flush=True)
-
-                    while elapsed_wait < total_wait:
-                        sleep_chunk = min(countdown_interval, total_wait - elapsed_wait)
-                        await asyncio.sleep(sleep_chunk)
-                        elapsed_wait += sleep_chunk
-
-                        remaining = total_wait - elapsed_wait
-                        if remaining > 0:
-                            remaining_mins = remaining // 60
-                            print(f"   Waiting... {remaining_mins} minutes until next {wait_reason}", flush=True)
-
                 except KeyboardInterrupt:
                     raise
                 except Exception as e:
-                    bt.logging.error(f"Error in main loop: {e}. Retrying in 10 seconds...")
-                    await asyncio.sleep(10)
+                    bt.logging.error(f"Error in main loop: {e}")
+                    bt.logging.debug(traceback.format_exc())
+
+                # Outside the try on purpose: a throw anywhere above must still take
+                # the full inter-round wait rather than the handler's short retry,
+                # or an outage turns into a tight poll loop that never cleans up.
+                round_elapsed = time.time() - round_start
+                step += 1
+
+                next_round = datetime.now().timestamp() + GENOMICS_CONFIG["task_interval"]
+                next_round_str = datetime.fromtimestamp(next_round).strftime('%H:%M:%S')
+
+                bt.logging.info(f"Round {step-1} complete in {round_elapsed:.1f}s. "
+                               f"Next round at {next_round_str} (in {task_interval_mins} min)")
+
+                # Smart scheduling: if platform provided next scoring window, wait until then
+                # Otherwise fall back to fixed interval
+                if self.use_platform and next_scoring_window:
+                    bt.logging.info(f"Smart scheduling: next_scoring_window={next_scoring_window}")
+                    total_wait = self._calculate_wait_until_scoring(next_scoring_window)
+                    if total_wait <= 0:
+                        # Scoring window is now or in the past, use minimum wait
+                        total_wait = MIN_WAIT_SECONDS
+                    wait_reason = "scoring window"
+                    bt.logging.info(f"Waiting {total_wait}s until next scoring window")
+                else:
+                    bt.logging.debug(f"No smart scheduling: use_platform={self.use_platform}, next_scoring_window={next_scoring_window}")
+                    total_wait = GENOMICS_CONFIG["task_interval"]
+                    wait_reason = "task interval"
+
+                countdown_interval = 300  # 5 minutes
+                elapsed_wait = 0
+
+                next_check_time = datetime.now() + timedelta(seconds=total_wait)
+                next_check_str = next_check_time.strftime('%H:%M:%S')
+                wait_mins = total_wait // 60
+
+                print(f"\n   Waiting for next {wait_reason}...", flush=True)
+                print(f"   Next check at: {next_check_str}", flush=True)
+                print(f"   Time remaining: {wait_mins} minutes\n", flush=True)
+
+                while elapsed_wait < total_wait:
+                    sleep_chunk = min(countdown_interval, total_wait - elapsed_wait)
+                    await asyncio.sleep(sleep_chunk)
+                    elapsed_wait += sleep_chunk
+
+                    remaining = total_wait - elapsed_wait
+                    if remaining > 0:
+                        remaining_mins = remaining // 60
+                        print(f"   Waiting... {remaining_mins} minutes until next {wait_reason}", flush=True)
 
         except KeyboardInterrupt:
             bt.logging.info(f"Validator shutting down - Completed {step} rounds")

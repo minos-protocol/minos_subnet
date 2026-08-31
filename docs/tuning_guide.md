@@ -8,7 +8,16 @@ Practical guide to maximizing your variant-calling scores on Bittensor Subnet 10
 
 Validators compare your VCF output against a truth VCF using **hap.py** (the GA4GH benchmarking tool). Your raw metrics feed into the **AdvancedScorer**, which produces a score from 0 to 100.
 
-### AdvancedScorer Breakdown
+> **Check which scorer is live before you tune.** Two exist, and the **platform**
+> picks the one the whole network uses — it advertises it as `scoring_version` in
+> `/scoring/network-config`, and validators follow it. The default is **v1**, and
+> v1 is what this guide describes. **v2** is difficulty-weighted
+> (`100 x (0.70 x core + 0.30 x germline)`, gated) and is a different scale, so
+> the same callset scores differently under it and the levers that pay are not
+> the same. [docs/scoring.md](scoring.md) describes both, including the v2
+> difficulty weights.
+
+### AdvancedScorer Breakdown (v1)
 
 | Component    | Weight | What It Measures                                          |
 |--------------|--------|-----------------------------------------------------------|
@@ -17,6 +26,12 @@ Validators compare your VCF output against a truth VCF using **hap.py** (the GA4
 | FP Rate      | 15%    | Penalizes false positive rate above a dynamic threshold   |
 | Quality      | 10%    | Ti/Tv ratio and Het/Hom ratio deviation penalties         |
 
+> **The four weights sum to 100, but the score does not stop there.** A separate
+> overcall guardrail **subtracts up to 45 points** from the total. If you are
+> tuning toward aggressive calling, that subtraction — not the 15% FP weight —
+> is what bounds your downside. See [Overcall guardrail](#overcall-guardrail)
+> below and [docs/scoring.md](scoring.md).
+
 **Core F1** dominates. Get your precision and recall right first; everything else is refinement.
 
 **FP Rate** uses a dynamic threshold computed as `max(0.2%, 1 / truth_count)` — so the floor is 0.2% and it widens for small truth sets. The penalty is an exponential decay — exceeding the threshold does not instantly zero your score, but it ramps quickly. Calling too aggressively will hurt you here.
@@ -24,6 +39,21 @@ Validators compare your VCF output against a truth VCF using **hap.py** (the GA4
 **Completeness** rewards finding more true variants. Over-filtering to reduce FPs will cost you here — it is a balancing act.
 
 **Quality** checks biological plausibility. For WGS data, Ti/Tv should be around 2.0 and Het/Hom around 1.5. Large deviations indicate systematic errors in your calls.
+
+### Overcall guardrail
+
+Independently of the four components above, a guardrail counts false positives
+across the **whole challenge region** — not only at truth positions — and
+subtracts up to 45 points from the final score. It engages when the region-wide
+false-positive rate per truth variant runs far past what a correct callset
+produces, and it grows with the distance past that point.
+
+Because it is subtractive it does not appear in the 60/15/15/10 breakdown, so a
+config reasoned out from that table alone will underestimate what flooding calls
+to chase recall actually costs.
+
+[docs/scoring.md](scoring.md) has the exact condition and the constants that set
+it.
 
 ### Round Scores and Winner Weights
 
@@ -48,7 +78,7 @@ This is the most common question for new miners. There are three distinct causes
 
 **2. You are eligible but outside the paid ranks.** Once eligible, the top miner gets the main (~90%) miner weight and eligible ranks #2 through #20 split the pruning dust. If your current-round score ranks below the paid cutoff, you get 0. The fix is to score better — see Section 4 (Tuning Strategy).
 
-**3. You are submitting but the score is 0.** Causes: wrong reference build, malformed VCF (multi-sample, missing index), tool config rejected by the parameter whitelist, or a Docker error. Check your logs for the line `Score: 0.00/100`. If you see it, the variant call ran but produced no usable output. If you do not see a score line at all, your submission never made it to the scoring phase — check the platform connectivity / round timing.
+**3. You are submitting but the score is 0.** Causes: wrong reference build, malformed VCF (multi-sample, missing index), tool config rejected by the parameter whitelist or by an out-of-range value (rejected, not clamped), or a Docker error. Check your logs for the line `Score: 0.00/100`. If you see it, the variant call ran but produced no usable output. If you do not see a score line at all, your submission never made it to the scoring phase — check the platform connectivity / round timing.
 
 A useful sanity check: if your logs show `Submitted config for round 2026-XX-XXTXX:XX:XX (variants=N)` with a non-zero N, you are participating. The eligibility counter is what will catch up over time.
 
@@ -78,14 +108,14 @@ Three active tools are supported. Pick based on your hardware and willingness to
 
 Only quality-related parameters are exposed. Infrastructure params (threads, memory) are handled by the system and stripped before submission.
 
-> **Full accepted-parameter ranges:** see [parameter_ranges.md](parameter_ranges.md) or the live endpoint `GET https://api.theminos.ai/scoring/parameter-ranges`. Every parameter has a valid range; a value outside its range is automatically set to that parameter's default, so a config never fails just because one value was out of range. The ranges below reflect those valid ranges.
+> **Full accepted-parameter ranges:** see [parameter_ranges.md](parameter_ranges.md), transcribed from `templates/tool_params.py` — the definitions the validator actually enforces — or the live endpoint `GET https://api.theminos.ai/scoring/parameter-ranges`. Every parameter has a valid range, and a value outside it is **rejected, not clamped to the default**: one bad value invalidates the whole config, the caller never runs, and the round produces no score. The ranges below reflect those valid ranges.
 
 ### GATK HaplotypeCaller
 
 | Parameter | Default | Range | Effect |
 |-----------|---------|-------|--------|
-| `standard_min_confidence_threshold_for_calling` | 30 | 10-100 | Higher = fewer, more confident calls. Raising this reduces FPs but hurts recall. |
-| `min_base_quality_score` | 10 | 10-50 | Filters bases below this quality. Too high kills soft evidence for real variants. |
+| `standard_min_confidence_threshold_for_calling` | 30 | 0-100 | Higher = fewer, more confident calls. Raising this reduces FPs but hurts recall. |
+| `min_base_quality_score` | 10 | 0-50 | Filters bases below this quality. Too high kills soft evidence for real variants. |
 | `pcr_indel_model` | CONSERVATIVE | NONE, HOSTILE, AGGRESSIVE, CONSERVATIVE | Use **NONE** for PCR-free libraries (GIAB donors are PCR-free). |
 
 **Tuning priority:** Set `pcr_indel_model=NONE` first. Then adjust `standard_min_confidence_threshold_for_calling` between 20-40 to find your sweet spot between precision and recall.
@@ -141,11 +171,11 @@ Change one parameter, run a round, compare. Changing multiple parameters at once
 
 ### Step 4: Watch the FP Threshold
 
-The FP rate penalty ramps steeply once you exceed the dynamic threshold. If your FP component is low, prioritize reducing false positives over marginal recall improvements. The 15% FP weight makes this penalty expensive.
+The FP rate penalty ramps steeply once you exceed the dynamic threshold. If your FP component is low, prioritize reducing false positives over marginal recall improvements. The 15% FP weight makes this penalty expensive — and the overcall guardrail above makes it far more expensive still, up to 45 points.
 
 ### Step 5: Test Locally First
 
-Use **demo mode** (`--demo`) for a one-shot check before committing to live rounds — it downloads a single fixed, fully-answered sample (BAM + truth), runs your variant caller, and prints the exact score a validator would compute.
+Use **demo mode** (`--demo`) for a one-shot check before committing to live rounds — it downloads a single fixed, fully-answered sample (BAM + truth), runs your variant caller, and prints the exact score a validator would compute. Both modes ask the platform which scorer is live and score with that formula, naming the version in the printed result; if the platform cannot be reached they use the version this machine last resolved, and v1 if it has never reached the platform.
 
 To score against **any** sample (not just the fixed demo one), use **practice mode** (`--practice`): pick from a menu of fully-answered chr18/chr19/chr20/chr21/chr22 samples and compare configs before going live. A bad config can cost the current round and may fail to count toward eligibility if it produces no valid positive score.
 
@@ -159,7 +189,7 @@ More conservative calling → Higher precision → Better FP rate
                           → Lower recall → Worse completeness
 ```
 
-The scoring weights (60% F1, 15% completeness, 15% FP) mean you want to lean slightly toward precision, but not so far that completeness drops significantly.
+Under v1 the scoring weights (60% F1, 15% completeness, 15% FP) mean you want to lean slightly toward precision, but not so far that completeness drops significantly.
 
 ---
 
@@ -172,7 +202,7 @@ The scoring weights (60% F1, 15% completeness, 15% FP) mean you want to lean sli
 | 40-60   | Something is suboptimal. Check tool parameters and Docker image.  |
 | Below 40| Likely a configuration error. See Common Mistakes below.          |
 
-The genomic region rotates across chr19–chr22 (5 MB and 10 MB windows) and varies per round, so some score variance is normal. Focus on your current-round score trend and consistency across regions.
+The genomic region rotates across chr18–chr22 (5 MB and 10 MB windows) and varies per round, so some score variance is normal. Focus on your current-round score trend and consistency across regions.
 
 ---
 

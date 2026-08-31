@@ -22,6 +22,16 @@ Demo mode:
 bash start-miner.sh --demo
 ```
 
+Practice mode (self-score a config against any fully-answered sample):
+
+```bash
+bash start-miner.sh --practice
+bash start-miner.sh --practice --config configs/gatk.conf
+bash start-miner.sh --practice --config configs/gatk.conf --sample-id <sample-id>
+```
+
+Demo and practice are one-shot foreground runs. Do not put them under PM2.
+
 Start live miner:
 
 ```bash

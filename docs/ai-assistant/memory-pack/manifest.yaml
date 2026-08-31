@@ -54,6 +54,7 @@ graph_seed_order:
   - cards/snp-indel.md
   - cards/miner-lifecycle.md
   - cards/demo-mode.md
+  - cards/practice-mode.md
   - cards/live-mining-registration.md
   - cards/pm2-docker-runtime.md
   - cards/public-endpoint-diagnostics.md
@@ -77,6 +78,7 @@ subjects:
   - Public knowledge graph
   - Miner onboarding
   - Demo mode
+  - Practice mode
   - Live mining
   - Bittensor wallet and hotkey
   - Docker runtime
@@ -125,11 +127,19 @@ subject_links:
   Miner onboarding:
     related:
       - Demo mode
+      - Practice mode
       - Live mining
       - Bittensor wallet and hotkey
       - Docker runtime
       - PM2 supervision
       - Troubleshooting
+  Practice mode:
+    related:
+      - Demo mode
+      - Config tuning
+      - Scoring basics
+      - Miner onboarding
+      - How to compete well
   Variant calling:
     related:
       - BAM files
@@ -144,6 +154,7 @@ subject_links:
   Scoring basics:
     related:
       - AdvancedScorer
+      - Practice mode
       - Rewards and emissions
       - Eligibility and weight
       - Protocol rules

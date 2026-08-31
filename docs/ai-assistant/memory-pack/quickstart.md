@@ -3,8 +3,8 @@
 Memory name: Minos SN107 - Miner Quickstart
 Version: 1.0.0
 Primary subject: Miner onboarding
-Subjects: Minos SN107; Miner onboarding; Demo mode; Live mining; Docker runtime; PM2 supervision; Public endpoints; Endpoint safety
-Related memories: Minos SN107 - Protocol Rules And Rewards; Minos SN107 - Troubleshooting Playbook; Minos SN107 - Public Endpoint Diagnostics; Minos SN107 - Safe Paste-Back Template
+Subjects: Minos SN107; Miner onboarding; Demo mode; Practice mode; Live mining; Docker runtime; PM2 supervision; Public endpoints; Endpoint safety
+Related memories: Minos SN107 - Protocol Rules And Rewards; Minos SN107 - Practice Mode; Minos SN107 - Troubleshooting Playbook; Minos SN107 - Public Endpoint Diagnostics; Minos SN107 - Safe Paste-Back Template
 
 This is a public beginner guide for using Ditto while onboarding as a Minos subnet 107 miner.
 
@@ -18,7 +18,7 @@ Miners submit variant-calling configurations, not VCF files.
 
 Ditto can help explain:
 
-- setup and demo mode
+- setup, demo mode, and practice mode
 - Docker and PM2 basics
 - BAM, VCF, reads, variants, SNPs, and indels
 - why a miner has 0 weight
@@ -39,10 +39,11 @@ Ditto should not handle secrets or private infrastructure data. Do not paste pri
 3. Confirm files download.
 4. Confirm Docker and the selected variant caller run.
 5. Confirm a result/config is produced.
-6. Move to live mining.
-7. Wait for scored rounds.
-8. Check eligibility and weight.
-9. Only then tune configs.
+6. Score a config in practice mode.
+7. Move to live mining.
+8. Wait for scored rounds.
+9. Check eligibility and weight.
+10. Only then tune configs.
 
 ## Common Commands
 
@@ -51,6 +52,14 @@ Use the official installer first, then start in demo mode if you are new:
 ```bash
 bash install.sh
 bash start-miner.sh --demo
+```
+
+To score a config against any available sample instead of the fixed demo one,
+use practice mode:
+
+```bash
+bash start-miner.sh --practice
+bash start-miner.sh --practice --config configs/gatk.conf
 ```
 
 When you are ready for live mining, configure/register your wallet first, then
@@ -72,7 +81,15 @@ curl https://api.theminos.ai/health
 
 ## Demo Mode First
 
-Demo mode is a pipeline smoke test. It uses the platform's `/v2/demo/*` sandbox. Demo mode does not earn TAO. Demo mode does not persist live submissions. Demo mode does not produce real live scores. It is useful because it proves your local environment can run the workflow before you risk live rounds.
+Demo mode is a pipeline smoke test. It is the self-scorer pinned to one fixed chr20 sample, so the first run is repeatable. Demo mode does not earn TAO. Demo mode does not persist live submissions. Demo mode does not produce real live scores. It is useful because it proves your local environment can run the workflow before you risk live rounds.
+
+## Practice Mode Before Live Rounds
+
+Practice mode (`--practice`) is the same self-scorer over a menu of samples. It picks a fully-answered chr18/chr19/chr20/chr21/chr22 sample, downloads its BAM and truth files, runs the selected caller, and prints the exact score a validator would compute. It scores with the version the platform advertises in `/scoring/network-config` and names that version in its output; unreachable, it uses the version the machine last resolved, or v1 if it never resolved one.
+
+Practice mode needs no wallet and touches no chain. It does not submit, does not earn TAO, and does not count toward eligibility. Use it to compare configs before a live round pays for the experiment.
+
+Like demo mode, practice mode is a one-shot foreground run. Do not run it under PM2.
 
 ## PM2 Online Is Not Enough
 
