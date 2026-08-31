@@ -5,6 +5,9 @@ Run from the minos_subnet/ directory:
     python neurons/status.py --json    # JSON for platform/dashboard
     python neurons/status.py --role miner  # Override auto-detected role
 
+Role is auto-detected as miner unless --role says otherwise or an .env file in
+this checkout identifies the node as a validator; see detect_role().
+
 Exit code: 0 if all critical checks pass, 1 if any fail.
 """
 
@@ -70,8 +73,28 @@ VALIDATOR_DOCKER_IMAGES = [
 # Supported chromosomes
 SUPPORTED_CHROMOSOMES = [f"chr{i}" for i in range(1, 23)]  # chr1-chr22
 
-# Reference files — multi-chromosome (new structure: datasets/reference/{chr}/{chr}.fa)
-# Falls back to checking old flat structure (datasets/reference/chr20.fa) if new not found
+
+def _demo_mode() -> bool:
+    return os.getenv("MINER_DEMO", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def expected_chromosomes() -> List[str]:
+    """Chromosomes setup.py actually installs on this node.
+
+    setup.py step_reference_data() filters its download list down to "/chr20/"
+    whenever MINER_DEMO is truthy, so demanding all 22 here reported 63 missing
+    reference files on a demo miner whose install had completed successfully.
+    """
+    return ["chr20"] if _demo_mode() else list(SUPPORTED_CHROMOSOMES)
+
+
+# Reference files exist only in the per-chromosome layout
+# datasets/reference/{chrom}/{chrom}.fa — the flat layout this used to claim as
+# a fallback is not something setup.py can leave behind:
+# setup.py._migrate_legacy_reference_data() MOVES a legacy datasets/reference/
+# chr20.* into the per-chromosome directory before anything else runs, so
+# accepting flat paths would only ever have reported a half-migrated tree
+# (which the callers then fail to open) as healthy.
 def _build_reference_files(chromosomes):
     files = []
     for chrom in chromosomes:
@@ -80,19 +103,26 @@ def _build_reference_files(chromosomes):
         files.append(f"datasets/reference/{chrom}/{chrom}.dict")
     return files
 
+
+def _build_reference_dirs(chromosomes):
+    return [f"datasets/reference/{chrom}/{chrom}.sdf" for chrom in chromosomes]
+
+
 MINER_REFERENCE_FILES = _build_reference_files(SUPPORTED_CHROMOSOMES)
 
 # Truth VCFs are served per-round from the platform API — not stored locally
 VALIDATOR_REFERENCE_FILES = MINER_REFERENCE_FILES
 
-VALIDATOR_REFERENCE_DIRS = [
-    f"datasets/reference/{chrom}/{chrom}.sdf" for chrom in SUPPORTED_CHROMOSOMES
-]
+VALIDATOR_REFERENCE_DIRS = _build_reference_dirs(SUPPORTED_CHROMOSOMES)
 
 # Reference data health check URL — uses platform redirect endpoint so we
 # stay in sync with whatever storage backend the platform points to (R2 today).
 # Must match REF_S3_BASE in setup.py.
 REF_HEALTH_URL = "https://api.theminos.ai/reference/chr20/chr20.fa.fai"
+
+# Chain probe budget. CI already wraps status.py in `timeout 90`; the probe must
+# come back well inside that even when the RPC endpoint never answers.
+CHAIN_PROBE_TIMEOUT = 30.0
 
 # Key Python packages to check
 REQUIRED_PACKAGES = {
@@ -102,7 +132,6 @@ REQUIRED_PACKAGES = {
     "boto3": "boto3",
     "pysam": "pysam",
     "numpy": "numpy",
-    "torch": "torch",
     "dotenv": "python-dotenv",
 }
 
@@ -252,8 +281,9 @@ def check_docker_images(role: str, template: Optional[str]) -> List[Check]:
 
 
 def check_reference_files(role: str) -> List[Check]:
-    files = VALIDATOR_REFERENCE_FILES if role == "validator" else MINER_REFERENCE_FILES
-    dirs = VALIDATOR_REFERENCE_DIRS if role == "validator" else []
+    chromosomes = expected_chromosomes()
+    files = _build_reference_files(chromosomes)
+    dirs = _build_reference_dirs(chromosomes) if role == "validator" else []
 
     results = []
     for rel_path in files:
@@ -367,26 +397,21 @@ def check_wallet() -> Check:
         return Check("Wallet", Status.FAIL, f"cannot load: {_short_error(e)}", "functional")
 
 
-def check_bittensor_chain() -> Check:
+def check_bittensor_chain(timeout: float = CHAIN_PROBE_TIMEOUT) -> Check:
+    def _connect():
+        import bittensor as bt
+        if not hasattr(bt, "subtensor"):
+            bt.subtensor = bt.Subtensor
+        network = os.getenv("SUBTENSOR_NETWORK", "finney")
+        sub = bt.subtensor(network=network)
+        block = sub.block
+        return f"{network} (block {block})"
+
     try:
-        import concurrent.futures
-
-        def _connect():
-            import bittensor as bt
-            if not hasattr(bt, "subtensor"):
-                bt.subtensor = bt.Subtensor
-            network = os.getenv("SUBTENSOR_NETWORK", "finney")
-            sub = bt.subtensor(network=network)
-            block = sub.block
-            return f"{network} (block {block})"
-
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            future = pool.submit(_connect)
-            detail = future.result(timeout=30)
-            return Check("Bittensor chain", Status.PASS, detail, "network")
-
-    except concurrent.futures.TimeoutError:
-        return Check("Bittensor chain", Status.WARN, "connection timeout (30s)", "network")
+        detail = _call_with_timeout(_connect, timeout)
+        return Check("Bittensor chain", Status.PASS, detail, "network")
+    except TimeoutError:
+        return Check("Bittensor chain", Status.WARN, f"connection timeout ({timeout:g}s)", "network")
     except ImportError:
         return Check("Bittensor chain", Status.SKIP, "bittensor not installed", "network")
     except Exception as e:
@@ -447,6 +472,38 @@ def check_imports() -> Check:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _call_with_timeout(fn: Callable, timeout: float) -> Any:
+    """Run fn on a daemon thread; raise TimeoutError once `timeout` elapses.
+
+    Not a ThreadPoolExecutor: its context manager shuts down with wait=True, so
+    the TimeoutError could not reach the caller until the worker returned, and
+    even shutdown(wait=False) leaves the pool's non-daemon worker to be joined
+    by the interpreter's atexit hook. Against a black-holed SUBTENSOR_NETWORK
+    that made `status.py --json` print nothing and never exit, so a health cron
+    stacked hung processes. A daemon thread is abandoned instead: the probe is
+    reported as a timeout on schedule and the process can still exit.
+    """
+    import threading
+
+    box = {}
+
+    def _run():
+        try:
+            box["value"] = fn()
+        except BaseException as e:  # re-raised on the caller's thread below
+            box["error"] = e
+
+    thread = threading.Thread(target=_run, name="minos-status-probe", daemon=True)
+    thread.start()
+    thread.join(timeout)
+
+    if thread.is_alive():
+        raise TimeoutError(f"timed out after {timeout:g}s")
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
+
 
 def _short_error(e: Exception) -> str:
     """Truncate exception to a readable string."""
@@ -594,6 +651,80 @@ def render_json(report: StatusReport) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Role detection
+# ---------------------------------------------------------------------------
+
+def _env_file_role(base_dir: Path) -> Optional[str]:
+    """Role claimed by the .env files on disk, or None if they don't claim one.
+
+    Two signals, both written by setup.py: a role-specific .env.miner /
+    .env.validator (the names load_dotenv() reads at import), and the header
+    setup.py stamps on the generated .env ("# Minos Validator Configuration").
+    The header matters because the wizard writes a plain .env for both roles,
+    so without it a real validator has no positive evidence at all.
+    """
+    for role in ("miner", "validator"):
+        if (base_dir / f".env.{role}").exists() and not (base_dir / f".env.{_other(role)}").exists():
+            return role
+
+    env_path = base_dir / ".env"
+    if env_path.exists():
+        try:
+            head = env_path.read_text(errors="replace").splitlines()[:5]
+        except OSError:
+            return None
+        for line in head:
+            lowered = line.strip().lower()
+            if lowered.startswith("#") and "configuration" in lowered:
+                if "validator" in lowered:
+                    return "validator"
+                if "miner" in lowered:
+                    return "miner"
+    return None
+
+
+def _other(role: str) -> str:
+    return "validator" if role == "miner" else "miner"
+
+
+def detect_role(explicit_role: Optional[str] = None, base_dir: Optional[Path] = None):
+    """Resolve (role, template) for this node.
+
+    An unset MINER_TEMPLATE is not "no miner": templates.get_template_name()
+    resolves it to DEFAULT_TEMPLATE, so a default gatk miner runs fine without
+    it. Treating that as a validator checked the node against the validator
+    Docker images (hap.py, DeepVariant, freebayes) and 22 .sdf directories it
+    will never own — ~25 FAILs and exit 1 on a healthy node — while
+    check_config_files SKIPped the gatk.conf parse, the one check that mattered
+    for it.
+
+    Validator intent is therefore only ever taken from an explicit signal: the
+    --role flag, or an .env that says so. MINER_TEMPLATE outranks the files
+    because setup.py writes it for miners only. Anything else is a miner on the
+    resolved default template — the diagnosis whose checks a node with no
+    evidence either way can actually satisfy.
+    """
+    base = base_dir or BASE_DIR
+    template = os.getenv("MINER_TEMPLATE", "").lower().strip() or None
+
+    if explicit_role:
+        role = explicit_role
+    elif template is None and _env_file_role(base) == "validator":
+        role = "validator"
+    else:
+        role = "miner"
+
+    if role == "miner" and template is None:
+        try:
+            from templates import DEFAULT_TEMPLATE
+            template = DEFAULT_TEMPLATE
+        except ImportError:
+            template = "gatk"
+
+    return role, template
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -605,14 +736,7 @@ def main() -> int:
     parser.add_argument("--role", choices=["miner", "validator"], help="Override auto-detected role")
     args = parser.parse_args()
 
-    # Detect role from environment
-    template = os.getenv("MINER_TEMPLATE", "").lower().strip() or None
-    if args.role:
-        role = args.role
-    elif template:
-        role = "miner"
-    else:
-        role = "validator"
+    role, template = detect_role(args.role)
 
     report = run_checks(role, template)
 

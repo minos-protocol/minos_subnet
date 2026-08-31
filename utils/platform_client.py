@@ -8,8 +8,12 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import uuid
 import httpx
+from urllib.parse import urlsplit
+
+from .config_commit import submission_config
 from typing import Optional, Dict, Any, List, Callable, TypeVar
 from dataclasses import dataclass
 from bittensor_wallet import Keypair
@@ -21,12 +25,21 @@ logger = logging.getLogger(__name__)
 T = TypeVar('T')
 
 
+DEFAULT_RETRYABLE = (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError)
+
+# Failures that happened before the request reached the server. Read errors
+# are deliberately absent: those mean the bytes were already on the wire and
+# the server may have processed them.
+PRE_SEND_RETRYABLE = (httpx.ConnectTimeout, httpx.ConnectError, httpx.PoolTimeout)
+
+
 async def retry_async(
     func: Callable[..., T],
     max_retries: int = 3,
     base_delay: float = 1.0,
     max_delay: float = 30.0,
-    retryable_exceptions: tuple = (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError),
+    retryable_exceptions: tuple = DEFAULT_RETRYABLE,
+    idempotent: bool = True,
 ) -> T:
     """Retry an async function with exponential backoff.
 
@@ -36,6 +49,10 @@ async def retry_async(
         base_delay: Initial delay between retries in seconds
         max_delay: Maximum delay between retries
         retryable_exceptions: Tuple of exceptions that trigger a retry
+        idempotent: False for calls that create state server-side
+            (submit-config, submit-score). Each attempt rebuilds the body with
+            a fresh nonce, so a retried request cannot be collapsed server-side;
+            such calls retry only on PRE_SEND_RETRYABLE.
 
     Returns:
         The result of the function call
@@ -43,6 +60,11 @@ async def retry_async(
     Raises:
         The last exception if all retries are exhausted
     """
+    if not idempotent:
+        retryable_exceptions = tuple(
+            exc for exc in PRE_SEND_RETRYABLE
+            if issubclass(exc, tuple(retryable_exceptions))
+        )
     last_exception = None
     for attempt in range(max_retries + 1):
         try:
@@ -70,9 +92,34 @@ class PlatformClientError(Exception):
     pass
 
 
+class PaymentRequiredError(PlatformClientError):
+    """Platform requires payment for this submission (HTTP 402).
+
+    Not retryable; only the caller can resolve it.
+    """
+
+
 class AuthenticationError(PlatformClientError):
     """Authentication failed."""
     pass
+
+
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def safe_object_id(value: str, field: str) -> str:
+    """Validate an identifier before it is interpolated into an S3 key.
+
+    Ids taken from platform responses must keep the upload inside the
+    ``scoring/{hotkey}/{round_slug}/`` prefix. UUIDs and numeric ids both fit
+    this charset; anything else is a malformed response.
+    """
+    text = str(value)
+    if not _SAFE_ID_RE.match(text):
+        raise PlatformClientError(
+            f"Unsafe {field} from platform response: {value!r}"
+        )
+    return text
 
 
 class PlatformClient:
@@ -80,11 +127,27 @@ class PlatformClient:
 
     _AUTH_HEADERS = {"X-Minos-Auth-Version": "2"}
 
+    # Exact hostnames (as urlsplit reports them: lowercased, IPv6 brackets
+    # stripped) that may be reached over cleartext http.
+    _HTTP_ALLOWED_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
     def __init__(self, config: PlatformConfig):
         # Require HTTPS for non-localhost URLs to prevent credential interception
+        # Compare the parsed hostname against the allow-list; a prefix match on
+        # the raw URL is not sufficient.
         url = config.base_url.rstrip("/")
-        if not url.startswith("https://") and not any(
-            url.startswith(f"http://{host}") for host in ("localhost", "127.0.0.1", "[::1]")
+        try:
+            parsed = urlsplit(url)
+            hostname = parsed.hostname
+        except ValueError:
+            # A URL whose host cannot be parsed cannot be verified.
+            parsed, hostname = None, None
+        if parsed is None or (
+            parsed.scheme != "https"
+            and not (
+                parsed.scheme == "http"
+                and hostname in self._HTTP_ALLOWED_HOSTS
+            )
         ):
             raise ValueError(
                 f"PLATFORM_URL must use HTTPS (got {url}). "
@@ -127,12 +190,32 @@ class PlatformClient:
 
     async def health_check(self) -> bool:
         """Check if platform is healthy."""
-        try:
-            async with self._get_client() as client:
-                response = await client.get("/health")
-                return response.status_code == 200
-        except Exception:
-            return False
+        healthy, _reason = await self.health_check_detail()
+        return healthy
+
+    async def health_check_detail(self, attempts: int = 3) -> tuple:
+        """Health check reporting ``(healthy, reason)``.
+
+        Retries a few times so a single transient failure does not take the
+        node out of service.
+
+        follow_redirects is enabled here only. It must not be set on the shared
+        client: the canonical signature covers the path, so a cross-host
+        redirect would replay hotkey-signed bodies elsewhere.
+        """
+        last = "unknown"
+        for attempt in range(attempts):
+            try:
+                async with self._get_client() as client:
+                    response = await client.get("/health", follow_redirects=True)
+                if response.status_code == 200:
+                    return True, "ok"
+                last = f"HTTP {response.status_code}"
+            except Exception as e:
+                last = f"{type(e).__name__}: {e}"
+            if attempt + 1 < attempts:
+                await asyncio.sleep(2 ** attempt)
+        return False, last
 
     async def get_network_config(self) -> Optional[Dict[str, Any]]:
         """Fetch authoritative network reward params.
@@ -157,7 +240,9 @@ class PlatformClient:
 
         Used by validator weight tracking as a tiebreak signal when local
         current-round leaders are close. Returns the full response including a
-        ranked list with ``miner_hotkey`` and validator coverage metadata.
+        ranked list with ``miner_hotkey``, validator coverage metadata, and
+        ``score_schema_version``. The validator rejects a missing or non-v2
+        schema marker.
 
         Platform serves this only after the late-score grace period. Returns
         ``None`` on any error; the validator treats that as canonical
@@ -264,7 +349,11 @@ class MinerPlatformClient(PlatformClient):
         tool_name: str,
         tool_config: Dict[str, Any],
         variant_count: Optional[int] = None,
-        runtime_seconds: Optional[float] = None
+        runtime_seconds: Optional[float] = None,
+        config_commitment: Optional[str] = None,
+        commitment_block: Optional[int] = None,
+        config_nonce: Optional[str] = None,
+        payment_proof: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Submit tool configuration for a round.
 
@@ -288,8 +377,9 @@ class MinerPlatformClient(PlatformClient):
         """
         # SECURITY: Strip infrastructure params before sending to platform
         # These are local system settings, not quality parameters
-        _INFRA_PARAMS = {"threads", "memory_gb", "timeout", "ref_build", "num_threads"}
-        safe_config = {k: v for k, v in tool_config.items() if k not in _INFRA_PARAMS}
+        # Uses config_commit.submission_config so this set cannot drift from
+        # the one the on-chain commitment is computed over.
+        safe_config = submission_config(tool_config)
 
         path = self._submit_path
 
@@ -302,6 +392,23 @@ class MinerPlatformClient(PlatformClient):
                 tool_config=safe_config,
                 variant_count=variant_count,
                 runtime_seconds=runtime_seconds,
+                # Optional fields are omitted rather than sent as null, so the
+                # signed body is unchanged when they are not in use.
+                **(
+                    {"config_commitment": config_commitment}
+                    if config_commitment else {}
+                ),
+                **(
+                    {"commitment_block": commitment_block}
+                    if commitment_block is not None else {}
+                ),
+                **(
+                    # Revealed so the platform can recompute the digest. Omitted
+                    # when absent so an older platform sees no unknown key.
+                    {"config_nonce": config_nonce} if config_nonce else {}
+                ),
+                # Proof of payment for a resubmission beyond the free allowance.
+                **({"payment_proof": payment_proof} if payment_proof else {}),
             )
 
             async with self._get_client() as client:
@@ -315,12 +422,16 @@ class MinerPlatformClient(PlatformClient):
                     raise PlatformClientError("Round not found")
                 if response.status_code == 409:
                     raise PlatformClientError(f"Round not open for submissions: {response.text}")
+                if response.status_code == 402:
+                    raise PaymentRequiredError(response.text)
                 if response.status_code != 200:
                     raise PlatformClientError(f"Failed to submit config: {response.text}")
 
                 return response.json()
 
-        return await retry_async(_do_request, max_retries=2)
+        # Non-idempotent: a successful POST consumes the miner's free
+        # submission allowance.
+        return await retry_async(_do_request, max_retries=2, idempotent=False)
 
     # =========================================================================
     # Practice-mode API (self-scoring sandbox). Separate namespace from the
@@ -421,11 +532,12 @@ class ValidatorPlatformClient(PlatformClient):
         /v2/canonical-ranking (the /v2 validator-auth router). Used only as a
         close-call tiebreak signal.
 
-        Backward-compatible during rollout: if the server does not expose the
-        POST route yet (404/405) or the request errors, fall back to the
-        base-class GET so the tiebreak signal is never lost. Returns ``None`` on
-        any error or not-ready (425), which the caller treats as canonical
-        unavailable.
+        During the API-route rollout, if the server does not expose the POST
+        route yet (404/405) or the request errors, fall back to the base-class
+        GET. This is transport compatibility only: the validator still rejects
+        any response without the required v2 score-schema marker. Returns
+        ``None`` on any error or not-ready (425), which the caller treats as
+        canonical unavailable.
         """
         path = "/v2/canonical-ranking"
 
@@ -566,6 +678,53 @@ class ValidatorPlatformClient(PlatformClient):
 
         return await retry_async(_do_request, max_retries=3)
 
+    async def get_candidate_normalization_context(
+        self,
+        round_id: str,
+    ) -> Dict[str, Any]:
+        """Fetch the private, round-pinned candidate-normalization context.
+
+        This validator-only response contains opaque solution tokens and owner
+        mappings.  It must never be routed through a public endpoint or miner
+        receipt. The validator validates the response version, coverage,
+        bond/maturity state, digest, and configured attestation quorum before
+        it can affect a reward vector.
+        """
+        path = "/v2/get-candidate-normalization-context"
+
+        async def _do_request():
+            body = self._auth_body(
+                "POST",
+                path,
+                round_id=round_id,
+                validator_hotkey=self.keypair.ss58_address,
+            )
+            async with self._get_client() as client:
+                response = await client.post(
+                    path,
+                    json=body,
+                    headers=self._AUTH_HEADERS,
+                    timeout=15.0,
+                )
+
+                if response.status_code == 401:
+                    raise AuthenticationError("Invalid signature or validator not authorized")
+                if response.status_code == 404:
+                    raise PlatformClientError(
+                        "Candidate-normalization context not found for round"
+                    )
+                if response.status_code in (409, 425):
+                    raise PlatformClientError(
+                        f"Candidate-normalization context not finalized: {response.text}"
+                    )
+                if response.status_code != 200:
+                    raise PlatformClientError(
+                        f"Failed to get candidate-normalization context: {response.text}"
+                    )
+                return response.json()
+
+        return await retry_async(_do_request, max_retries=2)
+
     async def submit_score(
         self,
         round_id: str,
@@ -656,7 +815,8 @@ class ValidatorPlatformClient(PlatformClient):
 
                 return response.json()
 
-        return await retry_async(_do_request, max_retries=3)
+        # Non-idempotent: each accepted POST inserts a validator_score row.
+        return await retry_async(_do_request, max_retries=3, idempotent=False)
 
     async def get_upload_url(self, s3_key: str) -> str:
         """Get a presigned PUT URL to upload a file to S3.
@@ -821,9 +981,10 @@ class ValidatorPlatformClient(PlatformClient):
         # the same slug used elsewhere for round artifacts so directory
         # listings stay tidy.
         round_slug = safe_round_dir_name(round_id)
+        safe_score_id = safe_object_id(score_id, "score_id")
         s3_key = (
             f"scoring/{self.keypair.ss58_address}/{round_slug}"
-            f"/variant_results_{score_id}.ndjson.gz"
+            f"/variant_results_{safe_score_id}.ndjson.gz"
         )
 
         # 4. Get a presigned PUT URL from the platform (it picks the backend).
@@ -937,6 +1098,7 @@ class ValidatorPlatformClient(PlatformClient):
         Returns:
             Dict containing:
                 - backfill_scores: List of {miner_hotkey, combined_final,
+                                            score_schema_version,
                                             primary_validator_hotkey, submitted_at}
                 - overlap_deltas: List of {miner_hotkey, your_score, peer_score,
                                            delta, peer_validator_hotkey}

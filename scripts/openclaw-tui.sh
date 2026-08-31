@@ -3,7 +3,7 @@
 #
 # Raw `openclaw tui` can ask for device/scope pairing on headless VMs. Minos
 # configures a local loopback gateway token during assistant setup, so this
-# wrapper passes that token directly and keeps the first-use path smooth.
+# wrapper hands that token to the TUI and keeps the first-use path smooth.
 set -euo pipefail
 
 config_path="$(openclaw config file 2>/dev/null || printf '%s/.openclaw/openclaw.json' "$HOME")"
@@ -26,7 +26,13 @@ PY
 )"
 
 if [[ -n "$token" ]]; then
-  exec openclaw tui --token "$token" "$@"
+  # Passing --token put the gateway token on argv, where any local user could
+  # read it from `ps -eo args` or /proc/<pid>/cmdline, which defeated the
+  # chmod 600 on openclaw.json. OpenClaw reads OPENCLAW_GATEWAY_TOKEN for the
+  # configured gateway when no --url/host target is given, which is this
+  # wrapper's local-loopback case.
+  export OPENCLAW_GATEWAY_TOKEN="$token"
+  exec openclaw tui "$@"
 fi
 
 echo "OpenClaw gateway token not found. Re-run:" >&2

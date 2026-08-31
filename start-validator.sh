@@ -117,23 +117,40 @@ if [ -f .env ]; then
     set -a; source .env; set +a
 fi
 
+# A bare "sed s/^KEY=.*/KEY=value/" only substitutes: when the key was absent
+# from an older .env the write silently did nothing and the flag reverted on the
+# next pm2 restart, and any value containing '/' (an S3-style endpoint) broke the
+# s/// expression outright. Same helper as start-miner.sh.
+set_env_value() {
+    local key="$1"
+    local value="$2"
+    local escaped_value
+
+    escaped_value="$(printf '%s' "$value" | sed 's/[\/&]/\\&/g')"
+    if grep -q "^${key}=" .env; then
+        sed -i.bak "s/^${key}=.*/${key}=${escaped_value}/" .env && rm -f .env.bak
+    else
+        printf '%s=%s\n' "$key" "$value" >> .env
+    fi
+}
+
 # --- Apply flag overrides directly (no wizard) ---
 
 if [ -f .env ] && [ "$RUN_SETUP" = false ]; then
     CHANGED=false
 
     if [ -n "$FLAG_WALLET_NAME" ]; then
-        sed -i.bak "s/^WALLET_NAME=.*/WALLET_NAME=$FLAG_WALLET_NAME/" .env && rm -f .env.bak
+        set_env_value "WALLET_NAME" "$FLAG_WALLET_NAME"
         WALLET_NAME="$FLAG_WALLET_NAME"
         CHANGED=true
     fi
     if [ -n "$FLAG_WALLET_HOTKEY" ]; then
-        sed -i.bak "s/^WALLET_HOTKEY=.*/WALLET_HOTKEY=$FLAG_WALLET_HOTKEY/" .env && rm -f .env.bak
+        set_env_value "WALLET_HOTKEY" "$FLAG_WALLET_HOTKEY"
         WALLET_HOTKEY="$FLAG_WALLET_HOTKEY"
         CHANGED=true
     fi
     if [ -n "$FLAG_STORAGE" ]; then
-        sed -i.bak "s/^STORAGE_PRIMARY_BACKEND=.*/STORAGE_PRIMARY_BACKEND=$FLAG_STORAGE/" .env && rm -f .env.bak
+        set_env_value "STORAGE_PRIMARY_BACKEND" "$FLAG_STORAGE"
         STORAGE_PRIMARY_BACKEND="$FLAG_STORAGE"
         CHANGED=true
     fi
@@ -177,6 +194,12 @@ if [ ! -f .env ] || [ "$RUN_SETUP" = true ]; then
                 echo "    $((i+1))) ${WALLETS[$i]}"
             done
             read -p "  Select wallet (1-${#WALLETS[@]}): " W_IDX
+            # Bash >= 4.3 resolves a negative subscript from the END of the
+            # array, so a bare Enter here made W_IDX-1 == -1 and silently
+            # launched the validator on the last wallet in the list.
+            if ! [[ "$W_IDX" =~ ^[0-9]+$ ]] || [ "$W_IDX" -lt 1 ] || [ "$W_IDX" -gt "${#WALLETS[@]}" ]; then
+                W_IDX=1
+            fi
             WALLET_NAME="${WALLETS[$((W_IDX-1))]}"
             WALLET_NAME=${WALLET_NAME:-${WALLETS[0]}}
 
@@ -194,6 +217,9 @@ if [ ! -f .env ] || [ "$RUN_SETUP" = true ]; then
                         echo "    $((i+1))) ${HOTKEYS[$i]}"
                     done
                     read -p "  Select hotkey (1-${#HOTKEYS[@]}): " H_IDX
+                    if ! [[ "$H_IDX" =~ ^[0-9]+$ ]] || [ "$H_IDX" -lt 1 ] || [ "$H_IDX" -gt "${#HOTKEYS[@]}" ]; then
+                        H_IDX=1
+                    fi
                     HOTKEY_NAME="${HOTKEYS[$((H_IDX-1))]}"
                     HOTKEY_NAME=${HOTKEY_NAME:-${HOTKEYS[0]}}
                 fi

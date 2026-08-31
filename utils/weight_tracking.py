@@ -13,8 +13,9 @@ receives the configured winner weight, ranks #2..N receive pruning dust, and the
 caller sends the unallocated remainder to burn.
 """
 
+from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 import functools
 import logging
 import math
@@ -52,6 +53,53 @@ DEFAULT_BURN_RATE = 0.0
 DEFAULT_WINNER_WEIGHT = 0.9
 DEFAULT_DUST_TOP_N = 20
 DEFAULT_DUST_DECAY = 0.80
+
+
+def parse_submitted_at(value) -> Optional[float]:
+    """Epoch seconds from a platform submitted_at, or None if absent or unparseable.
+
+    Accepts an ISO-8601 string (with or without a trailing Z) or a datetime;
+    naive values are read as UTC. Every caller must use this helper so all
+    validators derive the same submission ordering from the same payload.
+    """
+    if not value:
+        return None
+    try:
+        if isinstance(value, str):
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        else:
+            dt = value
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except (ValueError, TypeError, AttributeError) as e:
+        logger.warning(f"Unparseable submitted_at {value!r}: {e}")
+        return None
+
+
+def parse_deadline(value) -> Optional[datetime]:
+    """Timezone-aware datetime from a platform deadline, or None if absent.
+
+    Accepts an ISO-8601 string (with or without a trailing Z) or a datetime;
+    naive values are read as UTC. Raises ValueError on a malformed value rather
+    than returning None: None is the "no deadline supplied" signal and the
+    deadline guards fail open on it, so a malformed deadline must not collapse
+    into it.
+    """
+    # Only null/empty is "absent"; any other falsy value is a malformed payload.
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    else:
+        raise ValueError(
+            f"Unparseable deadline {value!r}: expected an ISO string or datetime"
+        )
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 class ScoreTracker:
@@ -124,7 +172,10 @@ class ScoreTracker:
             score = float(raw_score)
         except (TypeError, ValueError):
             raise ValueError(f"Invalid round score for {hotkey[:16]}...: {raw_score!r}")
-        if not math.isfinite(score) or score <= 0.0 or score > 1.0:
+        # V2 deliberately emits 0.0 when the plausibility gate fails. Keep the
+        # result in current-round state for audit/backfill convergence; ranking
+        # and participation already require a strictly positive score.
+        if not math.isfinite(score) or score < 0.0 or score > 1.0:
             raise ValueError(f"Round score out of range for {hotkey[:16]}...: {score!r}")
         self.round_scores[hotkey] = score
         self.last_raw_scores[hotkey] = score
@@ -159,6 +210,73 @@ class ScoreTracker:
         self.round_history = self.round_history[-PARTICIPATION_WINDOW:]
         self._recalculate_participation()
 
+    def refresh_participation_window(self, round_history: List[Dict[str, Any]]) -> bool:
+        """Rebuild the participation window from an authoritative platform snapshot.
+
+        Unlike ``recover_from_platform_state`` this does NOT clear the current
+        round's scores — it refreshes ONLY the recent-window participation so the
+        eligibility gate reflects the platform's live view rather than stale
+        in-memory state.
+
+        Returns True if the window was refreshed, False if the snapshot carried
+        no usable rounds — in which case the caller keeps the existing window.
+        """
+        by_round: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        for entry in round_history or []:
+            if not isinstance(entry, dict):
+                continue
+            round_id = entry.get("round_id")
+            if not round_id:
+                continue
+            scored_hotkeys = {
+                hk for hk in entry.get("scored_hotkeys", []) if isinstance(hk, str) and hk
+            }
+            # Credit only positive scores, matching record_round_scores, so a
+            # miner's eligibility does not depend on which path recorded the
+            # round. Applied only when the snapshot carries scores.
+            scores = entry.get("scores")
+            if isinstance(scores, dict):
+                scored_hotkeys = {
+                    hk for hk in scored_hotkeys
+                    if isinstance(scores.get(hk), (int, float)) and scores.get(hk) > 0.0
+                }
+            # Round ids in the snapshot are not guaranteed distinct; one round
+            # must occupy exactly one window slot. Last write wins.
+            by_round[round_id] = {"round_id": round_id, "scored_hotkeys": scored_hotkeys}
+
+        new_history = list(by_round.values())
+        if not new_history:
+            return False
+        # A truncated snapshot must never shrink the window below what is
+        # already known locally.
+        if len(new_history) < len(self.round_history):
+            logger.warning(
+                f"Participation snapshot carries {len(new_history)} distinct rounds "
+                f"but {len(self.round_history)} are already recorded locally; "
+                f"keeping the local window."
+            )
+            return False
+
+        # Merge per round, never replace: /v2/get-validator-state is scoped to
+        # this validator, so its scored_hotkeys for a round are a subset of the
+        # miners scored for it. Replacing would drop peer-scored miners from the
+        # eligibility window, and record_round cannot restore them (it returns
+        # early on _recorded_round_ids).
+        existing = {e["round_id"]: set(e.get("scored_hotkeys") or ()) for e in self.round_history}
+        merged = []
+        for entry in new_history:
+            prior = existing.get(entry["round_id"])
+            if prior:
+                entry = {
+                    "round_id": entry["round_id"],
+                    "scored_hotkeys": set(entry["scored_hotkeys"]) | prior,
+                }
+            merged.append(entry)
+
+        self.round_history = merged[-PARTICIPATION_WINDOW:]
+        self._recalculate_participation()
+        return True
+
     def _recalculate_participation(self):
         """Recalculate recent-window participation counts.
 
@@ -185,15 +303,25 @@ class ScoreTracker:
         hotkeys: List[str],
         submission_times: Optional[Dict[str, float]] = None,
         tolerance: float = ROUND_SCORE_TOLERANCE,
+        ranking_scores: Optional[Dict[str, float]] = None,
     ) -> List[str]:
         """Sort by current-round score descending, then earliest submission."""
+        score_source = self.round_scores if ranking_scores is None else ranking_scores
+
         def _cmp(hk_a, hk_b):
-            sa = self.round_scores.get(hk_a, 0.0)
-            sb = self.round_scores.get(hk_b, 0.0)
+            sa = score_source.get(hk_a, 0.0)
+            sb = score_source.get(hk_b, 0.0)
             ta = submission_times.get(hk_a, float("inf")) if submission_times else float("inf")
             tb = submission_times.get(hk_b, float("inf")) if submission_times else float("inf")
             if abs(sa - sb) <= tolerance:
-                return -1 if ta < tb else (1 if ta > tb else 0)
+                if ta < tb:
+                    return -1
+                if tb < ta:
+                    return 1
+                # Hotkey is the last-resort key: it is unique and identical
+                # everywhere, so the ordering stays total and reproducible.
+                # Input order is per-validator and must never decide a tie.
+                return -1 if hk_a < hk_b else (1 if hk_a > hk_b else 0)
             return -1 if sa > sb else 1
 
         return sorted(hotkeys, key=functools.cmp_to_key(_cmp))
@@ -202,29 +330,38 @@ class ScoreTracker:
         self,
         miner_hotkeys: List[str],
         submission_times: Optional[Dict[str, float]] = None,
+        ranking_scores: Optional[Dict[str, float]] = None,
     ) -> List[str]:
         """Return eligible current-round scored miners with positive scores."""
+        score_source = self.round_scores if ranking_scores is None else ranking_scores
         eligible = [hk for hk in miner_hotkeys if self.is_eligible(hk)]
         return [
             hk for hk in self._sort_by_round_score(
-                eligible, submission_times, tolerance=ROUND_SCORE_TOLERANCE
+                eligible,
+                submission_times,
+                tolerance=ROUND_SCORE_TOLERANCE,
+                ranking_scores=ranking_scores,
             )
-            if self.round_scores.get(hk, 0.0) > 0
+            if score_source.get(hk, 0.0) > 0
         ]
 
     def needs_canonical_tiebreak(
         self,
         miner_hotkeys: List[str],
         submission_times: Optional[Dict[str, float]] = None,
+        ranking_scores: Optional[Dict[str, float]] = None,
     ) -> bool:
         """Return True when canonical ranking can affect winner selection."""
-        ranked = self._ranked_positive_eligible(miner_hotkeys, submission_times)
+        score_source = self.round_scores if ranking_scores is None else ranking_scores
+        ranked = self._ranked_positive_eligible(
+            miner_hotkeys, submission_times, ranking_scores
+        )
         if len(ranked) < 2:
             return False
 
-        top_score = self.round_scores.get(ranked[0], 0.0)
+        top_score = score_source.get(ranked[0], 0.0)
         return any(
-            (top_score - self.round_scores.get(hk, 0.0))
+            (top_score - score_source.get(hk, 0.0))
             <= CANONICAL_TIEBREAK_TOLERANCE + ROUND_SCORE_TOLERANCE
             for hk in ranked[1:]
         )
@@ -240,6 +377,7 @@ class ScoreTracker:
         dust_decay: float,
         canonical_top: Optional[str] = None,
         canonical_ranking: Optional[List[str]] = None,
+        ranking_scores: Optional[Dict[str, float]] = None,
     ) -> Dict[str, float]:
         """Compute round-only winner-heavy validator-vector miner weights."""
         weights = {hk: 0.0 for hk in miner_hotkeys}
@@ -260,10 +398,18 @@ class ScoreTracker:
             )
         if dust_top_n < 1:
             raise ValueError(f"dust_top_n must be >= 1, got {dust_top_n}")
-        if dust_decay < 0.0:
-            raise ValueError(f"dust_decay must be >= 0, got {dust_decay}")
+        # Must be finite and bounded: dust_decay comes from network-config via
+        # json.loads, which accepts Infinity and NaN, and a non-finite decay
+        # propagates NaN through every dust weight and past every later guard.
+        if not math.isfinite(dust_decay) or not 0.0 <= dust_decay <= 1.0:
+            raise ValueError(
+                f"dust_decay must be a finite value between 0 and 1, got {dust_decay}"
+            )
 
-        ranked = self._ranked_positive_eligible(miner_hotkeys, submission_times)
+        score_source = self.round_scores if ranking_scores is None else ranking_scores
+        ranked = self._ranked_positive_eligible(
+            miner_hotkeys, submission_times, ranking_scores
+        )
         if not ranked:
             logger.warning("No positive current-round scores — returning zero miner weights")
             return weights
@@ -284,17 +430,20 @@ class ScoreTracker:
 
         if canonical_candidates:
             ranked_set = set(ranked)
-            top_score = self.round_scores.get(ranked[0], 0.0)
+            top_score = score_source.get(ranked[0], 0.0)
+            canonical_applied = False
             for candidate in canonical_candidates:
                 if candidate not in ranked_set:
                     continue
                 if candidate == ranked[0]:
                     winner = candidate
+                    canonical_applied = True
                     break
-                canonical_score = self.round_scores.get(candidate, 0.0)
+                canonical_score = score_source.get(candidate, 0.0)
                 gap = top_score - canonical_score
                 if gap <= CANONICAL_TIEBREAK_TOLERANCE + ROUND_SCORE_TOLERANCE:
                     winner = candidate
+                    canonical_applied = True
                     logger.info(
                         f"Canonical tiebreak: local round rank-1 was "
                         f"{ranked[0][:16]}... (score={top_score:.4f}); "
@@ -304,6 +453,19 @@ class ScoreTracker:
                         f"{CANONICAL_TIEBREAK_TOLERANCE*100:.1f}% tolerance)"
                     )
                     break
+            if not canonical_applied:
+                # Distinguish "canonical ranking agreed" from "canonical ranking
+                # was fetched but no candidate was usable"; the latter means the
+                # winner is purely local.
+                logger.warning(
+                    f"Canonical tiebreak did not apply: none of "
+                    f"{len(canonical_candidates)} canonical candidate(s) is both "
+                    f"locally ranked and within "
+                    f"{CANONICAL_TIEBREAK_TOLERANCE*100:.1f}% of local rank-1 "
+                    f"{ranked[0][:16]}... (score={top_score:.4f}); using the local "
+                    f"ranking, which breaks exact ties by hotkey so it stays "
+                    f"identical across validators"
+                )
 
         weights[winner] = winner_weight
 
@@ -323,9 +485,21 @@ class ScoreTracker:
         )
         return weights
 
-    def get_rankings(self, miner_hotkeys: List[str]) -> Dict[str, Optional[int]]:
-        """Get current-round rankings. Unscored/zero-score miners get None."""
-        ranked = self._ranked_positive_eligible(miner_hotkeys)
+    def get_rankings(
+        self,
+        miner_hotkeys: List[str],
+        submission_times: Optional[Dict[str, float]] = None,
+        ranking_scores: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, Optional[int]]:
+        """Get current-round rankings. Unscored/zero-score miners get None.
+
+        submission_times must be threaded through so ties resolve here exactly
+        as they do in winner selection; without it every timestamp becomes
+        float("inf") and the reported rank can contradict the chosen winner.
+        """
+        ranked = self._ranked_positive_eligible(
+            miner_hotkeys, submission_times, ranking_scores
+        )
         rankings: Dict[str, Optional[int]] = {hk: None for hk in miner_hotkeys}
         for rank, hk in enumerate(ranked, start=1):
             rankings[hk] = rank
@@ -337,9 +511,23 @@ class ScoreTracker:
         validator_hotkey: str,
         miner_hotkeys: List[str],
         weights: Dict[str, float],
+        submission_times: Optional[Dict[str, float]] = None,
+        ranking_hotkeys: Optional[List[str]] = None,
+        ranking_scores: Optional[Dict[str, float]] = None,
     ) -> List[Dict[str, Any]]:
-        """Build the platform weight-history payload."""
-        rankings = self.get_rankings(miner_hotkeys)
+        """Build the platform weight-history payload.
+
+        ``miner_hotkeys`` remains the complete reporting population.  When
+        private candidate normalization is active, ``ranking_hotkeys`` is the
+        normalized subset that was actually eligible to occupy rank slots.
+        Excluded rows deliberately receive no detailed public reason here.
+        """
+        ranking_population = (
+            miner_hotkeys if ranking_hotkeys is None else ranking_hotkeys
+        )
+        rankings = self.get_rankings(
+            ranking_population, submission_times, ranking_scores
+        )
 
         entries = []
         for hk in miner_hotkeys:

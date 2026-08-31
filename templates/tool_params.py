@@ -8,6 +8,7 @@ Each parameter includes:
 - min/max: for numeric types
 - flag_format: how to format the command-line flag
 """
+import math
 import re
 from datetime import datetime
 from typing import Dict, Any
@@ -919,7 +920,13 @@ def validate_and_build_flags(tool_name: str, tool_options: dict) -> dict:
     for param_name, param_value in tool_options.items():
         # Check if parameter is allowed
         if param_name not in params:
-            errors.append(f"Parameter '{param_name}' not in quality params whitelist")
+            # One unknown key invalidates the whole config, so the message
+            # says so rather than naming the key alone.
+            errors.append(
+                f"Parameter '{param_name}' not in quality params whitelist "
+                f"for {tool_name}; this rejects the ENTIRE config — remove or "
+                f"correct the key"
+            )
             continue
 
         param_def = params[param_name]
@@ -938,7 +945,9 @@ def validate_and_build_flags(tool_name: str, tool_options: dict) -> dict:
 
         # Validate by type
         if param_def["type"] == "int":
-            if not isinstance(param_value, int):
+            # bool subclasses int: check the exact type first so True is not
+            # accepted and formatted into the flag literally.
+            if type(param_value) is bool or not isinstance(param_value, int):
                 errors.append(f"Parameter '{param_name}' must be int, got {type(param_value)}")
                 continue
             if param_value < param_def["min"] or param_value > param_def["max"]:
@@ -946,8 +955,13 @@ def validate_and_build_flags(tool_name: str, tool_options: dict) -> dict:
                 continue
 
         elif param_def["type"] == "float":
-            if not isinstance(param_value, (int, float)):
+            if type(param_value) is bool or not isinstance(param_value, (int, float)):
                 errors.append(f"Parameter '{param_name}' must be float, got {type(param_value)}")
+                continue
+            # NaN compares False against both bounds, so the range check below
+            # would let it through.
+            if not math.isfinite(param_value):
+                errors.append(f"Parameter '{param_name}' value {param_value} is not a finite number")
                 continue
             if param_value < param_def["min"] or param_value > param_def["max"]:
                 errors.append(f"Parameter '{param_name}' value {param_value} out of range [{param_def['min']}, {param_def['max']}]")

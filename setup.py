@@ -560,7 +560,6 @@ class SetupWizard:
         # Check key packages
         packages = {
             "bittensor": "bittensor",
-            "torch": "torch",
             "numpy": "numpy",
             "pydantic": "pydantic",
             "dotenv": "python-dotenv",
@@ -585,14 +584,14 @@ class SetupWizard:
         self.console.print(f"  [yellow]Missing: {', '.join(missing)}[/]")
 
         # Warn if critical packages are missing
-        critical_missing = [p for p in missing if p in ("bittensor", "torch", "pysam")]
+        critical_missing = [p for p in missing if p in ("bittensor", "pysam")]
         if critical_missing:
             self.console.print(f"  [yellow]Critical packages missing: {', '.join(critical_missing)}[/]")
             self.console.print(f"  [dim]Your node will not be able to launch without these.[/]")
 
         self.console.print(
             "  [dim]Installing missing packages automatically. "
-            "This includes PyTorch (~2 GB) and may take 5-15 minutes...[/]"
+            "This may take a few minutes...[/]"
         )
         with self.console.status("[bold cyan]Installing Python dependencies...[/]", spinner="dots"):
             result = subprocess.run(

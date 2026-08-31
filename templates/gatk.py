@@ -10,7 +10,7 @@ import subprocess
 import time
 import os
 from .tool_params import validate_and_build_flags, validate_region
-from ._common import count_variants
+from ._common import container_name, count_variants, reap_container
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,12 @@ def variant_call(
     except (ValueError, OSError, AttributeError):
         auto_mem_gb = 2  # Conservative default
     memory_gb = config.get("memory_gb", auto_mem_gb)
+
+    # -Xmx sizes the Java heap only; metaspace, thread stacks and native
+    # PairHMM buffers live outside it, so the heap must stay below the
+    # container's --memory limit. Sized in MB so small containers keep a
+    # usable heap.
+    heap_mb = max(512, int(memory_gb * 1024 * 0.8))
 
     bam_path = Path(bam_path).resolve()
     reference_path = Path(reference_path).resolve()
@@ -62,14 +68,16 @@ def variant_call(
 
     start_time = time.time()
 
+    # Named so a timed-out container can actually be removed; see reap_container.
+    cname = container_name("gatk")
     cmd = [
-        "docker", "run", "--rm",
+        "docker", "run", "--rm", "--name", cname,
         f"--cpus={threads}", f"--memory={memory_gb}g",
         "-v", f"{bam_path.parent}:/data/bams:ro",
         "-v", f"{reference_path.parent}:/data/reference:ro",
         "-v", f"{output_vcf_path.parent}:/data/output",
         "broadinstitute/gatk:4.5.0.0",
-        "gatk", "--java-options", f"-Xmx{memory_gb}g", "HaplotypeCaller",
+        "gatk", "--java-options", f"-Xmx{heap_mb}m", "HaplotypeCaller",
         "-R", f"/data/reference/{reference_path.name}",
         "-I", f"/data/bams/{bam_path.name}",
         "-O", f"/data/output/{output_vcf_path.name}",
@@ -85,7 +93,15 @@ def variant_call(
         elapsed = time.time() - start_time
 
         if result.returncode != 0:
-            error = result.stderr[-500:] if result.stderr else "GATK failed"
+            # Keep both ends of stderr: GATK echoes its full java command line
+            # there, so a tail-only slice may hold nothing else.
+            _err = (result.stderr or "").strip()
+            if _err:
+                error = (_err if len(_err) <= 1200
+                         else _err[:700] + "\n...[truncated]...\n" + _err[-500:])
+            else:
+                error = "GATK failed"
+            error = f"rc={result.returncode} {error}"
             if "Cannot connect to the Docker daemon" in str(result.stderr):
                 error = "Docker not running"
             elif "Unable to find image" in str(result.stderr):
@@ -102,8 +118,10 @@ def variant_call(
         }
 
     except subprocess.TimeoutExpired:
+        reap_container(cname)
         return {"success": False, "variant_count": 0, "error": f"Timeout after {timeout}s"}
     except FileNotFoundError:
         return {"success": False, "variant_count": 0, "error": "Docker not found"}
     except Exception as e:
+        reap_container(cname)
         return {"success": False, "variant_count": 0, "error": str(e)}

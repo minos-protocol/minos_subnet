@@ -23,12 +23,31 @@ except ImportError:
 # presigned URLs served for BAMs) land cleanly instead of being bot-blocked.
 USER_AGENT = "minos-installer/0.1 (+https://github.com/minos-protocol/minos_subnet)"
 
+# Per-socket-operation timeout for downloads. Bounds a stalled connection
+# without capping total transfer time for a large BAM.
+DOWNLOAD_SOCKET_TIMEOUT = float(os.getenv("MINOS_DOWNLOAD_SOCKET_TIMEOUT", "60"))
+
 try:
     from tqdm import tqdm
     HAS_TQDM = True
 except ImportError:
     HAS_TQDM = False
     logger.warning("tqdm not installed - progress bars disabled")
+
+
+def _partial_path(local_path: Path) -> Path:
+    """Sibling scratch path a download is written to before it is committed."""
+    return local_path.with_name(local_path.name + ".part")
+
+
+def _discard_partial(tmp_path: Path) -> None:
+    """Remove a partial download so no later run can mistake it for a cache hit."""
+    try:
+        tmp_path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        logger.warning(f"Could not remove partial download {tmp_path}: {e}")
 
 
 def download_file(
@@ -59,9 +78,21 @@ def download_file(
     # Create directory if needed
     local_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Write to a sibling .part and os.replace() it into position only on
+    # success, so the final path never holds the bytes of a failed transfer:
+    # round paths are deterministic and the cache check is exists + non-empty,
+    # which a truncated file would satisfy.
+    tmp_path = _partial_path(local_path)
+    _discard_partial(tmp_path)
+
     # Handle s3:// URIs
     if url.startswith("s3://"):
-        return _download_from_s3_uri(url, local_path, show_progress)
+        result = _download_from_s3_uri(url, tmp_path, show_progress)
+        if result is None:
+            _discard_partial(tmp_path)
+            return None
+        os.replace(tmp_path, local_path)
+        return local_path
 
     # Handle HTTP/HTTPS URLs (including S3 presigned URLs)
     # Use raw urllib with Accept-Encoding: identity to prevent auto-decompression
@@ -74,8 +105,18 @@ def download_file(
         request.add_header('Accept-Encoding', 'identity')
         request.add_header('User-Agent', USER_AGENT)
 
-        with urllib.request.urlopen(request) as response:
-            total = int(response.headers.get('Content-Length', 0)) or file_size or 0
+        # An explicit timeout is required: urlopen blocks indefinitely on a
+        # blackholed endpoint and this runs synchronously inside the round loop.
+        # It bounds each socket operation, not the whole transfer, so a slow but
+        # progressing multi-GB BAM is unaffected.
+        with urllib.request.urlopen(request, timeout=DOWNLOAD_SOCKET_TIMEOUT) as response:
+            declared = response.headers.get('Content-Length')
+            try:
+                expected_bytes = int(declared) if declared is not None else None
+            except (TypeError, ValueError):
+                expected_bytes = None
+            total = (expected_bytes or 0) or file_size or 0
+            written = 0
 
             if show_progress and HAS_TQDM and total > 0:
                 logger.info(f"Downloading {url} ({_format_size(total)})")
@@ -88,27 +129,42 @@ def download_file(
                     bar_format='{desc}: {percentage:3.0f}%|{bar:20}| {n_fmt}/{total_fmt} [{rate_fmt}]',
                     ncols=80
                 ) as pbar:
-                    with open(local_path, 'wb') as f:
+                    with open(tmp_path, 'wb') as f:
                         while True:
                             chunk = response.read(8192)
                             if not chunk:
                                 break
                             f.write(chunk)
+                            written += len(chunk)
                             pbar.update(len(chunk))
             else:
                 logger.info(f"Downloading {url} to {local_path}")
-                with open(local_path, 'wb') as f:
+                with open(tmp_path, 'wb') as f:
                     while True:
                         chunk = response.read(8192)
                         if not chunk:
                             break
                         f.write(chunk)
+                        written += len(chunk)
 
+        # http.client does not raise on a premature close mid-body:
+        # HTTPResponse.read(amt) closes the connection instead of raising
+        # IncompleteRead, so the read loop simply sees b'' and exits. Compare
+        # the byte count against Content-Length or a truncated body reads as a
+        # successful download.
+        if expected_bytes is not None and written != expected_bytes:
+            raise IOError(
+                f"Incomplete download: got {written} bytes, "
+                f"Content-Length advertised {expected_bytes}"
+            )
+
+        os.replace(tmp_path, local_path)
         logger.info(f"Downloaded to {local_path}")
         return local_path
 
     except Exception as e:
         logger.error(f"Failed to download {url}: {e}")
+        _discard_partial(tmp_path)
         return None
 
 
@@ -288,6 +344,29 @@ def download_file_with_fallback(
     return None
 
 
+def _normalised_digest(value) -> Optional[str]:
+    """A comparable hex digest, or None when no usable digest was supplied.
+
+    A blank or placeholder value is treated as absent rather than as a digest
+    that can never match.
+    """
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    return text or None
+
+
+def enforce_download_sha256() -> bool:
+    """Whether a digest mismatch rejects the file.
+
+    Off by default: the published digest has not been exercised on the fresh
+    download path, and enforcing it everywhere at once would fail every round
+    for every node if any published value is wrong. Enable once logs confirm
+    digests match on live rounds for both storage backends.
+    """
+    return os.getenv("MINOS_ENFORCE_DOWNLOAD_SHA256", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def download_file_verified(
     url: str,
     local_path: Path,
@@ -317,7 +396,7 @@ def download_file_verified(
             return local_path
 
         actual_hash = compute_sha256(local_path)
-        if actual_hash == expected_sha256:
+        if actual_hash == _normalised_digest(expected_sha256):
             logger.info(f"Cache hit (SHA256 verified): {local_path.name}")
             return local_path
         else:
@@ -326,4 +405,26 @@ def download_file_verified(
                 f"(expected={expected_sha256[:16]}..., actual={actual_hash[:16]}...). Re-downloading."
             )
 
-    return download_file(url, local_path, use_cache=False, show_progress=show_progress)
+    result = download_file(url, local_path, use_cache=False, show_progress=show_progress)
+    if result is None:
+        return None
+
+    # Verify the freshly downloaded bytes too, not just the cache branch.
+    expected = _normalised_digest(expected_sha256)
+    if expected:
+        actual_hash = compute_sha256(result)
+        if actual_hash != expected:
+            if enforce_download_sha256():
+                logger.error(
+                    f"SHA256 mismatch after downloading {local_path.name} "
+                    f"(expected={expected[:16]}..., actual={actual_hash[:16]}...)"
+                )
+                _discard_partial(result)
+                return None
+            logger.warning(
+                f"SHA256 mismatch after downloading {local_path.name} "
+                f"(expected={expected[:16]}..., actual={actual_hash[:16]}...). "
+                f"Accepting the file; set MINOS_ENFORCE_DOWNLOAD_SHA256 to reject."
+            )
+
+    return result
