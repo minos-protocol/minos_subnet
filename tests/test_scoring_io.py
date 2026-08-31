@@ -273,10 +273,13 @@ class TestSliceTruthVcf:
             result.stderr = ""
             return result
 
-        with patch("utils.scoring.subprocess.run", side_effect=fake_run):
+        with patch("utils.scoring.subprocess.run", side_effect=fake_run), \
+             patch("pysam.tabix_index") as mock_tabix:
             assert slice_truth_vcf(source, target, "chr20:10000000-10010000")
 
-        assert calls[0] == ["tabix", "-p", "vcf", "-f", str(source.resolve())]
+        # Defensive reindex now uses pysam's bundled tabix, not the `tabix` CLI.
+        mock_tabix.assert_called_once()
+        assert mock_tabix.call_args[0][0] == str(source.resolve())
         assert any(cmd[0] == "docker" and "view" in cmd for cmd in calls)
         assert any(cmd[0] == "docker" and "index" in cmd for cmd in calls)
 

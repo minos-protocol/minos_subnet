@@ -7,6 +7,7 @@ Validates variant calls against ground truth and computes accuracy metrics.
 import csv
 import gzip
 import math
+import os
 import subprocess
 import traceback
 from typing import Any, Dict, List, Optional
@@ -87,22 +88,14 @@ def slice_truth_vcf(source_vcf: Path, target_vcf: Path, region: str) -> bool:
         if not index_csi.exists() and not index_tbi.exists():
             logger.warning(f"VCF not indexed, extraction will be slow")
 
+        # Defensive reindex so slicing sees a fresh .tbi. Uses pysam's bundled
+        # htslib rather than a `tabix` CLI, which is not guaranteed on PATH.
         try:
-            reindex = subprocess.run(
-                ["tabix", "-p", "vcf", "-f", str(source_vcf)],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            if reindex.returncode != 0:
-                logger.warning(
-                    f"tabix reindex failed for {source_vcf.name} "
-                    f"(continuing): {reindex.stderr.strip()}"
-                )
-        except FileNotFoundError:
-            logger.warning("tabix not on PATH; skipping defensive reindex")
-        except subprocess.TimeoutExpired:
-            logger.warning(f"tabix reindex timeout for {source_vcf.name}")
+            if str(source_vcf).endswith(".gz"):
+                import pysam
+                pysam.tabix_index(str(source_vcf), preset="vcf", force=True)
+        except Exception as e:
+            logger.warning(f"defensive reindex skipped for {source_vcf.name} (continuing): {e}")
 
         source_dir = source_vcf.parent
         target_dir = target_vcf.parent
@@ -362,10 +355,39 @@ def compute_synthetic_only_metrics(happy_vcf_path: str, mutations_vcf_path: str,
         return None
 
 
+# Overcall guardrail thresholds. These decide emitted scores, so they must be
+# identical across the fleet.
+OVERCALL_FP_PER_TARGET_MAX = 10.0
+OVERCALL_SNP_FP_PER_TARGET_MAX = 6.0
+OVERCALL_PENALTY_SLOPE = 4.0
+OVERCALL_PENALTY_MAX = 45.0
+
+
+def _env_flag(name: str) -> bool:
+    """True when the env var is set to 1/true/yes/on.
+
+    Single spelling of truthiness for every Minos flag; keep new flags on it.
+    """
+    return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def overcall_strict_enabled() -> bool:
+    """Whether the overcall guardrail fires on total FP rate alone.
+
+    Off by default. It affects only legacy v1 telemetry; emitted v2 consensus
+    scores do not use this guardrail.
+    """
+    return _env_flag("MINOS_OVERCALL_STRICT")
+
+
 def parse_region_overcall_metrics(happy_vcf_path: str,
                                   synthetic_truth_total: float,
                                   synthetic_snp_truth_total: float) -> Optional[Dict[str, float]]:
-    """Count full-region query false positives for the overcall guardrail."""
+    """Count full-region query false positives for the overcall guardrail.
+
+    Returns the FP counts plus ``overcall_penalty``, which
+    AdvancedScorer.compute_score subtracts from the final score.
+    """
     try:
         vcf_path = Path(happy_vcf_path)
         if not vcf_path.exists():
@@ -400,15 +422,36 @@ def parse_region_overcall_metrics(happy_vcf_path: str,
         region_fp_total = counts['region_fp_snp'] + counts['region_fp_indel']
         fp_per_target = region_fp_total / max(float(synthetic_truth_total), 1.0)
         snp_fp_per_target = counts['region_fp_snp'] / max(float(synthetic_snp_truth_total), 1.0)
-        if fp_per_target > 10.0 and snp_fp_per_target > 6.0:
-            overcall_penalty = min(45.0, (fp_per_target - 10.0) * 4.0)
+        over_total = fp_per_target > OVERCALL_FP_PER_TARGET_MAX
+        over_snp = snp_fp_per_target > OVERCALL_SNP_FP_PER_TARGET_MAX
+        # Strict mode requires only the total rate to be exceeded; the default
+        # also requires the SNP rate. Either way the setting must be uniform
+        # across the fleet, since it changes emitted v1 scores.
+        if overcall_strict_enabled():
+            triggered = over_total
+        else:
+            triggered = over_total and over_snp
+        if triggered:
+            overcall_penalty = min(
+                OVERCALL_PENALTY_MAX,
+                (fp_per_target - OVERCALL_FP_PER_TARGET_MAX) * OVERCALL_PENALTY_SLOPE,
+            )
         else:
             overcall_penalty = 0.0
 
         logger.info(f"Overcall guardrail: region_fp={region_fp_total}, "
                     f"fp_per_target={fp_per_target:.2f}, "
                     f"snp_fp_per_target={snp_fp_per_target:.2f}, "
+                    f"strict={overcall_strict_enabled()}, "
                     f"penalty={overcall_penalty:.2f}")
+        if over_total and not over_snp and not overcall_strict_enabled():
+            logger.warning(
+                f"Overcall guardrail not triggered: fp_per_target="
+                f"{fp_per_target:.2f} over {OVERCALL_FP_PER_TARGET_MAX}, "
+                f"snp_fp_per_target={snp_fp_per_target:.2f} under "
+                f"{OVERCALL_SNP_FP_PER_TARGET_MAX}. Set MINOS_OVERCALL_STRICT "
+                f"to require the total rate alone."
+            )
 
         return {
             'region_fp_snp': float(counts['region_fp_snp']),
@@ -794,10 +837,22 @@ class HappyScorer:
                         logger.warning("hap.py CSV has no headers!")
 
                     def safe_float(val):
+                        """Parse a hap.py CSV cell; non-finite reads as absent.
+
+                        hap.py emits 'inf' for a ratio with a zero denominator,
+                        which must not reach the score arithmetic.
+                        """
                         try:
-                            return float(val) if val and val != 'nan' else 0.0
+                            f = float(val) if val and val != 'nan' else 0.0
                         except (ValueError, TypeError):
                             return 0.0
+                        if not math.isfinite(f):
+                            logger.warning(
+                                f"hap.py reported a non-finite metric ({val!r}); "
+                                f"treating as absent"
+                            )
+                            return 0.0
+                        return f
 
                     rows_parsed = 0
                     for row in reader:
@@ -863,6 +918,10 @@ class HappyScorer:
                 # Completeness, and Quality components of AdvancedScorer.
                 # Parse the hap.py output VCF to get metrics from only assessed variants.
                 happy_vcf = Path(f"{output_prefix}.vcf.gz")
+                # Hand the annotated VCF back to the caller. v2 needs per-variant
+                # records from it, and every caller otherwise has to rebuild this
+                # path from a naming convention it does not own.
+                happy_results['happy_vcf_path'] = str(happy_vcf)
                 assessed = parse_happy_vcf_assessed_metrics(str(happy_vcf))
                 if assessed:
                     old_qt_snp = happy_results.get('query_total_snp', 0)
@@ -916,6 +975,140 @@ class HappyScorer:
     def _get_zero_scores(self) -> Optional[Dict[str, float]]:
         """Return no score so the validator can seek peer backfill."""
         return None
+
+
+# ---------------------------------------------------------------------------
+# Difficulty-weighted scoring (v2)
+#
+# v1 weights core F1 by truth counts, so the most numerous class dominates; v2
+# weights by intrinsic difficulty instead.
+#
+# The weights are fixed constants and must not be derived from observed results:
+# a validator scores only its assigned subset, so field-derived weights would
+# make two honest validators disagree about the same submission. Classes are
+# defined by intrinsic properties of the truth variant only — type, indel
+# length, zygosity.
+DIFFICULTY_WEIGHTS = {
+    "snp_hom":     0.02,
+    "snp_het":     0.18,
+    "indel_1bp":   0.40,
+    "indel_2_3bp": 0.16,
+    "indel_4_7bp": 0.10,
+    "indel_8bp":   0.14,
+}
+
+# Plausibility is a gate, not points: a callset can fail it but cannot earn by
+# it. The bounds are deliberately loose — they reject malformed output and are
+# not a tuning target.
+GATE_TITV_MAX_DELTA = 0.6
+GATE_HETHOM_MAX_DELTA = 1.5
+
+# Germline precision decay: exp(-fp_per_target / GERMLINE_FP_SCALE). Must stay
+# strictly monotone in fp_per_target — every false positive costs something, at
+# every rate.
+GERMLINE_FP_SCALE = 8.0
+
+V2_CORE_WEIGHT = 0.70
+V2_GERMLINE_WEIGHT = 0.30
+
+
+def _is_hom_alt(gt: str) -> bool:
+    """True for any homozygous-ALT genotype, including multi-allelic 2/2, 3/3."""
+    parts = [p for p in str(gt or "").replace("|", "/").split("/") if p != ""]
+    if len(parts) < 2 or not all(p.isdigit() for p in parts):
+        return False
+    return len(set(parts)) == 1 and parts[0] != "0"
+
+
+def classify_variant_difficulty(record: Dict[str, Any]) -> str:
+    """Bucket one truth variant by intrinsic difficulty.
+
+    Uses only properties of the variant itself, never of the callset or the
+    field, so every validator classifies identically.
+
+    Zygosity must come from ``truth_genotype``: an FN has no ALT call to be
+    zygous about, so reading the call would file every missed hom variant as
+    het. The call is a fallback only for records with no truth genotype (FPs).
+    """
+    ref = str(record.get("ref") or "")
+    alt = str(record.get("alt") or "")
+    indel_len = abs(len(ref) - len(alt))
+    # Equal-length alleles are a substitution (MNP) whatever the record is typed
+    # as, so they fall through to the zygosity branch rather than the length
+    # ladder below.
+    if indel_len > 0:
+        if indel_len >= 8:
+            return "indel_8bp"
+        if indel_len >= 4:
+            return "indel_4_7bp"
+        if indel_len >= 2:
+            return "indel_2_3bp"
+        return "indel_1bp"
+    gt = str(record.get("truth_genotype") or record.get("called_genotype") or "")
+    return "snp_hom" if _is_hom_alt(gt) else "snp_het"
+
+
+def difficulty_class_counts(variant_records) -> Dict[str, Dict[str, int]]:
+    """Per-class TP/FN/FP counts from hap.py per-variant records."""
+    counts = {k: {"tp": 0, "fn": 0, "fp": 0} for k in DIFFICULTY_WEIGHTS}
+    for rec in variant_records or []:
+        cls = rec.get("classification")
+        if cls not in ("TP", "FN", "FP"):
+            continue
+        key = classify_variant_difficulty(rec)
+        if key in counts:
+            counts[key][cls.lower()] += 1
+    return counts
+
+
+def difficulty_weighted_f1(class_counts: Dict[str, Dict[str, int]]) -> Optional[float]:
+    """F1 per class, combined by fixed difficulty weight.
+
+    A class with no truth variants in this round is dropped and the remaining
+    weights renormalised, so a region containing no long indels is not scored as
+    if the miner had failed them.
+    """
+    if not class_counts:
+        return None
+    total_w = 0.0
+    acc = 0.0
+    for key, w in DIFFICULTY_WEIGHTS.items():
+        c = class_counts.get(key)
+        if not c:
+            continue
+        tp, fn, fp = c.get("tp", 0), c.get("fn", 0), c.get("fp", 0)
+        if tp + fn <= 0:
+            # Absent truth drops the class only when nothing was called in it;
+            # otherwise it stays in at F1 0 so its FPs are still priced.
+            if fp <= 0:
+                continue
+            acc += w * 0.0        # all calls in this class are wrong
+            total_w += w
+            continue
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn)
+        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+        acc += w * f1
+        total_w += w
+    if total_w <= 0:
+        return None
+    return acc / total_w
+
+
+def plausibility_gate(metrics: Dict[str, float]) -> bool:
+    """False when the callset is malformed enough to disqualify.
+
+    Only judges a ratio present on both sides; an undefined ratio neither passes
+    nor fails, and earns nothing.
+    """
+    g = metrics.get
+    if g("titv_truth_snp", 0) > 0 and g("titv_query_snp", 0) > 0:
+        if abs(g("titv_query_snp", 0) - g("titv_truth_snp", 0)) > GATE_TITV_MAX_DELTA:
+            return False
+    if g("hethom_truth_snp", 0) > 0 and g("hethom_query_snp", 0) > 0:
+        if abs(g("hethom_query_snp", 0) - g("hethom_truth_snp", 0)) > GATE_HETHOM_MAX_DELTA:
+            return False
+    return True
 
 
 class AdvancedScorer:
@@ -989,7 +1182,24 @@ class AdvancedScorer:
         core_component = AdvancedScorer.emphasis(weighted_f1, gamma=0.5)
 
         # Component 2: Completeness (15% weight) - recall + coverage
-        avg_recall = (recall_snp + recall_indel) / 2
+        #
+        # Truth-weighted like core F1 above. A class with no truth variants is
+        # skipped, not scored as 0% recall.
+        recall_num = 0.0
+        recall_den = 0.0
+        if truth_total_snp > 0:
+            recall_num += recall_snp * truth_total_snp
+            recall_den += truth_total_snp
+        if truth_total_indel > 0:
+            recall_num += recall_indel * truth_total_indel
+            recall_den += truth_total_indel
+        avg_recall = (recall_num / recall_den) if recall_den > 0 else 0.0
+        # coverage is effectively constant: both metric producers deliberately
+        # set frac_na to 0.0. hap.py's Frac_NA spans the whole query VCF, and
+        # miners submit whole-chromosome callsets judged against a small eval
+        # region, so feeding it back would penalise breadth rather than
+        # inaccuracy. Redefining coverage over assessed variants only would move
+        # every live score — a weighting decision, not a cleanup.
         frac_na = max(frac_na_snp, frac_na_indel)
         coverage = 1.0 - frac_na
         completeness_component = (
@@ -1014,22 +1224,44 @@ class AdvancedScorer:
         titv_penalties = []
         hethom_penalties = []
 
-        if titv_truth_snp > 0 and titv_query_snp > 0:
+        # `> 0` alone is not enough: a non-finite ratio passes it and then turns
+        # the arithmetic below to nan. These values reach here from several
+        # readers, so guard at the point of use.
+        def _usable_ratio(*values) -> bool:
+            return all(math.isfinite(v) and v > 0 for v in values)
+
+        if _usable_ratio(titv_truth_snp, titv_query_snp):
             titv_penalties.append(
                 AdvancedScorer.ratio_penalty(titv_query_snp - titv_truth_snp, 0.1)
             )
 
-        if hethom_truth_snp > 0 and hethom_query_snp > 0:
+        if _usable_ratio(hethom_truth_snp, hethom_query_snp):
             hethom_penalties.append(
                 AdvancedScorer.ratio_penalty(hethom_query_snp - hethom_truth_snp, 0.15)
             )
-        if hethom_truth_indel > 0 and hethom_query_indel > 0:
+        if _usable_ratio(hethom_truth_indel, hethom_query_indel):
             hethom_penalties.append(
                 AdvancedScorer.ratio_penalty(hethom_query_indel - hethom_truth_indel, 0.15)
             )
 
-        titv_component = sum(titv_penalties) / len(titv_penalties) if titv_penalties else 1.0
-        hethom_component = sum(hethom_penalties) / len(hethom_penalties) if hethom_penalties else 1.0
+        # Full marks only when the TRUTH ratio is also unavailable, i.e. there
+        # is nothing to measure against. A usable truth ratio with no query
+        # ratio is a degenerate callset and scores 0.
+        def _component(penalties, truth_ratios) -> float:
+            if penalties:
+                return sum(penalties) / len(penalties)
+            if any(math.isfinite(t) and t > 0 for t in truth_ratios):
+                logger.warning(
+                    "Quality: truth has a usable ratio but the query does not; "
+                    "scoring the component 0 rather than awarding full marks"
+                )
+                return 0.0
+            return 1.0
+
+        titv_component = _component(titv_penalties, (titv_truth_snp,))
+        hethom_component = _component(
+            hethom_penalties, (hethom_truth_snp, hethom_truth_indel)
+        )
         quality_component = (titv_component + hethom_component) / 2.0
 
         # Final weighted score (60/15/15/10)
@@ -1041,7 +1273,76 @@ class AdvancedScorer:
         )
 
         overcall_penalty = metrics.get('overcall_penalty', 0.0)
-        return max(0.0, final_score - overcall_penalty)
+        result = final_score - overcall_penalty
+
+        # max(0.0, nan) is 0.0, so a non-finite score would be emitted as a
+        # legitimate zero. It is a bug in this function; raise instead.
+        if not math.isfinite(result):
+            logger.error(
+                f"AdvancedScorer produced a non-finite score "
+                f"(core={core_component}, completeness={completeness_component}, "
+                f"fp={fp_component}, quality={quality_component}, "
+                f"overcall={overcall_penalty}); refusing to emit it as 0.0"
+            )
+            raise ValueError("AdvancedScorer produced a non-finite score")
+
+        return max(0.0, result)
+
+    @staticmethod
+    def compute_score_v2(
+        metrics: Dict[str, float],
+        class_counts: Optional[Dict[str, Dict[str, int]]] = None,
+    ) -> Optional[float]:
+        """Difficulty-weighted score, or None when it cannot be computed.
+
+            score = 100 * (0.70*core + 0.30*germline)   , gated
+
+        Two direct measures against truth over two different populations, so
+        neither double-counts the other. v1's completeness, FP-rate and quality
+        components are deliberately absent: the first restates core recall, the
+        second reduced in practice to a call-count proxy, and the third is now
+        the plausibility gate.
+
+        Returns None rather than a wrong number when per-variant records or the
+        germline FP measurement are unavailable. The caller does NOT fall back
+        to v1 on None — v1 and v2 are different scales, so it skips the miner
+        for that round instead of mixing them in one ranking.
+        """
+        core = difficulty_weighted_f1(class_counts) if class_counts else None
+        if core is None:
+            return None
+
+        fp_per_target = metrics.get('fp_per_target')
+        if fp_per_target is None:
+            # Without a germline FP measurement precision cannot be priced;
+            # decline rather than score on core alone.
+            return None
+        germline = math.exp(-max(0.0, float(fp_per_target)) / GERMLINE_FP_SCALE)
+
+        if not plausibility_gate(metrics):
+            return 0.0
+
+        return 100.0 * (V2_CORE_WEIGHT * core + V2_GERMLINE_WEIGHT * germline)
+
+
+def _representative_alt(alts, truth_genotype, called_genotype) -> Optional[str]:
+    """The ALT a benchmark decision is about, at a possibly multi-allelic site.
+
+    Prefers the allele the truth genotype selects, then the call's, then the
+    first. Reads only the record itself, so every validator agrees.
+    """
+    alts = list(alts or [])
+    if not alts:
+        return None
+    if len(alts) == 1:
+        return alts[0]
+    for gt in (truth_genotype, called_genotype):
+        for token in str(gt or "").replace("|", "/").split("/"):
+            if token.isdigit():
+                idx = int(token)
+                if 1 <= idx <= len(alts):     # 0 is REF, alleles are 1-based
+                    return alts[idx - 1]
+    return alts[0]
 
 
 def parse_happy_vcf(vcf_path: str, truth_vcf_path: str = None) -> List[Dict[str, Any]]:
@@ -1063,9 +1364,13 @@ def parse_happy_vcf(vcf_path: str, truth_vcf_path: str = None) -> List[Dict[str,
                         variants are synthetic (have SYNTHETIC INFO flag)
 
     Returns:
-        List of dicts with keys: chrom, pos, ref, alt, variant_type,
-        classification, quality, filter_status, called_genotype,
-        read_depth, allele_depth, genotype_quality, is_synthetic
+        One dict per benchmark decision (NOT per ALT allele) with keys: chrom,
+        pos, ref, alt, alt_alleles, variant_type, classification, quality,
+        filter_status, called_genotype, truth_genotype, read_depth,
+        allele_depth, genotype_quality, is_synthetic.
+
+        ``truth_genotype`` is the zygosity source for scoring; ``called_genotype``
+        describes what the miner called and is absent for an FN by definition.
     """
     results = []
     vcf_path = str(vcf_path)
@@ -1076,17 +1381,29 @@ def parse_happy_vcf(vcf_path: str, truth_vcf_path: str = None) -> List[Dict[str,
         logger.warning("pysam not installed, cannot parse hap.py VCF for variant-level results")
         return results
 
-    # Build set of synthetic positions from truth VCF if provided
+    # Build set of synthetic positions from truth VCF if provided.
+    # Test the INFO keys, not str(rec.info): pysam's VariantRecordInfo has no
+    # string form containing the flag names.
     synthetic_positions = set()
     if truth_vcf_path:
         try:
             truth_vcf = pysam.VariantFile(str(truth_vcf_path))
             for rec in truth_vcf:
-                info_str = str(rec.info) if rec.info else ""
-                if "SYNTHETIC" in info_str:
+                try:
+                    keys = set(rec.info.keys())
+                except Exception:  # noqa: BLE001 - malformed INFO on one record
+                    continue
+                if "SYNTHETIC" in keys:
                     synthetic_positions.add((rec.chrom, rec.pos))
             truth_vcf.close()
             logger.info(f"Loaded {len(synthetic_positions)} synthetic positions from truth VCF")
+            if not synthetic_positions:
+                logger.warning(
+                    f"No SYNTHETIC-flagged variants found in {truth_vcf_path}; "
+                    f"is_synthetic will be False for every record. If this truth "
+                    f"VCF is expected to carry synthetic variants, the flag name "
+                    f"or the file is wrong."
+                )
         except Exception as e:
             logger.warning(f"Could not parse truth VCF for synthetic flags: {e}")
 
@@ -1144,27 +1461,58 @@ def parse_happy_vcf(vcf_path: str, truth_vcf_path: str = None) -> List[Dict[str,
                     if gq is not None:
                         genotype_quality = float(gq)
 
+                # Zygosity for scoring comes from TRUTH: an FN has no call to
+                # be zygous about. See classify_variant_difficulty.
+                truth_sample = record.samples.get("TRUTH")
+                truth_genotype = None
+                if truth_sample is not None:
+                    tgt = truth_sample.get("GT", None)
+                    if tgt is not None:
+                        truth_genotype = "/".join(
+                            str(a) if a is not None else "." for a in tgt
+                        )
+
                 # Determine if variant is synthetic
                 is_synthetic = None
                 if synthetic_positions:
                     is_synthetic = (record.chrom, record.pos) in synthetic_positions
 
-                for alt in record.alts or []:
-                    results.append({
-                        "chrom": record.chrom,
-                        "pos": record.pos,
-                        "ref": record.ref,
-                        "alt": alt,
-                        "variant_type": bvt if bvt in ("SNP", "INDEL") else "SNP",
-                        "classification": bd,
-                        "quality": float(record.qual) if record.qual is not None else None,
-                        "filter_status": ",".join(record.filter.keys()) if record.filter else None,
-                        "called_genotype": called_genotype,
-                        "read_depth": read_depth,
-                        "allele_depth": allele_depth,
-                        "genotype_quality": genotype_quality,
-                        "is_synthetic": is_synthetic,
-                    })
+                # One row per benchmark decision, not per ALT: BD/BVT describe
+                # the whole record, so expanding over record.alts would count a
+                # single TP/FP/FN once per allele. The representative allele is
+                # the one the genotype selects, so indel length is measured
+                # against it; the rest are kept in alt_alleles.
+                alts = list(record.alts or [])
+                alt_repr = _representative_alt(alts, truth_genotype, called_genotype)
+                if bvt not in ("SNP", "INDEL"):
+                    # Infer rather than coerce to SNP: SNP is the lowest-weighted
+                    # v2 class, so a parsing surprise must not discount itself.
+                    inferred = "INDEL" if len(str(record.ref or "")) != len(str(alt_repr or "")) else "SNP"
+                    logger.warning(
+                        f"Unrecognised BVT {bvt!r} at {record.chrom}:{record.pos}; "
+                        f"inferred {inferred} from alleles"
+                    )
+                    variant_type = inferred
+                else:
+                    variant_type = bvt
+
+                results.append({
+                    "chrom": record.chrom,
+                    "pos": record.pos,
+                    "ref": record.ref,
+                    "alt": alt_repr,
+                    "alt_alleles": ",".join(alts) if len(alts) > 1 else None,
+                    "variant_type": variant_type,
+                    "classification": bd,
+                    "quality": float(record.qual) if record.qual is not None else None,
+                    "filter_status": ",".join(record.filter.keys()) if record.filter else None,
+                    "called_genotype": called_genotype,
+                    "truth_genotype": truth_genotype,
+                    "read_depth": read_depth,
+                    "allele_depth": allele_depth,
+                    "genotype_quality": genotype_quality,
+                    "is_synthetic": is_synthetic,
+                })
 
         logger.info(f"Parsed {len(results)} variant-level results from hap.py VCF")
     except Exception as e:
