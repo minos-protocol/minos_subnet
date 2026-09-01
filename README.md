@@ -527,6 +527,8 @@ The Minos Platform is a hosted service at `https://api.theminos.ai` that handles
 | `POST /v2/get-backfill-scores`  | Validator | Fetch peer scores after scoring window closes  |
 | `POST /v2/submit-weight-history`| Validator | Submit round scores, eligibility, and weights   |
 | `POST /v2/get-validator-state`  | Validator | Recover round score state after validator restart |
+| `POST /v2/canonical-ranking`    | Validator | Cross-validator ranking, used to break a tie at the top |
+| `POST /v2/owner-map`            | Validator | Fallback ownership map, only when `reward_normalization` is on and the chain read failed |
 | `GET /scoring/network-config`   | Both      | Reward policy and `scoring_version` — which scorer the network uses |
 
 ### Storage Backends

@@ -178,10 +178,23 @@ class CommitmentLedger:
             pass
 
     def find(self, round_id: str, hotkey: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Most recent entry for a round, for opening a commitment later."""
+        """Everything known about a round's commitment, for opening it later.
+
+        The ledger is append-only and a commitment is written in two parts: the
+        nonce and config when it is built, then the block once it is published.
+        Returning only the LAST matching line therefore returned the publication
+        record -- which carries no nonce and no config, and so cannot open the
+        commitment it describes.
+
+        Matching entries are merged in file order instead, so later fields
+        (block, published) overlay earlier ones (nonce, tool_config) and the
+        result is the complete record. A later None does not erase a known
+        value: the publication entry writes ``block`` and the build entry writes
+        ``block: None``, and the ordering must not depend on which came last.
+        """
         if not self.path.exists():
             return None
-        found = None
+        merged: Optional[Dict[str, Any]] = None
         with open(self.path, "r", encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
@@ -195,5 +208,10 @@ class CommitmentLedger:
                     continue
                 if hotkey and entry.get("hotkey") != hotkey:
                     continue
-                found = entry
-        return found
+                if merged is None:
+                    merged = dict(entry)
+                    continue
+                for k, v in entry.items():
+                    if v is not None or k not in merged:
+                        merged[k] = v
+        return merged

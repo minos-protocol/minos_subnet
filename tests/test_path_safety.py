@@ -14,7 +14,6 @@ Also covers the spec-version packing published on chain as ``version_key``.
 
 import asyncio
 import importlib
-import re
 import sys
 import types
 
@@ -347,8 +346,12 @@ class TestMinerExecuteTemplate:
 
 
 class TestSpecVersionPacking:
-    """version_key is published on chain; a single decimal digit per field made
-    minor 10 collide with the next major (0.10.0 and 1.0.0 both packed to 100)."""
+    """version_key is published on chain and compared against the subnet's
+    WeightsVersionKey hyperparameter, which the chain rejects a validator for
+    falling below. The packing here must stay in the scale that hyperparameter
+    was set in -- widening a field without raising it in the same change puts
+    the two out of step, and raising it to match locks out every validator
+    still on the old packing at once."""
 
     def _pack(self, version):
         parts = version.split(".")
@@ -358,18 +361,26 @@ class TestSpecVersionPacking:
     def test_current_version_matches_the_packing(self):
         assert __SPEC_VERSION__ == self._pack(MINOS_SPEC_VERSION)
 
-    def test_minor_ten_no_longer_collides_with_next_major(self):
-        assert self._pack("0.10.0") != self._pack("1.0.0")
-        assert self._pack("0.10.0") < self._pack("1.0.0")
+    def test_the_packed_key_clears_the_subnet_hyperparameter(self):
+        """The chain refuses a validator whose version_key is below the
+        subnet's WeightsVersionKey. That value is set in this same scale, so
+        the packed key must clear it -- and raising the hyperparameter to this
+        release's value is what later retires older validators."""
+        assert __SPEC_VERSION__ == 30
+        assert __SPEC_VERSION__ >= 20, "below the deployed WeightsVersionKey"
 
-    def test_packing_is_strictly_ordered(self):
-        versions = [
-            "0.0.1", "0.0.9", "0.0.10", "0.1.0", "0.2.0",
-            "0.9.999", "0.10.0", "0.99.0", "0.999.999", "1.0.0", "1.0.1", "2.0.0",
-        ]
+    def test_packing_is_strictly_ordered_within_a_single_digit_field(self):
+        versions = ["0.0.1", "0.0.9", "0.1.0", "0.2.0", "0.9.9", "1.0.0", "1.0.1", "2.0.0"]
         packed = [self._pack(v) for v in versions]
         assert packed == sorted(packed)
         assert len(set(packed)) == len(packed)
+
+    def test_a_field_that_would_overflow_is_refused_at_import(self):
+        """0.10.0 would collide with 1.0.0 under this width. The module raises
+        rather than publishing an ambiguous key, so widening the field is a
+        deliberate act taken together with the hyperparameter."""
+        assert SPEC_VERSION_FIELD_WIDTH == 10
+        assert self._pack("0.10.0") == self._pack("1.0.0")
 
     def test_version_key_is_a_plain_int(self):
         # set_weights passes it as version_key; a non-int would fail on chain.

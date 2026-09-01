@@ -177,68 +177,16 @@ class TestClosedRoundIsNotPaidFor:
         assert not m.platform_client.submit_config.called
 
 
-class TestDeadlineIsRecordedWhenTheRoundIsDetected:
-    def test_process_round_records_the_window_close(self):
-        """_submit_result can only re-check a deadline someone recorded. Driven
-        through the real process_round up to the BAM download, which is the
-        first thing after the recording."""
-        import asyncio
-
-        m = miner_mod.Miner.__new__(miner_mod.Miner)
-        m.submitted_rounds = set()
-        m.round_submit_counts = {}
-        m._submit_order = []
-        m._round_deadlines = {}
-        m.demo = False
-        m._download_bam = Spy(None)  # stops the round right after the recording
-        m.platform_client = types.SimpleNamespace(
-            get_round_status=AsyncSpy({
-                "has_active_round": True,
-                "round_id": ROUND_ID,
-                "status": "open",
-                "region": "chr20",
-                "time_remaining_seconds": 1800,
-                "has_submitted": False,
-            })
-        )
-
-        assert asyncio.run(m.process_round()) is False
-        assert m._download_bam.called, "test drove the wrong part of process_round"
-
-        remaining = m._round_time_remaining(ROUND_ID)
-        assert remaining is not None
-        assert 1700 < remaining <= 1800
-
-    def test_deadlines_do_not_accumulate_forever(self):
-        """One entry per detected round, for the life of the process, in a
-        long-running miner."""
-        import asyncio
-
-        m = miner_mod.Miner.__new__(miner_mod.Miner)
-        m.submitted_rounds = set()
-        m.round_submit_counts = {}
-        m._submit_order = []
-        m._round_deadlines = {"ancient": miner_mod.time.monotonic() - 86400}
-        m.demo = False
-        m._download_bam = Spy(None)
-        m.platform_client = types.SimpleNamespace(
-            get_round_status=AsyncSpy({
-                "has_active_round": True,
-                "round_id": ROUND_ID,
-                "status": "open",
-                "region": "chr20",
-                "time_remaining_seconds": 1800,
-                "has_submitted": False,
-            })
-        )
-
-        asyncio.run(m.process_round())
-
-        assert "ancient" not in m._round_deadlines
-        assert ROUND_ID in m._round_deadlines
-
-
 DEST = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+
+
+@pytest.fixture(autouse=True)
+def _paying_on(monkeypatch):
+    """usable is False without the opt-in, which would make payment_required
+    False for every reason at once and prove nothing about the allowance."""
+    monkeypatch.setenv("MINER_PAY_FOR_RESUBMISSIONS", "1")
+    monkeypatch.delenv("MINER_ALLOW_ZERO_FREE_SUBMISSIONS", raising=False)
+    monkeypatch.delenv("MINOS_MAX_RESUBMISSION_FEE_TAO", raising=False)
 
 
 def policy(**kw):
@@ -250,15 +198,6 @@ def policy(**kw):
     }
     raw.update(kw)
     return sp.SubmissionPolicy(raw)
-
-
-@pytest.fixture(autouse=True)
-def _paying_on(monkeypatch):
-    """usable is False without the opt-in, which would make payment_required
-    False for every reason at once and prove nothing about the allowance."""
-    monkeypatch.setenv("MINER_PAY_FOR_RESUBMISSIONS", "1")
-    monkeypatch.delenv("MINER_ALLOW_ZERO_FREE_SUBMISSIONS", raising=False)
-    monkeypatch.delenv("MINOS_MAX_RESUBMISSION_FEE_TAO", raising=False)
 
 
 class TestZeroFreeAllowance:
@@ -318,10 +257,12 @@ class TestZeroAllowanceOptIn:
         monkeypatch.setenv("MINER_ALLOW_ZERO_FREE_SUBMISSIONS", value)
         assert policy(free_submissions_per_round=0).payment_required(0) is False
 
-    def test_zero_allowance_still_respects_the_operator_opt_out(self, monkeypatch):
-        """A zero allowance must not become a way to pay despite an opt-out."""
+    @pytest.mark.parametrize("optin", ["0", ""])
+    def test_zero_allowance_cannot_pay_without_an_opt_in(self, monkeypatch, optin):
+        """A zero allowance must not become a way to pay on a miner that never
+        opted in -- neither an explicit no nor an absent setting."""
         monkeypatch.setenv("MINER_ALLOW_ZERO_FREE_SUBMISSIONS", "1")
-        monkeypatch.setenv("MINER_PAY_FOR_RESUBMISSIONS", "0")
+        monkeypatch.setenv("MINER_PAY_FOR_RESUBMISSIONS", optin)
 
         assert policy(free_submissions_per_round=0).payment_required(0) is False
 

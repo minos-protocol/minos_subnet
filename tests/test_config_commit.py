@@ -237,3 +237,54 @@ class TestCommitmentLedger:
         monkeypatch.setenv("MINOS_COMMITMENT_LEDGER", str(target))
         cc.CommitmentLedger().record({"round_id": "r", "hotkey": "hk", "nonce": "n"})
         assert target.exists()
+
+
+class TestTheLedgerCanStillOpenAPublishedCommitment:
+    """A commitment is written in two parts: the nonce and config when built,
+    then the block once published. Returning only the last line returned the
+    publication record -- which carries no nonce, so the commitment it describes
+    could never be opened."""
+
+    def _ledger(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MINOS_COMMITMENT_LEDGER", str(tmp_path / "c.jsonl"))
+        return cc.CommitmentLedger(tmp_path / "c.jsonl")
+
+    def test_the_nonce_survives_a_successful_publication(self, tmp_path, monkeypatch):
+        L = self._ledger(tmp_path, monkeypatch)
+        nonce = cc.new_nonce()
+        L.record({"round_id": "r1", "hotkey": "hk1", "netuid": 107,
+                  "tool_name": "gatk", "nonce": nonce, "commitment": "abc",
+                  "block": None, "tool_config": {"q": 1}})
+        L.record({"round_id": "r1", "hotkey": "hk1", "commitment": "abc",
+                  "block": 4242, "published": True})
+        found = L.find("r1", "hk1")
+        assert found is not None
+        assert found["nonce"] == nonce, "the nonce was lost — the commitment cannot be opened"
+        assert found["tool_config"] == {"q": 1}, "the config was lost"
+        assert found["block"] == 4242, "the published block did not overlay"
+        assert found["published"] is True
+
+    def test_a_later_none_does_not_erase_a_known_value(self, tmp_path, monkeypatch):
+        """The build entry writes block=None; merging must not let that clear a
+        block already recorded, whatever the order."""
+        L = self._ledger(tmp_path, monkeypatch)
+        L.record({"round_id": "r2", "hotkey": "hk1", "commitment": "x", "block": 99})
+        L.record({"round_id": "r2", "hotkey": "hk1", "commitment": "x", "block": None})
+        assert L.find("r2", "hk1")["block"] == 99
+
+    def test_an_unpublished_commitment_is_still_returned(self, tmp_path, monkeypatch):
+        L = self._ledger(tmp_path, monkeypatch)
+        n = cc.new_nonce()
+        L.record({"round_id": "r3", "hotkey": "hk1", "nonce": n, "commitment": "y",
+                  "block": None, "tool_config": {}})
+        f = L.find("r3", "hk1")
+        assert f["nonce"] == n and f["block"] is None
+
+    def test_rounds_and_hotkeys_stay_separate(self, tmp_path, monkeypatch):
+        L = self._ledger(tmp_path, monkeypatch)
+        L.record({"round_id": "r4", "hotkey": "hk1", "nonce": "n1", "commitment": "a"})
+        L.record({"round_id": "r4", "hotkey": "hk2", "nonce": "n2", "commitment": "b"})
+        L.record({"round_id": "r5", "hotkey": "hk1", "nonce": "n3", "commitment": "c"})
+        assert L.find("r4", "hk1")["nonce"] == "n1"
+        assert L.find("r4", "hk2")["nonce"] == "n2"
+        assert L.find("r5", "hk1")["nonce"] == "n3"

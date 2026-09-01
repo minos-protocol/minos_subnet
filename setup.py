@@ -1716,13 +1716,39 @@ print("registered" if wallet.hotkey.ss58_address in metagraph.hotkeys else "not-
             target_dir.parent.mkdir(parents=True, exist_ok=True)
 
             with tarfile.open(str(tmp_tarball), "r:gz") as tar:
-                # Security: check for path traversal in tarball
+                # Security: a member NAME being safe is not enough. A tarball
+                # can carry a symlink whose name is harmless but whose target
+                # escapes (foo -> /etc/passwd), then a regular member written
+                # through it (foo/bar). Names, link targets and member types are
+                # all checked before anything is written.
+                dest_root = target_dir.parent.resolve()
                 for member in tar.getmembers():
                     member_path = Path(member.name)
                     if member_path.is_absolute() or ".." in member_path.parts:
                         self.console.print(f"  [red]Tarball contains unsafe path: {member.name}[/]")
                         return False
-                tar.extractall(path=str(target_dir.parent))
+                    if not (member.isfile() or member.isdir()):
+                        # Links, devices, FIFOs. This archive is reference data;
+                        # none of them have a legitimate reason to be here, and
+                        # each is a way out of the destination directory.
+                        self.console.print(
+                            f"  [red]Tarball contains a non-regular member "
+                            f"({member.name}); refusing to extract[/]"
+                        )
+                        return False
+                    resolved = (dest_root / member.name).resolve()
+                    if not str(resolved).startswith(str(dest_root) + os.sep) and resolved != dest_root:
+                        self.console.print(
+                            f"  [red]Tarball member escapes the destination: {member.name}[/]"
+                        )
+                        return False
+                # filter="data" adds the interpreter's own checks where it is
+                # available (3.12+); the explicit pass above is what protects
+                # older interpreters, which silently ignore the argument.
+                try:
+                    tar.extractall(path=str(target_dir.parent), filter="data")
+                except TypeError:
+                    tar.extractall(path=str(target_dir.parent))
 
             # Clean up tarball
             tmp_tarball.unlink()

@@ -47,6 +47,10 @@ DEFAULT_MAX_FEE_TAO = 0.01
 # 24h aggregate ceiling. Deliberately small: a miner paying more than this in
 # one day is far more likely to be looping than competing.
 DEFAULT_MAX_DAILY_TAO = 0.05
+# Ceiling on what EVERY hotkey sharing this ledger may spend in a rolling 24h.
+# The per-hotkey cap bounds one miner; without this, an operator running K
+# hotkeys on a host has K times the exposure they think they configured.
+DEFAULT_MAX_DAILY_WALLET_TAO = 0.10
 
 
 def max_fee_tao() -> float:
@@ -82,23 +86,43 @@ def zero_free_allowance_permitted() -> bool:
     return os.getenv("MINER_ALLOW_ZERO_FREE_SUBMISSIONS", "").lower() in ("1", "true", "yes")
 
 
-def payment_opted_out() -> bool:
-    """Whether this operator has explicitly refused to pay for resubmissions.
+def pinned_destination() -> Optional[str]:
+    """The destination this operator will pay, if they pinned one.
 
-    The platform decides whether resubmissions cost anything, via
-    ``resubmission_fee_enabled`` in the network config. That keeps the policy in
-    one place instead of requiring every operator to opt in individually, which
-    would leave the feature permanently inactive in practice.
+    The fee and address arrive in the platform's network-config response, which
+    is authenticated as a TRANSPORT (HTTPS proves which server answered) but is
+    not itself signed. An operator who pins the address here refuses to pay
+    anywhere else, so a changed or substituted destination stops the payment
+    instead of redirecting it.
 
-    What protects the operator is not this switch but ``max_fee_tao()``: a fee
-    above the ceiling is refused outright, so the worst a wrong or hostile
-    platform response can cost is the ceiling per paid submission. This flag is
-    the escape hatch on top of that, for an operator who wants no spending at
-    all regardless of policy.
+    Unset means "accept the advertised destination", which is the status quo.
+    Pinning is the stronger position and is what an unattended miner holding a
+    funded coldkey should do.
 
-    Set MINER_PAY_FOR_RESUBMISSIONS to 0/false/no to opt out.
+    Read from MINOS_EXPECTED_PAYMENT_ADDRESS.
     """
-    return os.getenv("MINER_PAY_FOR_RESUBMISSIONS", "").strip().lower() in ("0", "false", "no", "off")
+    raw = os.getenv("MINOS_EXPECTED_PAYMENT_ADDRESS", "").strip()
+    return raw or None
+
+
+def payment_opted_in() -> bool:
+    """Whether this operator has explicitly agreed to pay for resubmissions.
+
+    Spending is OFF unless the operator turns it on. The platform still decides
+    whether resubmissions cost anything and what they cost, but a platform
+    policy alone can never move TAO: this software auto-updates, so a policy
+    published at any moment would otherwise start spending on every miner that
+    had never asked to spend anything.
+
+    ``max_fee_tao()`` and the daily ceilings bound how much a wrong or hostile
+    policy can cost. They are not a substitute for consent -- they bound the
+    damage, they do not authorise it.
+
+    Set MINER_PAY_FOR_RESUBMISSIONS to 1/true/yes/on to take part. Anything
+    else, including unset, means no payment and no resubmission beyond the free
+    allowance.
+    """
+    return os.getenv("MINER_PAY_FOR_RESUBMISSIONS", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def max_daily_tao() -> float:
@@ -192,16 +216,42 @@ class SubmissionPolicy:
 
     @property
     def usable(self) -> bool:
-        """A policy is only actionable if it names a price AND a destination.
+        """Whether this policy may move TAO. Every condition must hold.
 
-        Missing either leaves the feature treated as off; a guessed destination
-        is an irrecoverable transfer to the wrong account.
+        Two independent gates, deciding different questions:
+
+        1. WHETHER THE NETWORK CHARGES -- ``resubmission_fee_enabled`` from the
+           platform. A protocol question, kept in one place so miners cannot
+           disagree about it. Absent reads as off, so an older platform that
+           does not serve the field is treated as not charging.
+        2. WHETHER THIS OPERATOR TAKES PART -- ``payment_opted_in()``. A consent
+           question about their wallet, which cannot live on the platform
+           because the platform is the party being paid.
+
+        Neither substitutes for the other: the platform cannot spend an
+        operator's TAO, and an operator cannot pay a fee the network is not
+        charging. The remaining checks bound what a policy that passes both may
+        cost -- a price and a well-formed destination must be present, because a
+        guessed destination is an irrecoverable transfer to the wrong account,
+        and a fee over the ceiling is refused outright.
         """
+        # Gate 1: the network charges.
         if not (self.enabled and self.fee_tao is not None and self.fee_tao > 0):
             return False
-        if payment_opted_out():
+        # Gate 2: this operator agreed to pay.
+        if not payment_opted_in():
             return False
         if not _looks_like_ss58(self.destination or ""):
+            return False
+        pinned = pinned_destination()
+        if pinned and self.destination != pinned:
+            # A well-formed address is not the same as the RIGHT address. Refuse
+            # rather than pay a destination the operator did not sanction.
+            logger.error(
+                "Refusing to pay: the advertised destination %s does not match "
+                "the pinned MINOS_EXPECTED_PAYMENT_ADDRESS %s",
+                self.destination, pinned,
+            )
             return False
         if self.fee_tao > max_fee_tao():
             # Refuse rather than clamp: paying a capped amount toward a bad
@@ -224,6 +274,37 @@ class SubmissionPolicy:
             f"SubmissionPolicy(enabled={self.enabled}, free={self.free_submissions}, "
             f"fee_tao={self.fee_tao}, dest={'set' if self.destination else 'unset'})"
         )
+
+
+def max_daily_wallet_tao() -> float:
+    """Hard ceiling on resubmission spend across ALL hotkeys sharing one ledger.
+
+    ``max_daily_tao()`` bounds a single hotkey. An operator running several
+    hotkeys on one host multiplies that ceiling by the number of hotkeys, which
+    is not what "a 0.05 TAO daily cap" reads as. This bounds the host.
+
+    It is honest about its scope: the ledger is a file on this machine, so this
+    is per-machine, not per-coldkey. Hotkeys of the same coldkey on other hosts
+    keep their own ledgers and their own ceilings. A true coldkey-wide cap needs
+    accounting this side of the wallet cannot see.
+
+    Read from MINOS_MAX_DAILY_WALLET_TAO. A non-finite or negative override
+    falls back to the default, for the same reason as max_fee_tao().
+    """
+    raw = os.getenv("MINOS_MAX_DAILY_WALLET_TAO")
+    if raw is None or not str(raw).strip():
+        return DEFAULT_MAX_DAILY_WALLET_TAO
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_DAILY_WALLET_TAO
+    if not math.isfinite(value) or value < 0:
+        logger.warning(
+            "MINOS_MAX_DAILY_WALLET_TAO=%r is not a usable amount; "
+            "falling back to %s TAO", raw, DEFAULT_MAX_DAILY_WALLET_TAO
+        )
+        return DEFAULT_MAX_DAILY_WALLET_TAO
+    return value
 
 
 class PaymentLedger:
@@ -597,10 +678,13 @@ def _pay_for_resubmission_locked(
     ):
         return None
 
-    # Rolling 24h ceiling, checked against what actually completed. The
-    # per-submission cap bounds one payment; this bounds a bad day.
+    # Rolling 24h ceilings, checked against what actually completed. The
+    # per-submission cap bounds one payment; these bound a bad day. Both must
+    # pass: the per-hotkey cap stops one miner looping, and the wallet cap stops
+    # K hotkeys on one host multiplying that ceiling by K.
+    cutoff = int(time.time()) - 86400
     cap = max_daily_tao()
-    spent = ledger.spend_since(int(time.time()) - 86400, hotkey=hotkey)
+    spent = ledger.spend_since(cutoff, hotkey=hotkey)
     if spent + policy.fee_tao > cap:
         if logger:
             logger.error(
@@ -611,6 +695,28 @@ def _pay_for_resubmission_locked(
             )
         return None
 
+    wallet_cap = max_daily_wallet_tao()
+    wallet_spent = ledger.spend_since(cutoff)
+    if wallet_spent + policy.fee_tao > wallet_cap:
+        if logger:
+            logger.error(
+                f"Refusing to pay: {wallet_spent:.4f} TAO already spent on resubmissions by "
+                f"ALL hotkeys on this host in the last 24h; this {policy.fee_tao} TAO fee "
+                f"would exceed the {wallet_cap} TAO wallet-wide ceiling. Raise "
+                f"MINOS_MAX_DAILY_WALLET_TAO deliberately if this is intended."
+            )
+        return None
+
+    # State the terms before money moves, so the operator can see from the log
+    # what was paid, to whom, and under what ceilings -- without reading code.
+    if logger:
+        logger.info(
+            f"Paying for resubmission in round {round_id[:8]}...: "
+            f"{policy.fee_tao} TAO -> {policy.destination} "
+            f"(per-submission cap {max_fee_tao()}, hotkey 24h cap {cap}, "
+            f"host 24h cap {wallet_cap}, "
+            f"destination {'pinned' if pinned_destination() else 'unpinned'})"
+        )
     ledger.record_intent(round_id, hotkey, policy.fee_tao, policy.destination)
     ok, detail, locator = bt_compat.transfer(
         subtensor, wallet=wallet, dest=policy.destination, amount_tao=policy.fee_tao

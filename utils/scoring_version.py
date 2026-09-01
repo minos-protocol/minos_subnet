@@ -32,6 +32,28 @@ SUPPORTED = (V1, V2)
 DEFAULT_STATE_PATH = Path.home() / ".minos" / "scoring_version.json"
 
 
+def scorer_name(version: Any) -> str:
+    """The label written into a score payload for a given scoring version.
+
+    Defined here, beside V1/V2, because it is a fact about scoring versions
+    rather than about the validator that happens to stamp it. One mapping, used
+    both where a score is written and where an incoming score is checked -- two
+    copies would drift, and a drifted copy means scores get compared against a
+    label nothing produces.
+
+    Anything not recognisably V2 maps to the v1 label. Defaulting the other way
+    would label a v1 number AdvancedV2, which is exactly the confusion the label
+    exists to prevent.
+
+    The v1 label is "Advanced", matching what every deployed validator already
+    writes, because v1 IS that formula -- identical arithmetic, verified against
+    minos_subnet main. A new spelling for the same numbers would make the
+    platform's consensus marker read "mixed" on any fleet that is not upgrading
+    in lockstep, reporting a blend of two scales where there is only one.
+    """
+    return "AdvancedV2" if version == V2 else "Advanced"
+
+
 def state_path() -> Path:
     override = os.getenv("MINOS_SCORING_VERSION_STATE")
     return Path(override) if override else DEFAULT_STATE_PATH
@@ -104,12 +126,15 @@ def resolve(network_config: Any, *, path: Optional[Path] = None, logger=None) ->
 
     if advertised is not None:
         previous = read_last_used(path)
-        if previous is not None and previous != advertised and logger:
-            logger.warning(
-                f"Scoring version changed by the platform: {previous} -> {advertised}. "
-                f"Scores from this round are on a different scale to the last."
-            )
-        record_used(advertised, path)
+        if previous != advertised:
+            if previous is not None and logger:
+                logger.warning(
+                    f"Scoring version changed by the platform: {previous} -> {advertised}. "
+                    f"Scores from this round are on a different scale to the last."
+                )
+            # Only on a change. Rewriting the same value every round is an
+            # fsync per round for a file that has not moved.
+            record_used(advertised, path)
         return advertised
 
     remembered = read_last_used(path)

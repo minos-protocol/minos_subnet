@@ -121,7 +121,8 @@ download_file_with_fallback(
 **Features:**
 
 - Automatic caching
-- SHA256 integrity verification
+- SHA256 verification: enforced for cached files, advisory for fresh
+  downloads unless MINOS_ENFORCE_DOWNLOAD_SHA256 is set
 - HTTP and presigned URL support
 - Primary/backup URL fallback (`STORAGE_PRIMARY_BACKEND` env var: `hippius` (default) or `aws_s3`)
 

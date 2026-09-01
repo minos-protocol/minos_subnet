@@ -207,33 +207,88 @@ class TestSpendingGuards:
     with the COLDKEY, so these guards are the only thing between a platform slip
     and every miner's balance."""
 
-    def test_platform_policy_is_the_switch(self, monkeypatch):
-        """The platform decides whether resubmissions cost anything. With no
-        operator env set, an advertised policy is honoured."""
+    def test_unset_means_no_spending_however_good_the_policy(self, monkeypatch):
+        """The operator switch is the gate. A complete, valid platform policy
+        must not move TAO on a miner that never opted in -- this software
+        auto-updates, so a policy published at any moment would otherwise start
+        spending on miners that never asked to spend anything."""
         monkeypatch.delenv("MINER_PAY_FOR_RESUBMISSIONS", raising=False)
-        assert sp.payment_opted_out() is False
+        assert sp.payment_opted_in() is False
+        assert policy().usable is False
+
+    @pytest.mark.parametrize("platform_on,opted_in,expected", [
+        (True,  "1", True),   # the only combination that may spend
+        (True,  "",  False),  # network charges, operator never agreed
+        (False, "1", False),  # operator agreed, network is not charging
+        (False, "",  False),
+    ])
+    def test_both_gates_are_required(self, monkeypatch, platform_on, opted_in, expected):
+        """The platform flag and the operator opt-in decide different things and
+        neither substitutes for the other: the platform cannot spend an
+        operator's TAO, and an operator cannot pay a fee that is not charged."""
+        monkeypatch.setenv("MINER_PAY_FOR_RESUBMISSIONS", opted_in)
+        assert policy(resubmission_fee_enabled=platform_on).usable is expected
+
+    def test_absent_platform_flag_reads_as_not_charging(self, monkeypatch):
+        """An older platform that does not serve the field must read as off,
+        not as unknown."""
+        monkeypatch.setenv("MINER_PAY_FOR_RESUBMISSIONS", "1")
+        raw = dict(free_submissions_per_round=1, resubmission_fee_tao=0.005,
+                   resubmission_payment_address=DEST)
+        assert "resubmission_fee_enabled" not in raw
+        assert sp.SubmissionPolicy(raw).usable is False
+
+    def test_an_unexpected_destination_is_refused(self, monkeypatch):
+        """A well-formed address is not the same as the RIGHT address. The
+        policy is delivered over HTTPS but is not itself signed, so an operator
+        who pins the destination must not pay a substituted one."""
+        monkeypatch.setenv("MINER_PAY_FOR_RESUBMISSIONS", "1")
+        monkeypatch.setenv("MINOS_EXPECTED_PAYMENT_ADDRESS",
+                           "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY")
+        # DEST is a different, equally well-formed SS58
+        assert policy().usable is False
+
+    def test_a_matching_pinned_destination_is_accepted(self, monkeypatch):
+        monkeypatch.setenv("MINER_PAY_FOR_RESUBMISSIONS", "1")
+        monkeypatch.setenv("MINOS_EXPECTED_PAYMENT_ADDRESS", DEST)
         assert policy().usable is True
-        assert policy().payment_required(5) is True
+
+    def test_an_unset_pin_accepts_the_advertised_destination(self, monkeypatch):
+        monkeypatch.setenv("MINER_PAY_FOR_RESUBMISSIONS", "1")
+        monkeypatch.delenv("MINOS_EXPECTED_PAYMENT_ADDRESS", raising=False)
+        assert policy().usable is True
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_a_blank_pin_is_not_a_pin(self, monkeypatch, blank):
+        """An empty value must not become an address nothing can match."""
+        monkeypatch.setenv("MINER_PAY_FOR_RESUBMISSIONS", "1")
+        monkeypatch.setenv("MINOS_EXPECTED_PAYMENT_ADDRESS", blank)
+        assert sp.pinned_destination() is None
+        assert policy().usable is True
 
     def test_no_policy_means_no_payment(self, monkeypatch):
-        """A platform that advertises nothing must never cause a transfer."""
-        monkeypatch.delenv("MINER_PAY_FOR_RESUBMISSIONS", raising=False)
+        """A platform that advertises nothing must never cause a transfer,
+        opted in or not."""
+        monkeypatch.setenv("MINER_PAY_FOR_RESUBMISSIONS", "1")
         assert sp.SubmissionPolicy(None).usable is False
         assert sp.SubmissionPolicy({}).usable is False
         assert policy(resubmission_fee_enabled=False).usable is False
 
-    def test_operator_can_opt_out_regardless_of_policy(self, monkeypatch):
-        """The escape hatch: an operator who wants no spending at all."""
-        for val in ("0", "false", "NO", "off"):
-            monkeypatch.setenv("MINER_PAY_FOR_RESUBMISSIONS", val)
-            assert sp.payment_opted_out() is True
-            assert policy().usable is False
-
-    @pytest.mark.parametrize("val", ["", "1", "true", "yes"])
-    def test_anything_but_an_opt_out_follows_the_platform(self, monkeypatch, val):
+    @pytest.mark.parametrize("val", ["1", "true", "YES", "on"])
+    def test_explicit_opt_in_follows_the_platform(self, monkeypatch, val):
+        """Having opted in, the platform's policy decides price and allowance."""
         monkeypatch.setenv("MINER_PAY_FOR_RESUBMISSIONS", val)
-        assert sp.payment_opted_out() is False
+        assert sp.payment_opted_in() is True
         assert policy().usable is True
+        assert policy().payment_required(5) is True
+
+    @pytest.mark.parametrize("val", ["", "0", "false", "NO", "off", "maybe", "2"])
+    def test_anything_that_is_not_an_opt_in_refuses_to_spend(self, monkeypatch, val):
+        """Only an explicit yes counts. A typo, a stray value, or an empty
+        string is not consent."""
+        monkeypatch.setenv("MINER_PAY_FOR_RESUBMISSIONS", val)
+        assert sp.payment_opted_in() is False
+        assert policy().usable is False
 
     def test_fee_above_the_cap_is_refused_not_clamped(self, monkeypatch):
         """A units slip (500 for 0.5) must not become a 'capped' payment —

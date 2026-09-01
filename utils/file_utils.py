@@ -330,16 +330,52 @@ def download_file_with_fallback(
     """
     local_path = Path(local_path)
 
-    result = download_file_verified(primary_url, local_path, expected_sha256=expected_sha256, show_progress=show_progress)
+    # With a backup available, a digest mismatch on the primary must not be
+    # accepted outright: the backup may hold the correct bytes, and accepting
+    # here would return the bad copy without ever asking. With no backup there
+    # is nothing to fall back to, so the lenient path applies as before.
+    result = download_file_verified(
+        primary_url, local_path, expected_sha256=expected_sha256,
+        show_progress=show_progress,
+        on_mismatch="defer" if backup_url else "accept",
+    )
     if result:
         return result
 
     if backup_url:
         logger.warning(f"Primary download failed, trying backup URL for {local_path.name}")
-        # Remove any partial file before retrying
+        # Keep the primary's bytes aside rather than deleting them. They may be
+        # a digest mismatch we deferred on, and if the backup is worse -- a dead
+        # URL, or a mismatch of its own -- they are still better than nothing.
+        quarantined = None
         if local_path.exists():
-            local_path.unlink()
-        return download_file_verified(backup_url, local_path, expected_sha256=expected_sha256, show_progress=show_progress)
+            quarantined = local_path.with_suffix(local_path.suffix + ".primary")
+            try:
+                local_path.replace(quarantined)
+            except OSError:
+                local_path.unlink(missing_ok=True)
+                quarantined = None
+
+        backup_result = download_file_verified(
+            backup_url, local_path, expected_sha256=expected_sha256,
+            show_progress=show_progress,
+        )
+        if backup_result:
+            if quarantined:
+                quarantined.unlink(missing_ok=True)
+            return backup_result
+
+        if quarantined:
+            logger.warning(
+                f"Backup also failed for {local_path.name}; falling back to the "
+                f"primary copy that failed its digest check."
+            )
+            try:
+                quarantined.replace(local_path)
+                return local_path
+            except OSError:
+                quarantined.unlink(missing_ok=True)
+        return None
 
     return None
 
@@ -372,6 +408,7 @@ def download_file_verified(
     local_path: Path,
     expected_sha256: Optional[str] = None,
     show_progress: bool = True,
+    on_mismatch: str = "accept",
 ) -> Optional[Path]:
     """Download file with SHA256 verification for caching.
 
@@ -396,13 +433,18 @@ def download_file_verified(
             return local_path
 
         actual_hash = compute_sha256(local_path)
-        if actual_hash == _normalised_digest(expected_sha256):
+        expected_norm = _normalised_digest(expected_sha256)
+        if actual_hash == expected_norm:
             logger.info(f"Cache hit (SHA256 verified): {local_path.name}")
             return local_path
         else:
+            # Slice the NORMALISED digest, never the raw value: the platform
+            # supplies it and a non-string there (an int, a dict) makes this
+            # log line raise, turning a cache miss into a crash.
+            shown = (expected_norm or "<none>")[:16]
             logger.warning(
                 f"Cache invalid for {local_path.name} "
-                f"(expected={expected_sha256[:16]}..., actual={actual_hash[:16]}...). Re-downloading."
+                f"(expected={shown}..., actual={actual_hash[:16]}...). Re-downloading."
             )
 
     result = download_file(url, local_path, use_cache=False, show_progress=show_progress)
@@ -420,6 +462,17 @@ def download_file_verified(
                     f"(expected={expected[:16]}..., actual={actual_hash[:16]}...)"
                 )
                 _discard_partial(result)
+                return None
+            if on_mismatch == "defer":
+                # Signal the mismatch WITHOUT discarding: a caller holding a
+                # backup URL can now fetch it, and restore these bytes if the
+                # backup turns out to be worse. Accepting here instead would
+                # short-circuit that fallback and keep the bad copy.
+                logger.warning(
+                    f"SHA256 mismatch after downloading {local_path.name} "
+                    f"(expected={expected[:16]}..., actual={actual_hash[:16]}...). "
+                    f"Trying the backup source before accepting it."
+                )
                 return None
             logger.warning(
                 f"SHA256 mismatch after downloading {local_path.name} "

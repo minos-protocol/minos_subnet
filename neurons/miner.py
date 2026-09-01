@@ -300,6 +300,17 @@ class Miner:
             "--sample_id", type=str, default=None,
             help="[--practice] Skip the interactive picker and use this sample id directly.",
         )
+        parser.add_argument(
+            "--resubmit",
+            action="store_true",
+            help=(
+                "Submit again to a round this hotkey has already submitted to. "
+                "Past the free allowance this COSTS TAO, so it is never taken "
+                "automatically: the loop stops at the first submission and this "
+                "flag is the only way past it. Requires "
+                "MINER_PAY_FOR_RESUBMISSIONS to be set as well."
+            ),
+        )
         parser.add_argument("--bam", type=str, default=None, help="[--score] Path to input BAM.")
         parser.add_argument("--truth", type=str, default=None, help="[--score] Path to truth VCF (.vcf.gz).")
         parser.add_argument(
@@ -483,9 +494,29 @@ class Miner:
                     pass
 
             if round_data.get("has_submitted", False):
-                bt.logging.info(f"Already submitted to round {round_id[:8]}... (platform confirmed)")
-                self.submitted_rounds.add(round_id)
-                return False
+                if not getattr(self.config, "resubmit", False):
+                    bt.logging.info(f"Already submitted to round {round_id[:8]}... (platform confirmed)")
+                    self.submitted_rounds.add(round_id)
+                    return False
+                # Deliberate replacement. The quote read above is the price for
+                # the NEXT paid submission for this hotkey's coldkey, fetched in
+                # this same response -- so it already reflects the escalation
+                # from every submission counted so far. Paying an older quote
+                # underpays, and the transfer is on chain before the platform
+                # refuses it.
+                if quoted_fee is None:
+                    bt.logging.error(
+                        f"Round {round_id[:8]}...: --resubmit given but the "
+                        f"platform quoted no fee for the next submission. "
+                        f"Refusing to guess a price."
+                    )
+                    self.submitted_rounds.add(round_id)
+                    return False
+                bt.logging.warning(
+                    f"Round {round_id[:8]}...: --resubmit given; this hotkey has "
+                    f"already submitted. The next submission is quoted at "
+                    f"{quoted_fee} TAO and will be PAID FOR if it goes ahead."
+                )
 
             # Check if enough time remaining (need at least 10 minutes for variant calling)
             if time_remaining < MIN_SUBMISSION_TIME_SECONDS:
@@ -1596,7 +1627,10 @@ def _run_and_score(tool, tool_config, bam_path, ref_path, truth_path,
                 from utils.scoring import parse_happy_vcf, difficulty_class_counts
 
                 records = parse_happy_vcf(happy_vcf, truth_vcf_path=str(truth_path))
-                if records:
+                if records is None:
+                    print("   v2 score unavailable: hap.py VCF could not be parsed "
+                          "completely (a partial parse would inflate the score)", flush=True)
+                elif records:
                     score_v2 = AdvancedScorer.compute_score_v2(
                         metrics, difficulty_class_counts(records)
                     )

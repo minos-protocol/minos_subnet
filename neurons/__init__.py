@@ -10,14 +10,19 @@ spec version and the chromosome allowlist defined here.
 
 import re
 
-MINOS_SPEC_VERSION = "0.2.0"
+MINOS_SPEC_VERSION = "0.3.0"
 SPEC_STRING = MINOS_SPEC_VERSION.split(".")
 
-# One decimal digit per field (100*major + 10*minor + patch) makes 0.10.0 and
-# 1.0.0 both pack to 100, so the next minor-10 release would publish an
-# on-chain version_key indistinguishable from the next major. Three digits per
-# field keeps the packing strictly ordered for any minor/patch below 1000.
-SPEC_VERSION_FIELD_WIDTH = 1000
+# 100*major + 10*minor + patch. This is submitted as the on-chain version_key,
+# and the subnet's WeightsVersionKey hyperparameter is set in the same scale --
+# the chain rejects a validator whose key is below it. Widening a field here
+# without raising that hyperparameter at the same time would put the two out of
+# step, and raising it to match a widened key locks out every validator still on
+# the old packing, all at once.
+#
+# One decimal digit per field means 0.10.0 and 1.0.0 both pack to 100. Fix that
+# when a release actually approaches 0.10.0, together with the hyperparameter.
+SPEC_VERSION_FIELD_WIDTH = 10
 
 if not all(0 <= int(part) < SPEC_VERSION_FIELD_WIDTH for part in SPEC_STRING[1:]):
     raise ValueError(

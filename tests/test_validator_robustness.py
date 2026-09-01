@@ -69,6 +69,12 @@ def validator_module(monkeypatch):
     sys.modules.pop("neurons.validator", None)
 
 
+async def _snapshot():
+    return {"hotkeys": ["hk_burn", "hk_live", "hk_permit"],
+            "permits": [False, False, True],
+            "owners": {}, "synced": True}
+
+
 class TestAssignmentFallback:
     """A bad assignment payload must degrade to scoring everyone.
 
@@ -84,15 +90,22 @@ class TestAssignmentFallback:
         async def get_assignment(round_id):
             return assignment
 
-        async def get_round_submissions(round_id):
+        async def get_round_submissions(round_id, scoring_version=None):
             reached_step_two.append(round_id)
             return {"submissions": [], "region": "chr20:1-1000"}
+
+        async def _declared_scoring_version(round_id):
+            # The real method is best-effort and may return None; these tests
+            # exercise assignment fallback, not version declaration.
+            return None
 
         validator = types.SimpleNamespace(
             platform_client=types.SimpleNamespace(
                 get_assignment=get_assignment,
                 get_round_submissions=get_round_submissions,
             ),
+            _declared_scoring_version=_declared_scoring_version,
+            _adopt_round_pin=lambda round_id, pinned: None,
         )
         result = asyncio.run(
             validator_module.Validator._score_round_submissions(validator, ROUND_ID)
@@ -129,15 +142,22 @@ class TestAssignmentFallback:
 
         reached_step_two = []
 
-        async def get_round_submissions(round_id):
+        async def get_round_submissions(round_id, scoring_version=None):
             reached_step_two.append(round_id)
             return {"submissions": [], "region": "chr20:1-1000"}
+
+        async def _declared_scoring_version(round_id):
+            # The real method is best-effort and may return None; these tests
+            # exercise assignment fallback, not version declaration.
+            return None
 
         validator = types.SimpleNamespace(
             platform_client=types.SimpleNamespace(
                 get_assignment=get_assignment,
                 get_round_submissions=get_round_submissions,
             ),
+            _declared_scoring_version=_declared_scoring_version,
+            _adopt_round_pin=lambda round_id, pinned: None,
         )
         asyncio.run(
             validator_module.Validator._score_round_submissions(validator, ROUND_ID)
@@ -268,7 +288,11 @@ class TestWeightHistoryPopulation:
             metagraph=types.SimpleNamespace(
                 hotkeys=["hk_burn", "hk_live", "hk_permit"],
                 validator_permit=[False, False, True],
+                coldkeys=["ck_burn", "ck_live", "ck_permit"],
             ),
+            # One snapshot for UIDs, permits and ownership; these tests exercise
+            # weight-history reporting, not the chain read.
+            _chain_snapshot=lambda **_: _snapshot(),
             my_subnet_uid=99,
             wallet=types.SimpleNamespace(
                 hotkey=types.SimpleNamespace(ss58_address="hk_validator")

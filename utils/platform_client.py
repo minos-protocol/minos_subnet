@@ -10,6 +10,8 @@ import json
 import logging
 import re
 import uuid
+
+from neurons import MINOS_SPEC_VERSION
 import httpx
 from urllib.parse import urlsplit
 
@@ -180,10 +182,25 @@ class PlatformClient:
         return keypair.sign(canonical.encode()).hex()
 
     def _auth_body(self, method: str, path: str, **fields) -> dict:
-        """Build request body with canonical auth signature and nonce."""
+        """Build request body with canonical auth signature and nonce.
+
+        Every request declares ``spec_version`` -- the code this neuron is
+        running. It is sent unconditionally and regardless of whether the
+        platform is checking it, because a declaration nobody makes cannot be
+        counted, and counting is what tells an operator when enforcing is safe.
+
+        Safe to add: both sides hash the whole body from the raw JSON (see
+        sign_request), so a new field is covered symmetrically, and a platform
+        that does not know the field ignores it.
+
+        The declaration is signed, so it cannot be forged by a third party. It
+        is still a CLAIM -- nothing proves which code actually ran. It catches
+        a stale neuron, not a lying one; the chain's version_key is what makes
+        a lie attributable after the fact.
+        """
         timestamp = int(time.time())
         nonce = uuid.uuid4().hex
-        body = {**fields, "timestamp": timestamp}
+        body = {"spec_version": MINOS_SPEC_VERSION, **fields, "timestamp": timestamp}
         body["signature"] = self.sign_request(self.keypair, method, path, body, timestamp, nonce)
         body["nonce"] = nonce
         return body
@@ -634,7 +651,38 @@ class ValidatorPlatformClient(PlatformClient):
 
         return await retry_async(_do_request, max_retries=3)
 
-    async def get_round_submissions(self, round_id: str) -> Dict[str, Any]:
+    async def get_owner_map(self) -> Dict[str, Any]:
+        """hotkey -> coldkey for every registered miner (validator only).
+
+        Used when this validator cannot read coldkeys from its own metagraph.
+
+        The mapping is stable -- a hotkey belongs to the coldkey that registered
+        it -- so a cached copy is as good as a fresh one. UIDs are the exception
+        and never come from here: the weight vector is indexed by UID against
+        the validator's own metagraph, so that ordering has to come from the
+        same view the weights are submitted against.
+        """
+        path = "/v2/owner-map"
+
+        async def _do_request():
+            body = self._auth_body(
+                "POST", path, validator_hotkey=self.keypair.ss58_address
+            )
+            async with self._get_client() as client:
+                response = await client.post(path, json=body, headers=self._AUTH_HEADERS)
+                if response.status_code == 401:
+                    raise AuthenticationError("Invalid signature or validator not authorized")
+                if response.status_code != 200:
+                    raise PlatformClientError(
+                        f"Owner map unavailable: {response.status_code} {response.text[:200]}"
+                    )
+                return response.json()
+
+        return await retry_async(_do_request, max_retries=2)
+
+    async def get_round_submissions(
+        self, round_id: str, scoring_version: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Get all submissions for a round (validator only).
 
         Validators call this during the scoring window to get all miner submissions.
@@ -656,10 +704,16 @@ class ValidatorPlatformClient(PlatformClient):
         path = "/v2/get-submissions"
 
         async def _do_request():
+            # Declared when known so the platform can tell, BEFORE handing over
+            # configs, whether this validator would score on the scale the round
+            # was pinned to. Omitted rather than guessed on the first fetch of a
+            # round, when the version is not yet resolved.
+            declared = {} if scoring_version is None else {"scoring_version": scoring_version}
             body = self._auth_body(
                 "POST", path,
                 round_id=round_id,
                 validator_hotkey=self.keypair.ss58_address,
+                **declared,
             )
 
             async with self._get_client() as client:
@@ -677,53 +731,6 @@ class ValidatorPlatformClient(PlatformClient):
                 return response.json()
 
         return await retry_async(_do_request, max_retries=3)
-
-    async def get_candidate_normalization_context(
-        self,
-        round_id: str,
-    ) -> Dict[str, Any]:
-        """Fetch the private, round-pinned candidate-normalization context.
-
-        This validator-only response contains opaque solution tokens and owner
-        mappings.  It must never be routed through a public endpoint or miner
-        receipt. The validator validates the response version, coverage,
-        bond/maturity state, digest, and configured attestation quorum before
-        it can affect a reward vector.
-        """
-        path = "/v2/get-candidate-normalization-context"
-
-        async def _do_request():
-            body = self._auth_body(
-                "POST",
-                path,
-                round_id=round_id,
-                validator_hotkey=self.keypair.ss58_address,
-            )
-            async with self._get_client() as client:
-                response = await client.post(
-                    path,
-                    json=body,
-                    headers=self._AUTH_HEADERS,
-                    timeout=15.0,
-                )
-
-                if response.status_code == 401:
-                    raise AuthenticationError("Invalid signature or validator not authorized")
-                if response.status_code == 404:
-                    raise PlatformClientError(
-                        "Candidate-normalization context not found for round"
-                    )
-                if response.status_code in (409, 425):
-                    raise PlatformClientError(
-                        f"Candidate-normalization context not finalized: {response.text}"
-                    )
-                if response.status_code != 200:
-                    raise PlatformClientError(
-                        f"Failed to get candidate-normalization context: {response.text}"
-                    )
-                return response.json()
-
-        return await retry_async(_do_request, max_retries=2)
 
     async def submit_score(
         self,
@@ -748,6 +755,7 @@ class ValidatorPlatformClient(PlatformClient):
         output_vcf_s3_key: Optional[str] = None,
         output_vcf_sha256: Optional[str] = None,
         happy_output_s3_key: Optional[str] = None,
+        scoring_version: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Submit scoring results for a miner (validator only).
 
@@ -780,6 +788,7 @@ class ValidatorPlatformClient(PlatformClient):
                 round_id=round_id,
                 validator_hotkey=self.keypair.ss58_address,
                 miner_hotkey=miner_hotkey,
+                **({} if scoring_version is None else {"scoring_version": scoring_version}),
                 snp_f1=snp_f1,
                 snp_precision=snp_precision,
                 snp_recall=snp_recall,

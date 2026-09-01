@@ -71,7 +71,7 @@ POST /v2/round-status  →  {
 
 On an active round, the miner:
 
-1. Downloads the BAM (SHA256-checked, cached across rounds — see [Download integrity](#download-integrity))
+1. Downloads the BAM (cached across rounds; digest handling described under [Download integrity](#download-integrity))
 2. Runs its configured variant caller via Docker on the given region
 3. Submits its tool config (quality parameters only — no VCF uploaded):
 
@@ -125,7 +125,7 @@ while True:
     for round in rounds:
         assignment = get_assignment(round)      # primary + secondary miner lists
         submissions = get_submissions(round)    # miner configs + presigned BAM/truth URLs
-        download_round_files(round)             # BAM, truth VCF, mutations VCF; SHA256-checked
+        download_round_files(round)             # BAM, truth VCF, mutations VCF
 
         # Per-job thread/memory and total concurrency are auto-tuned from
         # host CPU/RAM (see auto_scoring_config). Primaries run as a barrier;

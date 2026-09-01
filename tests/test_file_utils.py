@@ -13,6 +13,9 @@ import threading
 
 import pytest
 
+from pathlib import Path
+
+from utils import file_utils
 from utils.file_utils import (
     download_file,
     download_file_verified,
@@ -338,3 +341,80 @@ def test_s3_branch_failure_leaves_nothing(tmp_path, monkeypatch):
     assert fu.download_file("s3://bucket/key", dest, show_progress=False) is None
     assert not dest.exists()
     assert not _partial(dest).exists()
+
+
+class TestABadPrimaryFallsBackToTheBackup:
+    """A digest mismatch on the primary used to be accepted outright, which
+    returned the bad bytes and never asked the backup -- defeating the point of
+    having two sources."""
+
+    @staticmethod
+    def _serve(mapping):
+        """Patch download_file to write per-URL content, so no network is used."""
+        def fake(url, local_path, use_cache=False, show_progress=True):
+            payload = mapping.get(url)
+            if payload is None:
+                return None
+            Path(local_path).write_bytes(payload)
+            return Path(local_path)
+        return fake
+
+    def _digest(self, b):
+        import hashlib
+        return hashlib.sha256(b).hexdigest()
+
+    def test_a_good_backup_replaces_a_corrupt_primary(self, tmp_path, monkeypatch):
+        good, bad = b"the real file", b"corrupted"
+        monkeypatch.setattr(file_utils, "download_file",
+                            self._serve({"P": bad, "B": good}))
+        out = file_utils.download_file_with_fallback(
+            "P", tmp_path / "f.bin", backup_url="B",
+            expected_sha256=self._digest(good), show_progress=False)
+        assert out is not None
+        assert out.read_bytes() == good, "kept the corrupt primary copy"
+        assert not (tmp_path / "f.bin.primary").exists(), "left a quarantine file behind"
+
+    def test_a_corrupt_primary_is_kept_when_the_backup_is_dead(self, tmp_path, monkeypatch):
+        """Leniency is preserved: with nothing better available, the mismatching
+        bytes are still returned rather than failing the round."""
+        good, bad = b"the real file", b"corrupted"
+        monkeypatch.setattr(file_utils, "download_file",
+                            self._serve({"P": bad}))
+        out = file_utils.download_file_with_fallback(
+            "P", tmp_path / "f.bin", backup_url="B",
+            expected_sha256=self._digest(good), show_progress=False)
+        assert out is not None, "dropped usable bytes when the backup was dead"
+        assert out.read_bytes() == bad
+        assert not (tmp_path / "f.bin.primary").exists()
+
+    def test_with_no_backup_the_primary_is_accepted_as_before(self, tmp_path, monkeypatch):
+        good, bad = b"the real file", b"corrupted"
+        monkeypatch.setattr(file_utils, "download_file",
+                            self._serve({"P": bad}))
+        out = file_utils.download_file_with_fallback(
+            "P", tmp_path / "f.bin", backup_url=None,
+            expected_sha256=self._digest(good), show_progress=False)
+        assert out is not None and out.read_bytes() == bad
+
+    def test_a_matching_primary_never_touches_the_backup(self, tmp_path, monkeypatch):
+        good = b"the real file"
+        calls = []
+        def fake(url, local_path, use_cache=False, show_progress=True):
+            calls.append(url)
+            Path(local_path).write_bytes(good)
+            return Path(local_path)
+        monkeypatch.setattr(file_utils, "download_file", fake)
+        out = file_utils.download_file_with_fallback(
+            "P", tmp_path / "f.bin", backup_url="B",
+            expected_sha256=self._digest(good), show_progress=False)
+        assert out is not None
+        assert calls == ["P"], f"fetched the backup unnecessarily: {calls}"
+
+    def test_a_non_string_digest_does_not_crash_the_cache_check(self, tmp_path):
+        """The platform supplies this value; an int or dict there must not turn
+        a cache miss into a TypeError."""
+        f = tmp_path / "f.bin"
+        f.write_bytes(b"whatever")
+        for bad in (12345, {"a": 1}, ["x"], 3.14):
+            file_utils.download_file_verified(
+                "http://127.0.0.1:1/nope", f, expected_sha256=bad, show_progress=False)

@@ -125,113 +125,63 @@ class TestSwitchingVersions:
         )
 
 
-class TestTheVersionIsKnownBeforeScoring:
-    """The resolver has to be consulted BEFORE a round is scored.
-
-    Reading it from a config cached during finalization means a fresh validator
-    scores its first round on the fallback rather than on what the platform
-    advertises — and that first round is submitted on a scale the rest of the
-    fleet is not using.
-    """
-
-    def test_the_validator_resolves_before_it_scores(self):
-        """Structural: the resolve call must precede the scorer selection."""
-        import ast
-        import pathlib
-
-        src = pathlib.Path("neurons/validator.py").read_text()
-        tree = ast.parse(src)
-
-        target = next(
-            n for n in ast.walk(tree)
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and n.name == "_scoring_version"
-        )
-        body = ast.unparse(target)
-        assert "get_network_config" in body, (
-            "_scoring_version reads a cache instead of asking the platform; the "
-            "cache is refreshed during finalization, after this round was scored"
-        )
-
-    def test_the_scorer_label_follows_the_version_that_ran(self):
+class TestTheScorerLabel:
+    def test_it_follows_the_version_that_ran(self):
         """A v1 score labelled AdvancedV2 makes two incomparable scales
-        indistinguishable to anyone reading the record."""
-        import ast
-        import pathlib
+        indistinguishable to whoever reads the record. v1's label is
+        "Advanced", the name the deployed fleet already writes, because v1 is
+        that same formula."""
+        assert sv.scorer_name(sv.V2) == "AdvancedV2"
+        assert sv.scorer_name(sv.V1) == "Advanced"
 
-        src = pathlib.Path("neurons/validator.py").read_text()
-        tree = ast.parse(src)
-        fn = next(
-            n for n in ast.walk(tree)
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and n.name == "_build_advanced_metrics_payload"
-        )
-        body = ast.unparse(fn)
-        assert "AdvancedV1" in body and "scoring_version" in body, (
-            "the scorer name is hardcoded and no longer reflects what ran"
-        )
-
-    def test_scoring_version_is_a_parameter_not_a_closure(self):
-        """It is used in a nested function defined in a different scope from
-        where it is resolved, so it has to be passed explicitly."""
-        import ast
-        import pathlib
-
-        tree = ast.parse(pathlib.Path("neurons/validator.py").read_text())
-        fn = next(
-            n for n in ast.walk(tree)
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and n.name == "_submit_miner_score"
-        )
-        names = [a.arg for a in fn.args.args] + [a.arg for a in fn.args.kwonlyargs]
-        assert "scoring_version" in names
+    @pytest.mark.parametrize("unknown", ["", None, "v3", "V2 ", "advancedv2"])
+    def test_anything_unresolved_reads_as_v1(self, unknown):
+        """Never silently as v2: labelling a v1 number AdvancedV2 is the
+        confusion the label exists to prevent."""
+        assert sv.scorer_name(unknown) == "Advanced"
 
 
-class TestTheCacheExpiresWithTheRound:
-    """The version is cached per round so a platform change cannot land
-    mid-round and score some miners on one scale and the rest on another.
-
-    The cache key has to be the round. Keying it on something that never
-    changes freezes the version for the life of the process, so a platform flip
-    never reaches a running validator — which is most of the point of putting
-    the switch on the platform.
+class TestTheRoundPinBeatsTheLiveConfig:
+    """A round carries the version it is scored on. Validators resolve the live
+    config at slightly different moments, so a change landing between two of
+    them would put both scales in one round's ranking. The pin removes that.
     """
 
-    def test_the_resolver_takes_the_round_id_as_a_parameter(self):
-        import ast
-        import pathlib
+    def _validator(self, pinned, advertised):
+        import types
+        from neurons.validator import Validator
 
-        tree = ast.parse(pathlib.Path("neurons/validator.py").read_text())
-        fn = next(
-            n for n in ast.walk(tree)
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and n.name == "_scoring_version"
+        v = object.__new__(Validator)
+        v._round_pinned_version = None
+        v._scoring_version_cache = None
+        v.platform_client = types.SimpleNamespace(
+            get_network_config=_const({"scoring_version": advertised})
         )
-        names = [a.arg for a in fn.args.args]
-        assert "round_id" in names, (
-            "the cache key does not come from the caller, so it cannot change "
-            "between rounds"
-        )
+        v._adopt_round_pin("r1", pinned)
+        return v
 
-    def test_it_does_not_key_on_an_attribute_nothing_assigns(self):
-        """`current_round_id` was read but never set anywhere in the repo, so
-        the key was always None and the version never expired."""
-        import pathlib
+    @pytest.mark.parametrize("pinned,advertised,expected", [
+        ("v2", "v1", "v2"),   # the pin wins
+        ("v1", "v2", "v1"),   # in both directions
+        (None, "v2", "v2"),   # no pin: fall back to the live config
+        ("nonsense", "v1", "v1"),  # an unrecognised pin is not an instruction
+    ])
+    def test_the_pin_decides(self, pinned, advertised, expected):
+        import asyncio
+        v = self._validator(pinned, advertised)
+        assert asyncio.run(v._scoring_version("r1")) == expected
 
-        sources = list(pathlib.Path("neurons").rglob("*.py")) + list(
-            pathlib.Path("utils").rglob("*.py")
-        )
-        assignments = [
-            p for p in sources
-            if "current_round_id =" in p.read_text() or "current_round_id=" in p.read_text()
-        ]
-        reads = [p for p in sources if "current_round_id" in p.read_text()]
-        assert not reads or assignments, (
-            f"current_round_id is read in {[p.name for p in reads]} but assigned nowhere"
-        )
+    def test_a_pin_drops_a_cache_resolved_before_it_was_known(self):
+        """The version can be resolved before the pin arrives. If they
+        disagree the cache is wrong, so it is dropped rather than kept."""
+        import asyncio
+        v = self._validator(None, "v1")
+        assert asyncio.run(v._scoring_version("r1")) == "v1"
+        v._adopt_round_pin("r1", "v2")
+        assert asyncio.run(v._scoring_version("r1")) == "v2"
 
-    def test_the_call_site_passes_the_round(self):
-        import pathlib
 
-        src = pathlib.Path("neurons/validator.py").read_text()
-        assert "_scoring_version(round_id)" in src
+def _const(value):
+    async def _f(*a, **k):
+        return value
+    return _f

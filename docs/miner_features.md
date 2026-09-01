@@ -191,32 +191,55 @@ submissions-used at or above the free allowance *while still reporting*
 spent if that happens, not as a way to iterate within a round: repeatedly
 resubmitting a better config is not something the shipped loop does.
 
-### Turning it off
+### Making a paid resubmission
+
+The loop never does this on its own. It stops at the first submission of a
+round, so a second one is always a deliberate act:
 
 ```bash
-export MINER_PAY_FOR_RESUBMISSIONS=0     # accepts 0, false, no, off
+export MINER_PAY_FOR_RESUBMISSIONS=1
+python neurons/miner.py --resubmit
 ```
 
-With that set, this miner never transfers TAO for a submission, whatever the
+Both are required. Without the environment variable nothing is ever paid;
+without `--resubmit` the miner sees `has_submitted` and stops before it would
+need to pay.
+
+The price is read from the same round response that reports `has_submitted`, so
+it already reflects the escalation from every submission your coldkey has made
+this round. If the platform quotes no fee, the miner refuses rather than guessing
+a price -- an underpayment is refused on arrival and the TAO is already gone.
+
+### Turning it on
+
+This miner spends nothing unless you say so:
+
+```bash
+export MINER_PAY_FOR_RESUBMISSIONS=1     # accepts 1, true, yes, on
+```
+
+Unset — the default — it never transfers TAO for a submission, whatever the
 platform advertises. A submission past the free allowance still goes out, just
 without a payment proof; the platform refuses it with HTTP 402, the miner logs
 that and carries on to the next round. Nothing is spent either way.
 
-**Why this is opt-out.** The fee is a network policy, so the decision lives in
-one place — the platform — rather than requiring every operator to opt in
-individually, which would leave the policy inert in practice.
+**Why this is opt-in.** `scripts/auto_update.sh` pulls and restarts under pm2,
+so a miner acquires new behaviour without anyone reading a release note. If a
+published policy were enough to authorise spending, every auto-updated miner
+would begin paying the moment one appeared. A ceiling bounds what a mistake
+costs; it does not make the spending consented to.
 
-**What that costs you.** `scripts/auto_update.sh` pulls and restarts under pm2,
-so a miner can acquire this behaviour without anyone reading a release note.
-What bounds the damage is not a switch but the two ceilings below: a fee above
-the per-submission cap is refused outright, and total spend is capped over a
-rolling 24 hours. Set both deliberately.
+**Set the ceilings anyway.** They bound what a wrong or hostile policy can cost
+once you have opted in: a fee above the per-submission cap is refused outright,
+and spend is capped over a rolling 24 hours both per hotkey and across every
+hotkey sharing this host.
 
 | Variable | Default | Effect |
 |---|---|---|
-| `MINER_PAY_FOR_RESUBMISSIONS` | *(unset = follow platform policy)* | Set to `0` to never spend |
+| `MINER_PAY_FOR_RESUBMISSIONS` | *(unset = never spend)* | Set to `1` to take part |
 | `MINOS_MAX_RESUBMISSION_FEE_TAO` | `0.01` | Hard per-submission ceiling. A higher fee is **refused, not clamped** |
 | `MINOS_MAX_DAILY_RESUBMISSION_TAO` | `0.05` | Hard ceiling on spend **per hotkey** in a rolling 24h |
+| `MINOS_MAX_DAILY_WALLET_TAO` | `0.10` | Hard ceiling on spend by **all hotkeys on this host** in a rolling 24h |
 | `MINOS_PAYMENT_LEDGER` | `~/.minos/submission_payments.jsonl` | Payment record |
 | `MINER_ALLOW_ZERO_FREE_SUBMISSIONS` | *(unset = off)* | Honour an advertised allowance of **zero** free submissions |
 
@@ -280,6 +303,6 @@ The server-side half exists: the allowance is counted per hotkey, on-chain proof
 are verified against the chain, and spent references are recorded so a payment
 cannot be used twice. None of it has run against a live chain yet.
 
-Expect an announcement before any of this becomes active. If you would rather it
-never became active for your miner, set `MINER_PAY_FOR_RESUBMISSIONS=0` now —
-that decision is honoured regardless of what the platform later advertises.
+Expect an announcement before any of this becomes active. You do not need to do
+anything to stay out of it: without `MINER_PAY_FOR_RESUBMISSIONS` set, this
+miner never pays, regardless of what the platform later advertises.
