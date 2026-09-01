@@ -252,3 +252,81 @@ class TestClassCounts:
 
     def test_empty_input_is_safe(self):
         assert difficulty_weighted_f1(difficulty_class_counts([])) is None
+
+
+class TestV2EnforcesItsInputContract:
+    """max(0.0, nan) returns 0.0 because NaN compares False against everything,
+    so a broken fp_per_target silently became exp(0) == 1.0 -- a PERFECT
+    germline component. "This measurement is broken" must never read as "this
+    miner was flawless"."""
+
+    COUNTS = {"snp_het": {"tp": 10, "fp": 0, "fn": 0}}
+
+    @pytest.mark.parametrize("bad", [
+        float("nan"), float("inf"), float("-inf"), -1.0, -0.0001,
+    ])
+    def test_a_non_finite_or_negative_fp_rate_is_refused(self, bad):
+        out = AdvancedScorer.compute_score_v2({"fp_per_target": bad}, self.COUNTS)
+        assert out is None, f"fp_per_target={bad!r} produced a score of {out}"
+
+    @pytest.mark.parametrize("bad", ["abc", {}, [], object()])
+    def test_a_non_numeric_fp_rate_is_refused(self, bad):
+        assert AdvancedScorer.compute_score_v2(
+            {"fp_per_target": bad}, self.COUNTS) is None
+
+    def test_a_zero_fp_rate_is_still_a_perfect_germline(self):
+        """Genuinely zero is different from broken and must keep scoring."""
+        out = AdvancedScorer.compute_score_v2({"fp_per_target": 0.0}, self.COUNTS)
+        assert out is not None and out == pytest.approx(100.0)
+
+    def test_the_emitted_score_is_within_range(self):
+        out = AdvancedScorer.compute_score_v2({"fp_per_target": 2.0}, self.COUNTS)
+        assert out is not None and 0.0 <= out <= 100.0
+
+
+class TestTheGateCannotBeSidesteppedByOmission:
+    """Under v1 these ratios were scored components, so an absent one earned
+    nothing. In v2 the gate is pass/fail, so "absent means skip" is a free pass
+    a miner can choose -- e.g. by emitting no homozygous SNP calls."""
+
+    def _metrics(self, **kw):
+        m = {"fp_per_target": 0.0,
+             "titv_truth_snp": 2.0, "titv_query_snp": 2.0,
+             "hethom_truth_snp": 1.5, "hethom_query_snp": 1.5}
+        m.update(kw)
+        return m
+
+    def test_a_measurable_truth_with_no_query_ratio_fails(self):
+        """The bypass: truth has homozygous SNPs, the query called none."""
+        assert plausibility_gate(self._metrics(hethom_query_snp=0)) is False
+
+    @pytest.mark.parametrize("absent", [None, 0, 0.0, float("nan"),
+                                        float("inf"), -1.0, "abc"])
+    def test_every_unusable_query_ratio_fails_the_gate(self, absent):
+        assert plausibility_gate(self._metrics(titv_query_snp=absent)) is False
+
+    def test_a_missing_query_key_fails_the_gate(self):
+        m = self._metrics()
+        del m["hethom_query_snp"]
+        assert plausibility_gate(m) is False
+
+    @pytest.mark.parametrize("unusable", [None, 0, float("nan"), -1.0])
+    def test_an_unmeasurable_truth_ratio_is_skipped_not_failed(self, unusable):
+        """A round with no measurable truth ratio is the round's property, not
+        the miner's -- it must not disqualify them."""
+        assert plausibility_gate(
+            self._metrics(titv_truth_snp=unusable, titv_query_snp=unusable)) is True
+
+    def test_both_undefined_still_passes(self):
+        assert plausibility_gate({"titv_truth_snp": 0, "titv_query_snp": 0,
+                                  "hethom_truth_snp": 0, "hethom_query_snp": 0}) is True
+
+    def test_a_real_deviation_still_fails(self):
+        assert plausibility_gate(self._metrics(titv_query_snp=9.0)) is False
+
+    def test_the_bypass_scores_zero_end_to_end(self):
+        """A gate failure is 0.0, not None: the miner was scored and failed."""
+        out = AdvancedScorer.compute_score_v2(
+            self._metrics(hethom_query_snp=0),
+            {"snp_het": {"tp": 10, "fp": 0, "fn": 0}})
+        assert out == 0.0

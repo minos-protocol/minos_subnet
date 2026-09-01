@@ -434,11 +434,19 @@ class TestNonFiniteMetrics:
             m.pop(k, None)
         assert AdvancedScorer.compute_advanced_score(m) > 99.0
 
-    def test_a_non_finite_score_raises_instead_of_silently_scoring_zero(self):
-        with pytest.raises(ValueError):
-            AdvancedScorer.compute_advanced_score(
-                self._perfect(overcall_penalty=float("nan"))
-            )
+    def test_a_non_finite_penalty_still_scores_zero(self):
+        """v1 behaviour, frozen deliberately.
+
+        nan loses every comparison, so max(0.0, nan) returns 0.0 and a perfect
+        callset is emitted as a legitimate zero. Raising instead would be
+        better, and v2 does return None — but changing it here would move live
+        v1 scores without a version bump to signal it, which is exactly what
+        the scoring_version gate exists to prevent.
+        """
+        score = AdvancedScorer.compute_advanced_score(
+            self._perfect(overcall_penalty=float("nan"))
+        )
+        assert score == 0.0
 
 
 class TestCompletenessWeighting:
@@ -454,16 +462,19 @@ class TestCompletenessWeighting:
         m.update(over)
         return m
 
-    def test_a_class_with_no_truth_does_not_score_zero_recall(self):
-        """A flat mean of the two class recalls handed every miner in a
-        SNP-only round avg_recall=0.5, capping the whole field, because
-        recall_indel is reported as 0.0 when there are no indel targets."""
-        score = AdvancedScorer.compute_advanced_score(self._m())
-        assert score > 95.0, f"SNP-only perfect round scored {score}"
+    def test_a_class_with_no_truth_still_scores_zero_recall(self):
+        """v1 behaviour, frozen deliberately.
 
-    def test_recall_is_truth_weighted_not_averaged(self):
-        """With 100 SNPs and 1 indel, missing the single indel must cost far
-        less than missing every SNP."""
+        The recall mean is flat, so a round with no targets in one class is
+        scored the same way for every miner in it. Weighting it here would move
+        every live v1 score; v2 is where the weighting is revised.
+        """
+        score = AdvancedScorer.compute_advanced_score(self._m())
+        assert 98.0 < score < 99.5, f"SNP-only perfect round scored {score}"
+
+    def test_missing_one_indel_still_costs_less_than_missing_every_snp(self):
+        """Not via avg_recall, which is a flat mean either way, but via the
+        core F1 component — that one has always been truth-count weighted."""
         miss_indel = AdvancedScorer.compute_advanced_score(
             self._m(truth_total_indel=1, recall_indel=0.0, f1_indel=0.0)
         )
@@ -565,3 +576,65 @@ class TestCoverageIsADeadConstant:
             {**metrics, 'frac_na_snp': 1.0}
         )
         assert with_coverage - without_coverage == pytest.approx(7.5, abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# TestV1IsFrozen
+# ---------------------------------------------------------------------------
+
+class TestV1IsFrozen:
+    """v1 must score identically to the deployed scorer.
+
+    v2 exists so that v1 never has to change. Changing compute_advanced_score
+    reorders a live leaderboard with nothing to signal it, and fields are
+    routinely tied to fifteen decimal places.
+
+    These pin the behaviours that were altered once and reverted, so a future
+    change to v1 has to be deliberate rather than incidental.
+    """
+
+    def _m(self, **over):
+        m = dict(
+            f1_snp=0.9, f1_indel=0.8, recall_snp=0.9, recall_indel=0.8,
+            truth_total_snp=2400, truth_total_indel=380,
+            query_total_snp=2400, query_total_indel=380,
+            fp_snp=0, fp_indel=0, frac_na_snp=0.0, frac_na_indel=0.0,
+            titv_truth_snp=2.05, titv_query_snp=2.05,
+            hethom_truth_snp=1.5, hethom_query_snp=1.5,
+            hethom_truth_indel=1.2, hethom_query_indel=1.2,
+        )
+        m.update(over)
+        return m
+
+    def test_avg_recall_is_a_flat_mean_not_truth_weighted(self):
+        """Weighting it by truth count changes the great majority of live
+        submissions, so the flat mean stays until v2."""
+        common = dict(f1_snp=0.9, f1_indel=0.9)
+        all_snps = AdvancedScorer.compute_advanced_score(
+            self._m(recall_snp=1.0, recall_indel=0.0, **common)
+        )
+        all_indels = AdvancedScorer.compute_advanced_score(
+            self._m(recall_snp=0.0, recall_indel=1.0, **common)
+        )
+        assert all_snps == all_indels
+
+    def test_an_absent_query_ratio_scores_the_same_as_a_matching_one(self):
+        """The no-penalty default. v2 replaces it with a plausibility gate."""
+        both = AdvancedScorer.compute_advanced_score(self._m())
+        no_query_hethom = AdvancedScorer.compute_advanced_score(
+            self._m(hethom_query_snp=0.0, hethom_query_indel=0.0)
+        )
+        assert no_query_hethom == both
+
+    def test_a_non_finite_ratio_is_not_filtered_out(self):
+        """Filtering it earlier changes the emitted score."""
+        poisoned = AdvancedScorer.compute_advanced_score(
+            self._m(titv_query_snp=float("inf"))
+        )
+        clean = AdvancedScorer.compute_advanced_score(self._m())
+        assert poisoned < clean
+
+    def test_a_non_finite_result_is_emitted_as_zero_not_raised(self):
+        assert AdvancedScorer.compute_advanced_score(
+            self._m(overcall_penalty=float("nan"))
+        ) == 0.0

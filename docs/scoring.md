@@ -62,47 +62,26 @@ Component emphasis uses `emphasis(m, gamma) = 1 - (1 - m)^gamma`. A gamma below
 | Component | Weight | What it measures |
 |---|---|---|
 | `core` | 0.60 | SNP and indel F1 averaged by truth count, through `emphasis(m, 0.5)`. |
-| `completeness` | 0.15 | Mean of `emphasis(recall, 3.0)` — recall also averaged by truth count — and `emphasis(coverage, 2.0)`, where `coverage = 1 - frac_na`. Both metric producers set `frac_na` to 0.0, so in practice coverage contributes a constant. |
+| `completeness` | 0.15 | Mean of `emphasis(recall, 3.0)` and `emphasis(coverage, 2.0)`, where `coverage = 1 - frac_na`. |
 | `fp` | 0.15 | Mean of `exp(-max(0, fp_rate - target) / target)` with `target = max(0.002, 1 / truth total)`, and a call-count term `exp(-abs(calls / truth - 1) / 0.10)`. |
 | `quality` | 0.10 | Mean of a ti/tv term and a het/hom term, each `exp(-abs(query - truth) / tolerance)`; tolerance 0.1 for ti/tv, 0.15 for het/hom (SNP and indel het/hom averaged). |
 
-A quality term whose truth-side ratio is usable but whose query-side ratio is
-not scores 0, not full marks. The final score is floored at 0 after the overcall
-penalty is subtracted.
+The final score is floored at 0 after the overcall penalty is subtracted.
 
-### The overcall penalty is subtractive and sits outside the 60/15/15/10 table
+### v1 is frozen
 
-The four weighted components sum to 100, so the table above looks complete. A
-separate guardrail then **subtracts up to 45 points** from the total, which means
-your downside is not bounded by the 15% FP component.
-
-```
-fp_per_target      = (region SNP FPs + region INDEL FPs) / synthetic truth total
-snp_fp_per_target  = region SNP FPs / synthetic SNP truth total
-
-if fp_per_target > 10.0 and snp_fp_per_target > 6.0:
-    penalty = min(45.0, (fp_per_target - 10.0) * 4.0)
-```
-
-False positives are counted across the whole challenge region, not only at truth
-positions. Constants live in `utils/scoring.py` as `OVERCALL_FP_PER_TARGET_MAX`,
-`OVERCALL_SNP_FP_PER_TARGET_MAX`, `OVERCALL_PENALTY_SLOPE` and
-`OVERCALL_PENALTY_MAX`.
-
-### `MINOS_OVERCALL_STRICT`
-
-With this set, the guardrail fires on `fp_per_target` alone. It is **off by
-default**: it changes emitted v1 scores, so it must be set identically on every
-validator or honest validators will disagree about the same submission. It moves
-only the v1 penalty — v2 does not use `overcall_penalty`, and the
-`fp_per_target` its germline term reads is the same number either way.
+v1 scores live rounds, and a field is routinely tied to fifteen decimal places,
+so any change to the formula reorders a leaderboard with nothing to signal it.
+It is therefore fixed: improvements go into
+[Scoring v2](#scoring-v2-difficulty-weighted), and the platform decides when the
+network moves between them.
 
 ---
 
 ## Scoring v2 — difficulty-weighted
 
 **Status: implemented; used when the platform advertises
-`scoring_version: v2`.** See [How a change of version behaves](#how-a-change-of-version-behaves).
+`scoring_version: v2`.** See [Before v2 can be turned on](#before-v2-can-be-turned-on).
 
 v1's core F1 is weighted by truth *count*, so the most numerous variant class
 dominates the score. On live rounds that class is SNPs, which are the easiest
@@ -147,9 +126,20 @@ stays in at F1 0 so those false positives are still priced.
 
 The gate compares the query's SNP ti/tv and SNP het/hom against truth, and fails
 on a deviation above `GATE_TITV_MAX_DELTA` (0.6) or `GATE_HETHOM_MAX_DELTA`
-(1.5). A failed gate scores exactly 0.0. A ratio is judged only when both truth
-and query sides are present, so an undefined ratio neither passes nor fails —
-and earns nothing.
+(1.5). A failed gate scores exactly 0.0.
+
+An unmeasurable ratio is not a free pass. The rule is:
+
+- **Truth ratio unmeasurable** — the comparison is skipped. That is a property
+  of the round, not of the miner.
+- **Truth measurable, query not** — the gate **fails**. Under v1 these ratios
+  were scored components, so an absent one simply earned nothing; in v2 the gate
+  is pass/fail, so treating absent as "skip" would let a callset with no
+  homozygous SNP calls sidestep the het/hom check entirely.
+- **Both measurable** — compared against the threshold above.
+
+Zero, negative, non-finite and non-numeric all count as unmeasurable: a ti/tv of
+0 is what an empty or degenerate callset produces, not a real ratio.
 
 v2 drops v1's `completeness`, `fp`/`size_pen` and `quality` components.
 Plausibility becomes a pass/fail gate rather than points; its bounds are loose
@@ -174,21 +164,23 @@ entirely.** It does not fall back to v1: the rest of the fleet is on v2 that
 round, and one v1 score mixed into that ranking is worse than one missing score.
 The miner records no local score for the round.
 
-### How a change of version behaves
+### Before v2 can be turned on
 
-- The version is resolved once per round and held, so a change landing
-  mid-round cannot score some miners on one scale and the rest on another.
+- Advertise `scoring_version: v2` from the **platform**, in
+  `/scoring/network-config`. Every validator picks it up from there; there is
+  nothing for operators to set.
+- Confirm rounds ship a mutations VCF, or every miner is skipped — see
+  [what v2 needs](#what-v2-needs-before-it-can-score-anything).
+- The version is resolved once and held, so a change landing mid-round cannot
+  score some miners on one scale and the rest on another.
 - Within one round the validator refuses to mix scales: if v2 is selected and
   unavailable for a miner, that miner is skipped with an error rather than
   quietly scored on v1. One missing score is better than one incomparable score
   in the ranking.
-- A validator that cannot reach the platform keeps its previous version, so a
-  change propagates as each one next resolves rather than instantly.
-- v2 needs rounds that carry a mutations VCF — see
-  [what v2 needs](#what-v2-needs-before-it-can-score-anything). Without one it
-  declines to score rather than pricing precision from `core` alone.
-- Scores either side of a change are not comparable, because the two scorers
-  produce different scales.
+- Validators that cannot reach the platform keep their previous version, so a
+  flip propagates as each one next resolves rather than instantly.
+- It reorders results and therefore redistributes emissions. Announce it before
+  enabling it.
 
 ### Reading the change in the logs
 

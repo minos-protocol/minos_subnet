@@ -123,5 +123,50 @@ class TestVariantType:
 
 
 class TestRobustness:
-    def test_a_missing_file_returns_empty_rather_than_raising(self, tmp_path):
-        assert parse_happy_vcf(str(tmp_path / "nope.vcf.gz")) == []
+    def test_a_missing_file_reports_failure_rather_than_raising(self, tmp_path):
+        assert parse_happy_vcf(str(tmp_path / "nope.vcf.gz")) is None, (
+            "a file that could not be opened must report failure, not an empty "
+            "callset -- they mean different things to the v2 scorer"
+        )
+
+
+class TestTheParseIsAtomic:
+    """A partial parse is indistinguishable from a complete one, and the v2 core
+    is built from these records. Dropping the FNs and FPs after a mid-file
+    failure while keeping the TPs before it inflates the score in the miner's
+    favour, silently."""
+
+    def _corrupt_after_good_records(self, tmp_path):
+        """Valid early TPs, a record pysam cannot read, then the FNs and FPs
+        that would have counted against the miner."""
+        rows = [
+            _row(100, "A", "G", "1/1:TP:SNP:30", "1/1:TP:SNP:30"),
+            _row(150, "A", "G", "1/1:TP:SNP:30", "1/1:TP:SNP:30"),
+            "chr20\tNOT_A_POSITION\t.\tA\tG\t50\tPASS\t.\tGT:BD:BVT:DP\t1/1:TP:SNP:30\t1/1:TP:SNP:30\n",
+            _row(300, "A", "G", "0/1:FN:SNP:0", "./.:.:.:0"),
+            _row(400, "A", "G", "./.:.:.:0", "0/1:FP:SNP:25"),
+        ]
+        return _write_vcf(tmp_path, rows, name="corrupt.vcf")
+
+    def test_a_mid_file_failure_discards_the_whole_parse(self, tmp_path):
+        """pysam aborts on the bad position after reading two TPs. Before this
+        was atomic those two were returned and the FN and FP after them were
+        lost -- a strictly better-looking callset than the miner produced."""
+        recs = parse_happy_vcf(self._corrupt_after_good_records(tmp_path))
+        assert recs is None, (
+            f"returned a partial callset ({recs if recs is None else len(recs)} "
+            "records): the TPs before the bad record survived while the FN and "
+            "FP after it were dropped"
+        )
+
+    def test_a_partial_parse_cannot_reach_difficulty_counts(self, tmp_path):
+        """The end-to-end consequence: the v2 core is built from these records,
+        so a failed parse must yield no score rather than a flattering one."""
+        recs = parse_happy_vcf(self._corrupt_after_good_records(tmp_path))
+        assert recs is None
+        # What the caller must not do: treat a truncated list as usable.
+        assert not recs, "a falsy result is what stops v2 scoring downstream"
+
+    def test_a_valid_empty_file_is_not_a_failure(self, tmp_path):
+        """Empty and unparseable must stay distinguishable."""
+        assert parse_happy_vcf(_write_vcf(tmp_path, [], name="empty.vcf")) == []

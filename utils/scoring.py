@@ -9,6 +9,7 @@ import gzip
 import math
 import os
 import subprocess
+import time
 import traceback
 from typing import Any, Dict, List, Optional
 from pathlib import Path
@@ -260,6 +261,18 @@ def compute_synthetic_only_metrics(happy_vcf_path: str, mutations_vcf_path: str,
 
         target_snps = set()
         target_indel_positions = []
+        # Counted straight off the mutations VCF, independent of anything the
+        # miner produced. The TP+FN totals below cannot serve as a denominator:
+        # they come from fuzzy (+/-10bp, non-consuming) matching against hap.py
+        # output, so several decomposed query records can match one target and
+        # the same variant written differently yields a different total. A rate
+        # used in consensus has to have a fixed denominator.
+        #
+        # The unit is the ALT ALLELE, stated explicitly because a multiallelic
+        # record would otherwise count once or N times depending on where you
+        # looked.
+        target_snp_alleles = 0
+        target_indel_alleles = 0
         opener = gzip.open if str(mutations_path).endswith('.gz') else open
         with opener(mutations_path, 'rt') as f:
             for line in f:
@@ -269,13 +282,27 @@ def compute_synthetic_only_metrics(happy_vcf_path: str, mutations_vcf_path: str,
                 if len(parts) < 5:
                     continue
                 chrom, pos, ref, alt = parts[0], int(parts[1]), parts[3], parts[4]
+
+                for one_alt in str(alt).split(','):
+                    one_alt = one_alt.strip()
+                    if not one_alt or one_alt == '.':
+                        continue
+                    if len(ref) != len(one_alt):
+                        target_indel_alleles += 1
+                    else:
+                        target_snp_alleles += 1
+
+                # Matching structures are built exactly as before: changing how
+                # they key would move TP/FP/FN, and those feed v1's live core.
                 if len(ref) != len(alt):
                     target_indel_positions.append((chrom, pos))
                 else:
                     target_snps.add((chrom, pos, ref, alt))
 
         logger.info(f"Loaded {len(target_snps)} target SNPs and "
-                     f"{len(target_indel_positions)} target INDELs from {mutations_path.name}")
+                     f"{len(target_indel_positions)} target INDELs "
+                     f"({target_snp_alleles} SNP / {target_indel_alleles} INDEL "
+                     f"ALT alleles) from {mutations_path.name}")
         if not target_snps and not target_indel_positions:
             logger.error(f"No target mutations found in {mutations_path.name}")
             return None
@@ -344,6 +371,11 @@ def compute_synthetic_only_metrics(happy_vcf_path: str, mutations_vcf_path: str,
             'tp_snp': float(tp_s), 'fp_snp': float(fp_s), 'fn_snp': float(fn_s),
             'tp_indel': float(tp_i), 'fp_indel': float(fp_i), 'fn_indel': float(fn_i),
             'truth_total_snp': float(tp_s + fn_s), 'truth_total_indel': float(tp_i + fn_i),
+            # Query-independent target counts, for rates that must mean the same
+            # thing on every validator. NOT interchangeable with truth_total_*,
+            # which is what hap.py assessed and feeds v1's core weighting.
+            'target_total_snp': float(target_snp_alleles),
+            'target_total_indel': float(target_indel_alleles),
             'query_total_snp': float(tp_s + fp_s), 'query_total_indel': float(tp_i + fp_i),
             'frac_na_snp': 0.0, 'frac_na_indel': 0.0,
             'weighted_f1': 0.7 * f1_snp + 0.3 * f1_indel,
@@ -382,12 +414,26 @@ def overcall_strict_enabled() -> bool:
 
 def parse_region_overcall_metrics(happy_vcf_path: str,
                                   synthetic_truth_total: float,
-                                  synthetic_snp_truth_total: float) -> Optional[Dict[str, float]]:
+                                  synthetic_snp_truth_total: float,
+                                  v1_truth_total: Optional[float] = None,
+                                  v1_snp_truth_total: Optional[float] = None
+                                  ) -> Optional[Dict[str, float]]:
     """Count full-region query false positives for the overcall guardrail.
 
     Returns the FP counts plus ``overcall_penalty``, which
     AdvancedScorer.compute_score subtracts from the final score.
+
+    Two denominators, because the two consumers need different things.
+    ``synthetic_*`` are target ALT alleles from the mutations VCF: independent
+    of what the miner produced, so the ``fp_per_target`` rate v2 reads means the
+    same thing on every validator. ``v1_*`` are hap.py-assessed TP+FN, which is
+    what the v1 guardrail has always divided by. They default to the target
+    counts for callers that predate the split.
     """
+    if v1_truth_total is None:
+        v1_truth_total = synthetic_truth_total
+    if v1_snp_truth_total is None:
+        v1_snp_truth_total = synthetic_snp_truth_total
     try:
         vcf_path = Path(happy_vcf_path)
         if not vcf_path.exists():
@@ -422,8 +468,13 @@ def parse_region_overcall_metrics(happy_vcf_path: str,
         region_fp_total = counts['region_fp_snp'] + counts['region_fp_indel']
         fp_per_target = region_fp_total / max(float(synthetic_truth_total), 1.0)
         snp_fp_per_target = counts['region_fp_snp'] / max(float(synthetic_snp_truth_total), 1.0)
-        over_total = fp_per_target > OVERCALL_FP_PER_TARGET_MAX
-        over_snp = snp_fp_per_target > OVERCALL_SNP_FP_PER_TARGET_MAX
+
+        # The guardrail decides a v1 score, so it reads the v1 rates.
+        v1_fp_per_target = region_fp_total / max(float(v1_truth_total), 1.0)
+        v1_snp_fp_per_target = counts['region_fp_snp'] / max(float(v1_snp_truth_total), 1.0)
+
+        over_total = v1_fp_per_target > OVERCALL_FP_PER_TARGET_MAX
+        over_snp = v1_snp_fp_per_target > OVERCALL_SNP_FP_PER_TARGET_MAX
         # Strict mode requires only the total rate to be exceeded; the default
         # also requires the SNP rate. Either way the setting must be uniform
         # across the fleet, since it changes emitted v1 scores.
@@ -434,21 +485,21 @@ def parse_region_overcall_metrics(happy_vcf_path: str,
         if triggered:
             overcall_penalty = min(
                 OVERCALL_PENALTY_MAX,
-                (fp_per_target - OVERCALL_FP_PER_TARGET_MAX) * OVERCALL_PENALTY_SLOPE,
+                (v1_fp_per_target - OVERCALL_FP_PER_TARGET_MAX) * OVERCALL_PENALTY_SLOPE,
             )
         else:
             overcall_penalty = 0.0
 
         logger.info(f"Overcall guardrail: region_fp={region_fp_total}, "
-                    f"fp_per_target={fp_per_target:.2f}, "
-                    f"snp_fp_per_target={snp_fp_per_target:.2f}, "
+                    f"fp_per_target={v1_fp_per_target:.2f}, "
+                    f"snp_fp_per_target={v1_snp_fp_per_target:.2f}, "
                     f"strict={overcall_strict_enabled()}, "
                     f"penalty={overcall_penalty:.2f}")
         if over_total and not over_snp and not overcall_strict_enabled():
             logger.warning(
                 f"Overcall guardrail not triggered: fp_per_target="
-                f"{fp_per_target:.2f} over {OVERCALL_FP_PER_TARGET_MAX}, "
-                f"snp_fp_per_target={snp_fp_per_target:.2f} under "
+                f"{v1_fp_per_target:.2f} over {OVERCALL_FP_PER_TARGET_MAX}, "
+                f"snp_fp_per_target={v1_snp_fp_per_target:.2f} under "
                 f"{OVERCALL_SNP_FP_PER_TARGET_MAX}. Set MINOS_OVERCALL_STRICT "
                 f"to require the total rate alone."
             )
@@ -457,6 +508,7 @@ def parse_region_overcall_metrics(happy_vcf_path: str,
             'region_fp_snp': float(counts['region_fp_snp']),
             'region_fp_indel': float(counts['region_fp_indel']),
             'region_fp_total': float(region_fp_total),
+            # Target-denominated; v2's germline term reads this.
             'fp_per_target': fp_per_target,
             'snp_fp_per_target': snp_fp_per_target,
             'overcall_penalty': overcall_penalty,
@@ -816,14 +868,57 @@ class HappyScorer:
             if not index_csi.exists() and not index_tbi.exists():
                 logger.warning(f"Query VCF index not found (.csi or .tbi): {query_vcf}")
 
+            # The prefix is derived from the query filename and the round
+            # directory is reused, so a retry or restart finds the PREVIOUS
+            # invocation's artifacts sitting at exactly these paths. Clearing
+            # them first makes "the file exists" mean "this run produced it",
+            # which is what the acceptance check below assumes.
+            summary_csv = Path(f"{output_prefix}.summary.csv")
+            annotated_vcf = Path(f"{output_prefix}.vcf.gz")
+            for stale in sorted(output_dir.glob(f"{output_prefix.name}.*")):
+                try:
+                    stale.unlink()
+                    logger.debug(f"Removed stale hap.py artifact {stale.name}")
+                except OSError as exc:
+                    logger.warning(f"Could not remove stale artifact {stale.name}: {exc}")
+
+            invocation_start = time.time()
             result = subprocess.run(cmd_parts, capture_output=True, text=True, timeout=600)
 
-            # Check if summary CSV was created (hap.py may return code 1 with warnings but still produce output)
-            summary_csv = Path(f"{output_prefix}.summary.csv")
+            def _from_this_run(path: Path) -> bool:
+                """Whether this invocation produced the file.
+
+                The purge above should make this redundant; it is kept because
+                an unlink that silently failed would otherwise let a stale
+                artifact be scored as if it were fresh. One second of slack
+                absorbs coarse filesystem timestamp granularity.
+                """
+                try:
+                    return path.exists() and path.stat().st_mtime >= (invocation_start - 1.0)
+                except OSError:
+                    return False
+
+            if summary_csv.exists() and not _from_this_run(summary_csv):
+                logger.error(
+                    f"hap.py summary at {summary_csv.name} predates this invocation; "
+                    "refusing to score a stale artifact"
+                )
+                return self._get_zero_scores()
 
             if summary_csv.exists():
                 logger.info(f"hap.py completed, parsing results from {summary_csv}")
                 if result.returncode != 0:
+                    # A nonzero exit is only tolerable when this run produced a
+                    # complete artifact set. Without the annotated VCF the v2
+                    # core cannot be built, and a partial run must not read as
+                    # a successful one.
+                    if not _from_this_run(annotated_vcf):
+                        logger.error(
+                            f"hap.py returned {result.returncode} and produced no "
+                            f"annotated VCF this run; refusing to score a partial "
+                            f"artifact set. stderr: {(result.stderr or '')[-500:]}"
+                        )
+                        return self._get_zero_scores()
                     logger.debug(f"hap.py returned code {result.returncode} (warnings only, output is valid)")
 
                 # Parse results
@@ -837,22 +932,16 @@ class HappyScorer:
                         logger.warning("hap.py CSV has no headers!")
 
                     def safe_float(val):
-                        """Parse a hap.py CSV cell; non-finite reads as absent.
+                        """Parse a hap.py CSV cell.
 
-                        hap.py emits 'inf' for a ratio with a zero denominator,
-                        which must not reach the score arithmetic.
+                        hap.py writes 'inf' for a ratio with a zero denominator.
+                        It is passed through: v1 reads it, v2 rejects it at the
+                        plausibility gate.
                         """
                         try:
-                            f = float(val) if val and val != 'nan' else 0.0
+                            return float(val) if val and val != 'nan' else 0.0
                         except (ValueError, TypeError):
                             return 0.0
-                        if not math.isfinite(f):
-                            logger.warning(
-                                f"hap.py reported a non-finite metric ({val!r}); "
-                                f"treating as absent"
-                            )
-                            return 0.0
-                        return f
 
                     rows_parsed = 0
                     for row in reader:
@@ -943,14 +1032,37 @@ class HappyScorer:
                         logger.error("Failed to compute filtered metrics from hap.py output")
                         return self._get_zero_scores()
                     happy_results.update(synthetic_metrics)
-                    synthetic_truth_total = (
-                        synthetic_metrics.get('truth_total_snp', 0.0) +
-                        synthetic_metrics.get('truth_total_indel', 0.0)
+                    # fp_per_target is a rate that reaches consensus -- the v1
+                    # overcall guardrail and 30% of the v2 score. Its denominator
+                    # is the target count from the mutations VCF, not the TP+FN
+                    # hap.py happened to assess, so the same callset written two
+                    # ways cannot produce two different rates. Falls back to the
+                    # old totals only if the target counts are unavailable.
+                    synthetic_target_total = (
+                        synthetic_metrics.get('target_total_snp', 0.0) +
+                        synthetic_metrics.get('target_total_indel', 0.0)
                     )
+                    synthetic_target_snp = synthetic_metrics.get('target_total_snp', 0.0)
+                    if synthetic_target_total <= 0:
+                        logger.warning(
+                            "No target ALT alleles counted from the mutations VCF; "
+                            "falling back to assessed TP+FN for fp_per_target"
+                        )
+                        synthetic_target_total = (
+                            synthetic_metrics.get('truth_total_snp', 0.0) +
+                            synthetic_metrics.get('truth_total_indel', 0.0)
+                        )
+                        synthetic_target_snp = synthetic_metrics.get('truth_total_snp', 0.0)
                     overcall_metrics = parse_region_overcall_metrics(
                         str(happy_vcf),
-                        synthetic_truth_total,
-                        synthetic_metrics.get('truth_total_snp', 0.0)
+                        synthetic_target_total,
+                        synthetic_target_snp,
+                        # The target counts above are for the v2 rate only.
+                        v1_truth_total=(
+                            synthetic_metrics.get('truth_total_snp', 0.0) +
+                            synthetic_metrics.get('truth_total_indel', 0.0)
+                        ),
+                        v1_snp_truth_total=synthetic_metrics.get('truth_total_snp', 0.0),
                     )
                     if overcall_metrics:
                         happy_results.update(overcall_metrics)
@@ -1095,18 +1207,52 @@ def difficulty_weighted_f1(class_counts: Dict[str, Dict[str, int]]) -> Optional[
     return acc / total_w
 
 
+def _usable_ratio(value) -> Optional[float]:
+    """A ratio that can be compared, or None.
+
+    Zero, negative, non-finite and non-numeric all mean "not measurable" rather
+    than "measured as zero": a ti/tv or het/hom of 0 is what an empty or
+    degenerate callset produces, not a real ratio.
+    """
+    try:
+        ratio = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(ratio) or ratio <= 0:
+        return None
+    return ratio
+
+
 def plausibility_gate(metrics: Dict[str, float]) -> bool:
     """False when the callset is malformed enough to disqualify.
 
-    Only judges a ratio present on both sides; an undefined ratio neither passes
-    nor fails, and earns nothing.
+    Semantics, stated explicitly because the v1 reasoning does not survive here:
+
+    * Truth ratio unmeasurable -- skip. There is nothing to compare against, and
+      that is the round's property, not the miner's.
+    * Truth measurable, query not -- FAIL. Under v1 these ratios were scored
+      components, so an absent one simply earned nothing. In v2 the gate is
+      pass/fail, so treating absent as "skip" turns it into a free pass: a
+      callset with no homozygous SNP calls would sidestep the het/hom check
+      entirely, which is a bypass a miner can choose.
+    * Both measurable -- compare against the threshold.
     """
-    g = metrics.get
-    if g("titv_truth_snp", 0) > 0 and g("titv_query_snp", 0) > 0:
-        if abs(g("titv_query_snp", 0) - g("titv_truth_snp", 0)) > GATE_TITV_MAX_DELTA:
+    for truth_key, query_key, max_delta in (
+        ("titv_truth_snp", "titv_query_snp", GATE_TITV_MAX_DELTA),
+        ("hethom_truth_snp", "hethom_query_snp", GATE_HETHOM_MAX_DELTA),
+    ):
+        truth_ratio = _usable_ratio(metrics.get(truth_key))
+        if truth_ratio is None:
+            continue
+        query_ratio = _usable_ratio(metrics.get(query_key))
+        if query_ratio is None:
+            logger.warning(
+                f"Plausibility gate failed: {truth_key} is measurable "
+                f"({truth_ratio:.3f}) but {query_key} is not "
+                f"({metrics.get(query_key)!r})"
+            )
             return False
-    if g("hethom_truth_snp", 0) > 0 and g("hethom_query_snp", 0) > 0:
-        if abs(g("hethom_query_snp", 0) - g("hethom_truth_snp", 0)) > GATE_HETHOM_MAX_DELTA:
+        if abs(query_ratio - truth_ratio) > max_delta:
             return False
     return True
 
@@ -1145,6 +1291,11 @@ class AdvancedScorer:
         - FP Rate (15%): Penalizes FP > 0.2% and call count != truth count
         - Quality (10%): Ti/Tv and Het/Hom ratio match penalties
 
+        This formula is frozen. It scores live rounds and a field is routinely
+        tied to fifteen decimal places, so any change reorders a leaderboard.
+        compute_score_v2 is where it is revised, selected by the platform's
+        scoring_version.
+
         Args:
             metrics: Dictionary with f1_snp, f1_indel, plus additional hap.py metrics
 
@@ -1182,24 +1333,9 @@ class AdvancedScorer:
         core_component = AdvancedScorer.emphasis(weighted_f1, gamma=0.5)
 
         # Component 2: Completeness (15% weight) - recall + coverage
-        #
-        # Truth-weighted like core F1 above. A class with no truth variants is
-        # skipped, not scored as 0% recall.
-        recall_num = 0.0
-        recall_den = 0.0
-        if truth_total_snp > 0:
-            recall_num += recall_snp * truth_total_snp
-            recall_den += truth_total_snp
-        if truth_total_indel > 0:
-            recall_num += recall_indel * truth_total_indel
-            recall_den += truth_total_indel
-        avg_recall = (recall_num / recall_den) if recall_den > 0 else 0.0
-        # coverage is effectively constant: both metric producers deliberately
-        # set frac_na to 0.0. hap.py's Frac_NA spans the whole query VCF, and
-        # miners submit whole-chromosome callsets judged against a small eval
-        # region, so feeding it back would penalise breadth rather than
-        # inaccuracy. Redefining coverage over assessed variants only would move
-        # every live score — a weighting decision, not a cleanup.
+        # Frozen: a flat mean, unlike the truth-weighted core above. v2 is
+        # where the weighting is revised.
+        avg_recall = (recall_snp + recall_indel) / 2
         frac_na = max(frac_na_snp, frac_na_indel)
         coverage = 1.0 - frac_na
         completeness_component = (
@@ -1224,44 +1360,24 @@ class AdvancedScorer:
         titv_penalties = []
         hethom_penalties = []
 
-        # `> 0` alone is not enough: a non-finite ratio passes it and then turns
-        # the arithmetic below to nan. These values reach here from several
-        # readers, so guard at the point of use.
-        def _usable_ratio(*values) -> bool:
-            return all(math.isfinite(v) and v > 0 for v in values)
-
-        if _usable_ratio(titv_truth_snp, titv_query_snp):
+        # Frozen: the ratio gates and the no-penalty default below are v1 as
+        # deployed. v2 replaces both with a plausibility gate.
+        if titv_truth_snp > 0 and titv_query_snp > 0:
             titv_penalties.append(
                 AdvancedScorer.ratio_penalty(titv_query_snp - titv_truth_snp, 0.1)
             )
 
-        if _usable_ratio(hethom_truth_snp, hethom_query_snp):
+        if hethom_truth_snp > 0 and hethom_query_snp > 0:
             hethom_penalties.append(
                 AdvancedScorer.ratio_penalty(hethom_query_snp - hethom_truth_snp, 0.15)
             )
-        if _usable_ratio(hethom_truth_indel, hethom_query_indel):
+        if hethom_truth_indel > 0 and hethom_query_indel > 0:
             hethom_penalties.append(
                 AdvancedScorer.ratio_penalty(hethom_query_indel - hethom_truth_indel, 0.15)
             )
 
-        # Full marks only when the TRUTH ratio is also unavailable, i.e. there
-        # is nothing to measure against. A usable truth ratio with no query
-        # ratio is a degenerate callset and scores 0.
-        def _component(penalties, truth_ratios) -> float:
-            if penalties:
-                return sum(penalties) / len(penalties)
-            if any(math.isfinite(t) and t > 0 for t in truth_ratios):
-                logger.warning(
-                    "Quality: truth has a usable ratio but the query does not; "
-                    "scoring the component 0 rather than awarding full marks"
-                )
-                return 0.0
-            return 1.0
-
-        titv_component = _component(titv_penalties, (titv_truth_snp,))
-        hethom_component = _component(
-            hethom_penalties, (hethom_truth_snp, hethom_truth_indel)
-        )
+        titv_component = sum(titv_penalties) / len(titv_penalties) if titv_penalties else 1.0
+        hethom_component = sum(hethom_penalties) / len(hethom_penalties) if hethom_penalties else 1.0
         quality_component = (titv_component + hethom_component) / 2.0
 
         # Final weighted score (60/15/15/10)
@@ -1273,20 +1389,8 @@ class AdvancedScorer:
         )
 
         overcall_penalty = metrics.get('overcall_penalty', 0.0)
-        result = final_score - overcall_penalty
-
-        # max(0.0, nan) is 0.0, so a non-finite score would be emitted as a
-        # legitimate zero. It is a bug in this function; raise instead.
-        if not math.isfinite(result):
-            logger.error(
-                f"AdvancedScorer produced a non-finite score "
-                f"(core={core_component}, completeness={completeness_component}, "
-                f"fp={fp_component}, quality={quality_component}, "
-                f"overcall={overcall_penalty}); refusing to emit it as 0.0"
-            )
-            raise ValueError("AdvancedScorer produced a non-finite score")
-
-        return max(0.0, result)
+        # Frozen: v1 floors here rather than raising. v2 returns None instead.
+        return max(0.0, final_score - overcall_penalty)
 
     @staticmethod
     def compute_score_v2(
@@ -1317,12 +1421,35 @@ class AdvancedScorer:
             # Without a germline FP measurement precision cannot be priced;
             # decline rather than score on core alone.
             return None
-        germline = math.exp(-max(0.0, float(fp_per_target)) / GERMLINE_FP_SCALE)
+
+        # Enforce the scorer's own input contract rather than trusting the
+        # producer. max(0.0, nan) returns 0.0 -- NaN compares False against
+        # everything -- so a non-finite rate silently became exp(0) == 1.0, a
+        # PERFECT germline component. A negative rate does the same. Both are
+        # "this measurement is broken", never "this miner was flawless".
+        try:
+            fp_rate = float(fp_per_target)
+        except (TypeError, ValueError):
+            logger.error(f"v2: fp_per_target is not numeric ({fp_per_target!r})")
+            return None
+        if not math.isfinite(fp_rate) or fp_rate < 0:
+            logger.error(
+                f"v2: fp_per_target must be a finite, non-negative rate; "
+                f"got {fp_rate!r}. Declining to score."
+            )
+            return None
+        germline = math.exp(-fp_rate / GERMLINE_FP_SCALE)
 
         if not plausibility_gate(metrics):
             return 0.0
 
-        return 100.0 * (V2_CORE_WEIGHT * core + V2_GERMLINE_WEIGHT * germline)
+        score = 100.0 * (V2_CORE_WEIGHT * core + V2_GERMLINE_WEIGHT * germline)
+        # A score outside [0, 100] means a component broke its own contract.
+        # Emitting it would put an impossible number into consensus.
+        if not math.isfinite(score) or not (0.0 <= score <= 100.0):
+            logger.error(f"v2: computed an out-of-range score ({score!r}); declining")
+            return None
+        return score
 
 
 def _representative_alt(alts, truth_genotype, called_genotype) -> Optional[str]:
@@ -1345,8 +1472,16 @@ def _representative_alt(alts, truth_genotype, called_genotype) -> Optional[str]:
     return alts[0]
 
 
-def parse_happy_vcf(vcf_path: str, truth_vcf_path: str = None) -> List[Dict[str, Any]]:
+def parse_happy_vcf(vcf_path: str, truth_vcf_path: str = None) -> Optional[List[Dict[str, Any]]]:
     """Parse hap.py annotated VCF to extract per-variant TP/FP/FN classifications.
+
+    Parsing is ATOMIC: either every record is read, or None is returned. A
+    partial list would be indistinguishable from a complete one, and the v2
+    core is computed from these records -- dropping the FNs and FPs after a
+    mid-file failure while keeping the TPs before it inflates the score, in the
+    miner's favour, silently. None means "could not parse"; an empty list means
+    "parsed fine, no benchmark decisions in the file", and the two are not
+    interchangeable.
 
     hap.py annotated VCFs have FORMAT fields:
     - BD: Benchmark Decision (TP, FP, FN)
@@ -1379,7 +1514,7 @@ def parse_happy_vcf(vcf_path: str, truth_vcf_path: str = None) -> List[Dict[str,
         import pysam
     except ImportError:
         logger.warning("pysam not installed, cannot parse hap.py VCF for variant-level results")
-        return results
+        return None
 
     # Build set of synthetic positions from truth VCF if provided.
     # Test the INFO keys, not str(rec.info): pysam's VariantRecordInfo has no
@@ -1411,7 +1546,7 @@ def parse_happy_vcf(vcf_path: str, truth_vcf_path: str = None) -> List[Dict[str,
         vcf_in = pysam.VariantFile(vcf_path)
     except Exception as e:
         logger.error(f"Failed to open hap.py VCF {vcf_path}: {e}")
-        return results
+        return None
 
     try:
         for record in vcf_in:
@@ -1516,7 +1651,14 @@ def parse_happy_vcf(vcf_path: str, truth_vcf_path: str = None) -> List[Dict[str,
 
         logger.info(f"Parsed {len(results)} variant-level results from hap.py VCF")
     except Exception as e:
-        logger.error(f"Error parsing hap.py VCF: {e}")
+        # Discard what was accumulated. Returning it would hand the caller a
+        # truncated callset that looks complete: the records before the failure
+        # keep their TPs while the FNs and FPs after it vanish.
+        logger.error(
+            f"Error parsing hap.py VCF after {len(results)} record(s); "
+            f"discarding the partial parse: {e}"
+        )
+        return None
     finally:
         vcf_in.close()
 
