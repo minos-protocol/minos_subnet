@@ -12,9 +12,24 @@ import os
 import shlex
 import time
 from .tool_params import validate_and_build_flags, validate_region
-from ._common import count_variants
+from ._common import container_name, count_variants, reap_container
 
 logger = logging.getLogger(__name__)
+
+
+def _quote_flags(flags: list[str]) -> str:
+    """Shell-quote validated flags before interpolating them into the container shell.
+
+    A no-op for the numbers and fixed enum members the whitelist emits today;
+    it is here so that adding a string-valued parameter cannot make this
+    interpolation injectable.
+    """
+    quoted = []
+    for flag in flags:
+        # Flags arrive as "FLAG VALUE" (or a bare "FLAG" for bools); split once
+        # so the flag and its value are quoted as separate arguments.
+        quoted.append(" ".join(shlex.quote(part) for part in flag.split(" ", 1)))
+    return " ".join(quoted)
 
 
 def variant_call(
@@ -74,7 +89,7 @@ def variant_call(
         else:
             mpileup_flags.append(flag_info)
 
-    mpileup_flags_str = " ".join(mpileup_flags) if mpileup_flags else ""
+    mpileup_flags_str = _quote_flags(mpileup_flags)
 
     # `bcftools call` requires a caller-mode flag (`-m` for multiallelic,
     # `-c` for consensus). The previous default `-mv` was only injected
@@ -102,7 +117,7 @@ def variant_call(
         call_flags = ["-m"] + call_flags
         logger.info("bcftools.call: no caller mode in submitted flags; defaulting to -m")
 
-    call_flags_str = " ".join(call_flags) if call_flags else "-mv"
+    call_flags_str = _quote_flags(call_flags) if call_flags else "-mv"
 
     start_time = time.time()
     is_arm = platform.machine() == "arm64"
@@ -113,7 +128,8 @@ def variant_call(
         bam_index = bam_path.with_suffix(".bam.bai")
         if not bam_index.exists():
             logger.info("Creating BAM index...")
-            index_cmd = ["docker", "run", "--rm"]
+            _cname = container_name("bcftools-index")
+            index_cmd = ["docker", "run", "--rm", "--name", _cname]
             if is_arm:
                 index_cmd.extend(["--platform", "linux/amd64"])
             index_cmd.extend([
@@ -134,10 +150,12 @@ def variant_call(
                     return {"success": False, "variant_count": 0,
                             "error": f"Failed to create BAM index: {index_result.stderr[:200]}"}
             except subprocess.TimeoutExpired:
+                reap_container(_cname)
                 return {"success": False, "variant_count": 0, "error": "BAM indexing timed out"}
 
     # The pipeline (|) runs inside the Docker container shell, not on the host
-    bcftools_cmd = ["docker", "run", "--rm"]
+    _cname1 = container_name("bcftools")
+    bcftools_cmd = ["docker", "run", "--rm", "--name", _cname1]
     if is_arm:
         bcftools_cmd.extend(["--platform", "linux/amd64"])
     bcftools_cmd.extend([
@@ -166,7 +184,15 @@ def variant_call(
         elapsed = time.time() - start_time
 
         if result.returncode != 0:
-            error = result.stderr[-500:] if result.stderr else "BCFtools failed"
+            # Keep both ends of stderr: the error can be at either, and a
+            # tail-only slice may hold nothing but the echoed command line.
+            _err = (result.stderr or "").strip()
+            if _err:
+                error = (_err if len(_err) <= 1200
+                         else _err[:700] + "\n...[truncated]...\n" + _err[-500:])
+            else:
+                error = "BCFtools failed"
+            error = f"rc={result.returncode} {error}"
             if "Cannot connect to the Docker daemon" in str(result.stderr):
                 error = "Docker not running"
             elif "Unable to find image" in str(result.stderr):
@@ -191,6 +217,7 @@ def variant_call(
         }
 
     except subprocess.TimeoutExpired:
+        reap_container(_cname1)
         return {"success": False, "variant_count": 0, "error": f"Timeout after {timeout}s"}
     except FileNotFoundError:
         return {"success": False, "variant_count": 0, "error": "Docker not found"}

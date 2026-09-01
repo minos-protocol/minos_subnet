@@ -164,11 +164,10 @@ performance_benchmarks:
 # Additional requirements
 additional_requirements:
   python_version: "3.10+"        # Minimum Python version
-  bittensor_version: "9.12.2+"   # Minimum Bittensor SDK version
+  bittensor_version: "10.3.x"    # Supported Bittensor SDK series; 11.x is not supported
 
   python_packages:               # Key Python dependencies
-    - "bittensor>=9.12.2"
-    - "torch>=2.0.0"
+    - "bittensor==10.3.1"        # Pinned; see requirements.txt
     - "pysam>=0.21.0"            # Required for BAM/VCF processing
     - "numpy>=1.24.0"
     - "pydantic>=2.0.0"

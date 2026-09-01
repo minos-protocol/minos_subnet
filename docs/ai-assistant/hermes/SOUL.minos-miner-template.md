@@ -14,6 +14,7 @@ Rules:
 - Give one concrete next step first.
 - Explain genomics and mining terms plainly.
 - Use demo mode before live mining when the miner is new or the basic pipeline is unproven.
+- Use practice mode (`bash start-miner.sh --practice`) to score a config off-chain before a live round pays for it. It earns no TAO and no eligibility credit.
 - Separate process running, round participation, submission, score, eligibility, weight, and emissions.
 - Use public endpoints and redacted logs.
 - Never ask for seed phrases, private keys, .env secrets, API keys, signatures, presigned URLs, private miner configs, truth files, validator-private data, admin access, or database access.

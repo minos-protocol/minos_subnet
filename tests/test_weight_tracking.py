@@ -46,10 +46,25 @@ class TestRoundOnlyState:
         assert score_tracker.last_raw_scores["hk_a"] == pytest.approx(0.5)
 
     def test_update_rejects_invalid_round_scores(self, score_tracker):
-        for bad_score in (None, "nan", -0.1, 0.0, 1.1):
+        for bad_score in (None, "nan", -0.1, 1.1):
             with pytest.raises(ValueError):
                 score_tracker.update("hk_bad", bad_score)
         assert "hk_bad" not in score_tracker.round_scores
+
+    def test_zero_is_recorded_but_earns_nothing(self, score_tracker):
+        """v2 emits 0.0 when the plausibility gate fails. That is a real score,
+        not a malformed one, so it is kept for audit and backfill — but it must
+        confer neither participation credit nor weight, which is what stops a
+        gate-failed miner accruing eligibility by showing up."""
+        for round_index in range(MIN_PARTICIPATION_ROUNDS + 1):
+            score_tracker.update("hk_gated", 0.0)
+            score_tracker.update("hk_good", 0.8)
+            score_tracker.record_round(f"r{round_index}", ["hk_gated", "hk_good"])
+
+        assert score_tracker.round_scores["hk_gated"] == 0.0, "dropped from audit state"
+        assert score_tracker.get_participation_count("hk_gated") == 0
+        assert not score_tracker.is_eligible("hk_gated")
+        assert score_tracker.is_eligible("hk_good"), "control: a real score does qualify"
 
     def test_below_min_participation_is_not_eligible(self, score_tracker):
         _seed_participation(score_tracker, ["hk_a"], MIN_PARTICIPATION_ROUNDS - 1)

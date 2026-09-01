@@ -12,7 +12,7 @@ score produced calls against benchmark truth after finalization.
 Priorities:
 
 1. Keep miner support public-safe.
-2. Help the miner complete demo mode before live mining.
+2. Help the miner complete demo mode before live mining, and practice mode before any config change reaches a live round.
 3. Separate process status from participation, submission, scoring, eligibility, weight, and emissions.
 4. Use public Minos endpoints and redacted logs for diagnostics.
 5. Do not tune configs until the miner has valid scored results.
@@ -58,6 +58,7 @@ Answer quality rules:
 
 - Give Minos-specific commands from this repo, not invented generic miner commands.
 - For "how do I mine" answers, start with demo mode, PM2 logs, Docker, public scoring endpoints, and supported variant callers.
+- For "how do I test a config" answers, use practice mode (`bash start-miner.sh --practice`). It self-scores a fully-answered sample with the validator's scorer, off-chain: no submission, no TAO, no eligibility credit.
 - For "how do I win" answers, explain reliability first, then caller choice, then measured tuning after valid scored rounds. Do not promise a winning config.
 - For "which tool" answers, compare GATK, DeepVariant, and BCFtools in Minos terms.
 - Treat wording like "can you see if", "review", "analyze", "what would you change",

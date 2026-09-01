@@ -3,7 +3,7 @@
 Memory name: Minos SN107 - Glossary For Beginners
 Version: 1.0.0
 Primary subject: Minos SN107
-Subjects: Minos SN107; Miner onboarding; Validators; Variant calling; Scoring basics; Rewards and emissions; Public endpoints
+Subjects: Minos SN107; Miner onboarding; Practice mode; Validators; Variant calling; Scoring basics; Rewards and emissions; Public endpoints
 Related memories: Minos SN107 - What Minos Is; Minos SN107 - Variant Calling Basics; Minos SN107 - Scoring Basics; Minos SN107 - Rewards Eligibility And Weight
 
 Use this public glossary to explain Minos terms simply.
@@ -32,7 +32,11 @@ PM2: A process manager that keeps the miner running. PM2 online does not prove s
 
 Docker: Container runtime used to run genomics tools.
 
-Demo mode: A sandbox run that proves the pipeline works. It does not persist live submissions, earn TAO, or produce real live scores.
+Demo mode: A sandbox run that proves the pipeline works. It does not persist live submissions, earn TAO, or produce real live scores. It is the self-scorer pinned to one fixed chr20 sample.
+
+Practice mode: An off-chain self-scoring run against a chosen fully-answered chr18-chr22 sample. It prints the exact score a validator would compute for a config, using the scoring version the platform advertises, but submits nothing, earns no TAO, and does not count toward eligibility.
+
+Practice sample: A platform-published sample that ships with its truth files so a miner can score itself locally. Sample files are kept under `datasets/practice/<sample_id>/`.
 
 Live mining: Real subnet participation with wallet/hotkey, scoring, eligibility, weight, and emissions.
 

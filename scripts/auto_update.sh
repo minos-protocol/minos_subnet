@@ -32,6 +32,7 @@ INTERVAL_SECONDS="${MINOS_AUTO_UPDATE_INTERVAL_SECONDS:-300}"
 ALLOW_DIRTY="${MINOS_AUTO_UPDATE_ALLOW_DIRTY:-0}"
 LOG_FILE="${MINOS_AUTO_UPDATE_LOG:-${HOME}/.minos/auto_update.log}"
 LOCK_DIR="${HOME}/.minos/auto_update.lock"
+LOCK_MAX_AGE_MINUTES="${MINOS_AUTO_UPDATE_LOCK_MAX_AGE_MINUTES:-60}"
 ACTIVE_LOCK="${MINOS_AUTO_UPDATE_ACTIVE_LOCK:-}"
 
 mkdir -p "$(dirname "$LOG_FILE")"
@@ -47,12 +48,43 @@ require_command() {
   fi
 }
 
+# The lock dir is a fixed path, and the old RETURN-only trap never fired when
+# pm2 restarted us or the OOM killer stopped us mid-check. The orphaned dir then
+# made every later run bail out with "already running", so auto-update stopped
+# forever while pm2 still reported the process online. Release on signals too,
+# and reclaim a lock too old to belong to a live check.
+LOCK_HELD=false
+
+release_lock() {
+  if [[ "$LOCK_HELD" == "true" ]]; then
+    LOCK_HELD=false
+    rm -rf "$LOCK_DIR"
+  fi
+}
+
+trap release_lock EXIT
+trap 'release_lock; exit 130' INT
+trap 'release_lock; exit 143' TERM
+
+lock_is_stale() {
+  [[ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin "+${LOCK_MAX_AGE_MINUTES}" 2>/dev/null)" ]]
+}
+
 with_lock() {
   if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    log "Another auto-update check is already running. Skipping."
-    return 0
+    if ! lock_is_stale; then
+      log "Another auto-update check is already running. Skipping."
+      return 0
+    fi
+    log "Lock ${LOCK_DIR} is older than ${LOCK_MAX_AGE_MINUTES}m; reclaiming it from a dead check."
+    rm -rf "$LOCK_DIR"
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+      log "Another auto-update check is already running. Skipping."
+      return 0
+    fi
   fi
-  trap 'rm -rf "$LOCK_DIR"' RETURN
+  LOCK_HELD=true
+  trap release_lock RETURN
   check_once
 }
 

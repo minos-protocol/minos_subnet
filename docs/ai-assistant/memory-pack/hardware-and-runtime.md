@@ -20,6 +20,8 @@ CPU, RAM, disk, swap, Docker health, and outbound HTTPS all matter. DeepVariant 
 
 If a tool fails, check logs, memory, disk, Docker image availability, and timeout symptoms before tuning config parameters.
 
+Practice mode needs extra disk. Its first run fetches the reference FASTA and RTG SDF for chr18 through chr22, and each downloaded sample is kept under `datasets/practice/<sample_id>/` so later runs reuse it.
+
 ## Validator Hardware Guidance
 
 Validators are heavier than basic miners because they rerun miner configs and score outputs. Validator machines need more CPU, RAM, disk, Docker capacity, reference/scoring data, and operational reliability.

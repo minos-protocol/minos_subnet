@@ -93,7 +93,7 @@ minos_subnet/
 │   ├── subset_scoring.py     # Subset scoring helpers (assignments, deadlines)
 │   ├── config_loader.py      # Tool config file parser
 │   ├── path_utils.py         # Safe filesystem paths
-│   ├── file_utils.py         # SHA256-verified file download + caching
+│   ├── file_utils.py         # File download + caching; SHA256 checked, strict only with MINOS_ENFORCE_DOWNLOAD_SHA256
 │   └── README.md             # Utils documentation
 ├── base/                     # Core subnet config
 │   └── genomics_config.py    # Central config (Docker images, timeouts, scoring params)
@@ -148,7 +148,7 @@ minos_subnet/
 | Disk | ≥60 GB (miner) / ≥100 GB (validator) | Reference: ~2 GB miner, ~14 GB validator (SDF expands ~6×). Plus per-round BAMs (~6 GB each) until cleaned. |
 | Docker | 20.10+ (24.0+ recommended) | Required for GATK, hap.py, bcftools |
 | Python | 3.10+ | We test on 3.12 |
-| Bittensor | 10.3.0 (via requirements.txt) | Provides wallet/subtensor/dendrite APIs; 11.x is not supported |
+| Bittensor | 10.3.1 (via requirements.txt) | Provides wallet/subtensor/dendrite APIs; 11.x is not supported |
 
 ---
 
@@ -194,6 +194,20 @@ bash start-miner.sh --practice --config configs/gatk.conf --sample-id <sample-id
 ```
 
 Both `--demo` and `--practice` download truth on purpose so you can iterate offline: compare configs, tune, and only deploy to a live round once you're happy with the score. Neither touches the chain or earns TAO.
+
+Both ask the platform which scorer the network is running (`scoring_version` in `/scoring/network-config`) and score with that formula, and the printed result names the version it used. If the platform cannot be reached they fall back to the version this machine last resolved, and to v1 if it has never reached the platform — a fallback that lands on the wrong version puts the number on a different scale from the network's. See [docs/scoring.md](docs/scoring.md).
+
+### Score a config fully offline (`--score`)
+
+If you already have a BAM and its truth VCF, `--score` runs the same pipeline and scorer with no platform, no chain and no wallet. Docker is still required, along with the reference FASTA and the RTG SDF for the region's chromosome at `datasets/reference/<chrom>/` — `--practice` fetches both, and `--score` fails without the SDF:
+
+```bash
+python neurons/miner.py --score \
+  --bam <input.bam> --truth <truth.vcf.gz> --region chr20:45000000-50000000 \
+  --mutations <mutations.vcf.gz> --config configs/gatk.conf
+```
+
+Because it never contacts the platform, `--score` cannot ask which scorer the network is running. It uses the version this machine last resolved (stored in `~/.minos/scoring_version.json`, overridable with `MINOS_SCORING_VERSION_STATE`), and v1 if this machine has never reached the platform. Run `--practice` once to refresh it, or check `scoring_version` in `/scoring/network-config` yourself.
 
 **MinosVM:** If using the MinosVM image, everything is pre-installed. Just SSH in and run:
 
@@ -513,6 +527,9 @@ The Minos Platform is a hosted service at `https://api.theminos.ai` that handles
 | `POST /v2/get-backfill-scores`  | Validator | Fetch peer scores after scoring window closes  |
 | `POST /v2/submit-weight-history`| Validator | Submit round scores, eligibility, and weights   |
 | `POST /v2/get-validator-state`  | Validator | Recover round score state after validator restart |
+| `POST /v2/canonical-ranking`    | Validator | Cross-validator ranking, used to break a tie at the top |
+| `POST /v2/owner-map`            | Validator | Fallback ownership map, only when `reward_normalization` is on and the chain read failed |
+| `GET /scoring/network-config`   | Both      | Reward policy and `scoring_version` — which scorer the network uses |
 
 ### Storage Backends
 
@@ -521,8 +538,8 @@ The platform serves all per-round files (BAMs, truth VCFs, mutations VCFs) via s
 | Backend          | Role                                                                          |
 |------------------|-------------------------------------------------------------------------------|
 | Cloudflare R2    | Primary for per-round artifacts when enabled platform-side (free egress)      |
-| AWS S3           | Fallback for per-round artifacts (`genotypenet-platform` bucket)              |
-| Hippius (SN75)   | Decentralized backup, Bittensor-native (`genotypenet-mutations` bucket)       |
+| AWS S3           | Fallback for per-round artifacts                                              |
+| Hippius (SN75)   | Decentralized backup, Bittensor-native                                        |
 
 Reference data (FASTA, FAI, dict, RTG SDF) is served via the indirected URL `https://api.theminos.ai/reference/...` which 302-redirects to the active backend (currently a public R2 bucket). Setup downloads through this URL only — no direct R2/S3 hostnames are baked into the subnet code.
 
@@ -539,7 +556,11 @@ Both URLs always point at the same files. Pick whichever is faster from your net
 
 ### hap.py Validation
 
-Validators run each miner's tool config and score the resulting VCF from that against the truth data shared by the platform with them using hap.py. Scores are combined by Minos' developed `AdvancedScorer` into a scaled 0–100 final score that balances accuracy and precision with the following components:
+Validators run each miner's tool config and score the resulting VCF from that against the truth data shared by the platform with them using hap.py. Scores are combined by Minos' developed `AdvancedScorer` into a scaled 0–100 final score.
+
+Two scorers exist. The **platform** chooses which one the network uses and advertises it as `scoring_version` in `/scoring/network-config`; every validator follows that, and the default is v1. The two are different scales, so a score produced under one is not comparable with a score produced under the other. [docs/scoring.md](docs/scoring.md) is the full description of both — tune against the version the platform is advertising.
+
+**v1** (the default) weights four components and then subtracts an overcall penalty:
 
 | Component    | Weight |
 | -------------|--------|
@@ -547,6 +568,8 @@ Validators run each miner's tool config and score the resulting VCF from that ag
 | Completeness | 15%    |
 | FP Rate      | 15%    |
 | Quality      | 10%    |
+
+**v2** is difficulty-weighted: `100 x (0.70 x core + 0.30 x germline)`, with a plausibility gate and no separate completeness, FP or quality components.
 
 ### Round Score Tracking
 
@@ -618,7 +641,9 @@ btcli subnet metagraph --netuid 107
 - [utils/README.md](utils/README.md) - Utility modules reference
 - [docs/architecture.md](docs/architecture.md) - System architecture deep dive
 - [docs/tuning_guide.md](docs/tuning_guide.md) - Miner tuning guide (scoring breakdown, parameters, strategy)
-- [docs/parameter_ranges.md](docs/parameter_ranges.md) - Accepted parameters and valid ranges per tool (mirrors `GET /scoring/parameter-ranges`)
+- [docs/parameter_ranges.md](docs/parameter_ranges.md) - Accepted parameters and valid ranges per tool (from `templates/tool_params.py`, the definitions the validator enforces; also published at `GET /scoring/parameter-ranges`)
+- [docs/scoring.md](docs/scoring.md) - How scoring works, the overcall penalty, and scoring v2
+- [docs/miner_features.md](docs/miner_features.md) - Config commitment and paid resubmission (currently off; read before enabling auto-updates)
 - [docs/hap_py_docker.md](docs/hap_py_docker.md) - hap.py Docker image reference
 - [docs/ai-assistant/memory-pack/README.md](docs/ai-assistant/memory-pack/README.md) - Public Minos SN107 knowledge source for Ditto and agent runtimes
 - [docs/ai-assistant/README.md](docs/ai-assistant/README.md) - OpenClaw/Hermes local skill, persona, and model setup assets

@@ -14,6 +14,39 @@ from pathlib import Path
 # Add parent directory to path so we can import base and utils
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# --- Take --config back from bittensor, before importing it -------------------
+# bittensor builds its logging config at IMPORT time
+# (bittensor/utils/btlogging/__init__.py: LoggingMachine(LoggingMachine.config())),
+# and that reads --config straight out of sys.argv expecting a YAML file. Our
+# side modes use --config for the variant-caller .conf, so
+# `--practice --config configs/gatk.conf` dies inside `import bittensor` with a
+# YAML parse error naming neither this program nor the real problem — before a
+# single line of our code runs.
+#
+# So the value is lifted out of argv here, ahead of the import, and handed to
+# the side-mode parser instead. Only done when a side mode is actually present:
+# the full miner has no --config of its own, and bittensor's meaning of the flag
+# must keep working there.
+_SIDE_MODE_FLAGS = ("--score", "--practice", "--demo")
+_SIDE_MODE_CONFIG = None
+if any(flag in sys.argv[1:] for flag in _SIDE_MODE_FLAGS):
+    _argv = sys.argv[1:]
+    _kept = []
+    _i = 0
+    while _i < len(_argv):
+        _arg = _argv[_i]
+        if _arg == "--config" and _i + 1 < len(_argv):
+            _SIDE_MODE_CONFIG = _argv[_i + 1]
+            _i += 2
+            continue
+        if _arg.startswith("--config="):
+            _SIDE_MODE_CONFIG = _arg.split("=", 1)[1]
+            _i += 1
+            continue
+        _kept.append(_arg)
+        _i += 1
+    sys.argv = [sys.argv[0]] + _kept
+
 import time
 from typing import Any, Dict, Optional
 import asyncio
@@ -23,17 +56,16 @@ import argparse
 import subprocess
 from dotenv import load_dotenv
 
-# Bittensor v9/v10 compatibility — v10 removed lowercase aliases
-if not hasattr(bt, "subtensor"):
-    bt.subtensor = bt.Subtensor
-if not hasattr(bt, "wallet"):
-    bt.wallet = bt.Wallet
-if not hasattr(bt, "config"):
-    bt.config = bt.Config
+# Importing utils.bt_compat restores the lowercase bt.subtensor/wallet/config
+# aliases on the shared bt module, and supplies the SDK-version wrappers below.
+from utils import bt_compat
+from utils import config_commit
+from utils import submission_payment
+from utils import scoring_version as scoring_version_util
 
 from base import GENOMICS_CONFIG, MINER_CONFIG, is_docker_available, require_docker, BASE_DIR
 from utils.file_utils import download_file_verified, download_file_with_fallback
-from utils.platform_client import MinerPlatformClient, PlatformConfig, PlatformClientError
+from utils.platform_client import PaymentRequiredError, MinerPlatformClient, PlatformConfig, PlatformClientError
 from utils.config_loader import extract_tool_options, get_tool_version
 
 # Template system for pluggable variant callers
@@ -43,6 +75,7 @@ from templates import (
     load_template,
 )
 from templates.tool_params import validate_round_id
+from neurons import CHROMOSOME_PATTERN, safe_chrom
 
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
@@ -50,6 +83,9 @@ load_dotenv()
 
 # Round timing constants
 MIN_SUBMISSION_TIME_SECONDS = 600
+# Minimum window the submission path requires before it spends anything: the
+# payment extrinsic and the chain commitment each wait on a block.
+MIN_SPEND_TIME_SECONDS = 30
 POLL_INTERVAL_SECONDS = 30
 MIN_VCF_SIZE_BYTES = 100
 
@@ -88,16 +124,16 @@ class Miner:
                 "(no chain connection, no wallet required)"
             )
         else:
-            self.wallet = bt.wallet(config=self.config)
+            self.wallet = bt_compat.make_wallet(config=self.config)
             self.keypair = self.wallet.hotkey
             self.hotkey_ss58 = self.keypair.ss58_address
             bt.logging.info(f"Wallet loaded: {self.hotkey_ss58}")
 
             bt.logging.info(f"Connecting to network: {self.config.subtensor.network}")
-            self.subtensor = bt.subtensor(config=self.config)
+            self.subtensor = bt_compat.make_subtensor(config=self.config)
 
             bt.logging.info(f"Loading metagraph for netuid: {self.config.netuid}")
-            self.metagraph = self.subtensor.metagraph(self.config.netuid)
+            self.metagraph = bt_compat.get_metagraph(self.subtensor, self.config.netuid)
             bt.logging.info(f"Metagraph loaded: {len(self.metagraph.hotkeys)} neurons")
 
             self.is_registered = self.hotkey_ss58 in self.metagraph.hotkeys
@@ -120,6 +156,22 @@ class Miner:
 
         # Round tracking
         self.submitted_rounds: set = set()
+        # Submissions accepted per round, for the free-allowance check.
+        self.round_submit_counts: dict = {}
+        # round_id -> submissions this miner's OWNER has used, as reported by the
+        # platform. Authoritative over round_submit_counts, which only ever sees
+        # this hotkey's own submissions.
+        self._hotkey_submissions_used: dict = {}
+        # round_id -> the price the platform quoted for this hotkey's next paid
+        # submission. Escalates per coldkey within a round, so it is read rather
+        # than derived from the base fee.
+        self._quoted_fee_tao: dict = {}
+        # Insertion order for submitted_rounds — a set has none.
+        self._submit_order: list = []
+        # round_id -> monotonic() instant the submission window closes. Monotonic
+        # so a clock step during a long calling run cannot move the deadline.
+        self._round_deadlines: dict = {}
+        self._payment_ledger = submission_payment.PaymentLedger()
 
         bt.logging.info(f"Miner ready - template: {self.variant_caller}, docker: {is_docker_available()}")
 
@@ -127,14 +179,14 @@ class Miner:
         """Register on subnet with retry for 'Transaction Already Imported' errors."""
         for attempt in range(max_retries):
             try:
-                result = self.subtensor.register(
+                # bt_compat.register normalizes the per-SDK return shapes to a bool.
+                return bt_compat.register(
+                    self.subtensor,
                     wallet=self.wallet,
                     netuid=self.config.netuid,
                     wait_for_finalization=True,
                     wait_for_inclusion=True,
                 )
-                # bt v10 returns ExtrinsicResponse (always truthy), v9 returns bool
-                return result.success if hasattr(result, "success") else bool(result)
             except Exception as e:
                 error_str = str(e)
                 if "Already Imported" in error_str and attempt < max_retries - 1:
@@ -248,6 +300,17 @@ class Miner:
             "--sample_id", type=str, default=None,
             help="[--practice] Skip the interactive picker and use this sample id directly.",
         )
+        parser.add_argument(
+            "--resubmit",
+            action="store_true",
+            help=(
+                "Submit again to a round this hotkey has already submitted to. "
+                "Past the free allowance this COSTS TAO, so it is never taken "
+                "automatically: the loop stops at the first submission and this "
+                "flag is the only way past it. Requires "
+                "MINER_PAY_FOR_RESUBMISSIONS to be set as well."
+            ),
+        )
         parser.add_argument("--bam", type=str, default=None, help="[--score] Path to input BAM.")
         parser.add_argument("--truth", type=str, default=None, help="[--score] Path to truth VCF (.vcf.gz).")
         parser.add_argument(
@@ -273,11 +336,11 @@ class Miner:
             help="[--score] Optional RTG SDF for the reference (speeds up hap.py; built on the fly if omitted).",
         )
 
-        bt.subtensor.add_args(parser)
+        bt_compat.add_subtensor_args(parser)
         bt.logging.add_args(parser)
-        bt.wallet.add_args(parser)
+        bt_compat.add_wallet_args(parser)
 
-        config = bt.config(parser)
+        config = bt_compat.make_config(parser)
 
         # Env overrides
         if os.getenv("NETWORK"):
@@ -300,7 +363,14 @@ class Miner:
         output_vcf = output_dir / "output.vcf.gz"
 
         # Extract chromosome from region (e.g. "chr16:10000000-15000000" -> "chr16")
-        chrom = region.split(":")[0] if region else "chr20"
+        # The region is platform-supplied and chrom becomes a path component, so
+        # it must match the contig allowlist before it is interpolated below.
+        chrom = safe_chrom(region)
+        if chrom is None:
+            raise RuntimeError(
+                f"Region {region!r} does not name a supported chromosome "
+                f"(chr1-22, chrX, chrY, chrM)"
+            )
         ref_path = BASE_DIR / "datasets" / "reference" / chrom / f"{chrom}.fa"
         if not ref_path.exists():
             # Fallback to old flat structure for backward compatibility
@@ -407,15 +477,63 @@ class Miner:
                 return False
 
             # Skip if platform confirms we already submitted (restart recovery)
+            hotkey_used = round_data.get("hotkey_submissions_used")
+            if hotkey_used is not None:
+                self._hotkey_submissions_used[round_id] = int(hotkey_used)
+
+            # The price of the NEXT paid submission, quoted for this hotkey. It
+            # is NOT the advertised base fee: the fee escalates with the owning
+            # coldkey's paid submissions this round, so paying the base fee for
+            # anything past the first is an underpayment — and the transfer is
+            # already on chain when the platform refuses it, so the TAO is gone.
+            quoted_fee = round_data.get("next_submission_fee_tao")
+            if quoted_fee is not None:
+                try:
+                    self._quoted_fee_tao[round_id] = float(quoted_fee)
+                except (TypeError, ValueError):
+                    pass
+
             if round_data.get("has_submitted", False):
-                bt.logging.info(f"Already submitted to round {round_id[:8]}... (platform confirmed)")
-                self.submitted_rounds.add(round_id)
-                return False
+                if not getattr(self.config, "resubmit", False):
+                    bt.logging.info(f"Already submitted to round {round_id[:8]}... (platform confirmed)")
+                    self.submitted_rounds.add(round_id)
+                    return False
+                # Deliberate replacement. The quote read above is the price for
+                # the NEXT paid submission for this hotkey's coldkey, fetched in
+                # this same response -- so it already reflects the escalation
+                # from every submission counted so far. Paying an older quote
+                # underpays, and the transfer is on chain before the platform
+                # refuses it.
+                if quoted_fee is None:
+                    bt.logging.error(
+                        f"Round {round_id[:8]}...: --resubmit given but the "
+                        f"platform quoted no fee for the next submission. "
+                        f"Refusing to guess a price."
+                    )
+                    self.submitted_rounds.add(round_id)
+                    return False
+                bt.logging.warning(
+                    f"Round {round_id[:8]}...: --resubmit given; this hotkey has "
+                    f"already submitted. The next submission is quoted at "
+                    f"{quoted_fee} TAO and will be PAID FOR if it goes ahead."
+                )
 
             # Check if enough time remaining (need at least 10 minutes for variant calling)
             if time_remaining < MIN_SUBMISSION_TIME_SECONDS:
                 bt.logging.warning(f"Only {time_remaining}s remaining in round - skipping")
                 return False
+
+            # Record when the window closes so _submit_result can re-check it
+            # without another authenticated round trip.
+            try:
+                self._round_deadlines[round_id] = time.monotonic() + float(time_remaining)
+            except (TypeError, ValueError):
+                self._round_deadlines.pop(round_id, None)
+            # Bound the map: one entry per detected round, dropped after an hour.
+            cutoff = time.monotonic() - 3600
+            self._round_deadlines = {
+                r: d for r, d in self._round_deadlines.items() if d > cutoff
+            }
 
             bt.logging.info(f"Active round found: {round_id[:8]}..., status={status}, region={region}")
             print(f"\n{'='*60}", flush=True)
@@ -616,20 +734,257 @@ class Miner:
 
         return variant_count, elapsed
 
+    def _make_commitment(self, round_id, tool_config):
+        """Commit to the config about to be submitted, and publish it on chain.
+
+        Returns ``(commitment, block, nonce)``; any may be None. Never raises —
+        a commitment is supplementary evidence, not a precondition for mining.
+
+        The nonce is returned so it can be REVEALED to the platform with the
+        config. Without it the platform holds a digest it cannot check, so the
+        commitment proves nothing to anyone but us. Revealing it costs nothing:
+        it only opens this one commitment, over a config we are sending in the
+        same request anyway.
+
+        Two ordering invariants: the nonce is persisted before anything is
+        published (a commitment whose nonce was lost can never be opened), and
+        the chain write precedes the platform submission so the block timestamp
+        predates what the platform saw.
+        """
+        try:
+            nonce = config_commit.new_nonce()
+            commitment = config_commit.compute_commitment(
+                netuid=self.config.netuid,
+                round_id=round_id,
+                hotkey=self.wallet.hotkey.ss58_address,
+                tool_name=self.variant_caller,
+                tool_config=tool_config,
+                nonce=nonce,
+            )
+        except Exception as e:
+            bt.logging.warning(f"Round {round_id[:8]}...: commitment not computed ({e})")
+            return None, None, None
+
+        # Persist the nonce before publishing; see the docstring invariant.
+        # The block is not known yet and is deliberately absent rather than
+        # guessed from the chain head — the extrinsic lands a block or more
+        # later, and a height sampled now names a block the commitment is not in.
+        block = None
+        try:
+            config_commit.CommitmentLedger().record({
+                "round_id": round_id,
+                "hotkey": self.wallet.hotkey.ss58_address,
+                "netuid": self.config.netuid,
+                "tool_name": self.variant_caller,
+                "nonce": nonce,
+                "commitment": commitment,
+                "block": None,
+                "tool_config": config_commit.submission_config(tool_config),
+            })
+        except Exception as e:
+            bt.logging.warning(
+                f"Round {round_id[:8]}...: could not persist commitment nonce ({e}); "
+                f"not publishing a commitment that could never be opened"
+            )
+            return None, None, None
+
+        try:
+            payload = config_commit.chain_payload(round_id, commitment)
+            ok, reason, block = bt_compat.commit(
+                self.subtensor,
+                wallet=self.wallet,
+                netuid=self.config.netuid,
+                data=payload,
+            )
+            if ok:
+                print(f"   Commitment published on chain: {commitment[:16]}...", flush=True)
+                bt.logging.info(f"Round {round_id[:8]}...: commitment on chain at block {block}")
+                # Append the height it actually landed at. Written after the
+                # fact because only the receipt knows it; the nonce record above
+                # is what makes the commitment openable, and that is already
+                # safe on disk.
+                try:
+                    config_commit.CommitmentLedger().record({
+                        "round_id": round_id,
+                        "hotkey": self.wallet.hotkey.ss58_address,
+                        "commitment": commitment,
+                        "block": block,
+                        "published": True,
+                    })
+                except Exception:  # noqa: BLE001 - the commitment is already on chain
+                    pass
+            else:
+                # Rate limiting is normal — subtensor enforces a minimum block
+                # interval between commitments from one hotkey.
+                bt.logging.warning(
+                    f"Round {round_id[:8]}...: chain commitment skipped ({reason}); "
+                    f"still submitting the commitment to the platform"
+                )
+        except Exception as e:
+            bt.logging.warning(f"Round {round_id[:8]}...: chain commitment failed ({e})")
+
+        return commitment, block, nonce
+
+    async def _config_commitment_enabled(self) -> bool:
+        """Whether the platform is asking miners to commit on chain.
+
+        Fails to False on any doubt: an unreadable policy, an unreachable
+        platform, or a demo run. Committing costs an extrinsic per submission,
+        so the safe direction when we cannot tell is not to.
+        """
+        if (
+            getattr(self, "demo", False)
+            or getattr(self, "subtensor", None) is None
+            or getattr(self, "wallet", None) is None
+        ):
+            return False
+        try:
+            network_config = await self.platform_client.get_network_config()
+        except Exception as e:  # noqa: BLE001 - a commitment is not worth a round
+            bt.logging.warning(f"Could not read the commitment policy ({e}); not committing")
+            return False
+        if not isinstance(network_config, dict):
+            return False
+        return network_config.get("config_commitment_enabled") is True
+
+    async def _submission_payment(self, round_id):
+        """Buy an extra submission when this round's free allowance is used up.
+
+        Returns ``(proof, blocked)``. ``blocked`` is True when payment was
+        required but could not be made, and the caller must then not submit.
+
+        Fee and destination come from the platform's policy; when no policy is
+        advertised this returns ``(None, False)`` and nothing is paid.
+        """
+        # Demo mode has no wallet and no subtensor, so there is nothing to sign
+        # with and nothing to spend. Reaching the payment path would crash on
+        # wallet.coldkeypub; more importantly, a sandbox must never move real
+        # money regardless of what the platform advertises.
+        if getattr(self, "demo", False) or self.wallet is None or self.subtensor is None:
+            return None, False
+
+        # The allowance is per HOTKEY, and the platform's count is still the
+        # authoritative one: a local tally is lost across a restart and drifts
+        # from the platform whenever a submission is retried, and the miner would
+        # only discover the shortfall by being rejected. Fall back to the local
+        # count when the platform does not report one — an older platform, or the
+        # policy off.
+        already = self._hotkey_submissions_used.get(round_id)
+        if already is None:
+            already = self.round_submit_counts.get(round_id, 0)
+        try:
+            policy = submission_payment.SubmissionPolicy(
+                await self.platform_client.get_network_config(),
+                quoted_fee_tao=self._quoted_fee_tao.get(round_id),
+            )
+        except Exception as e:
+            bt.logging.warning(f"Could not read submission policy ({e}); assuming none")
+            return None, False
+
+        # Remembered for the PaymentRequiredError resync in _submit_result,
+        # which needs the allowance but not the rest of the policy.
+        self._free_submissions_seen = policy.free_submissions
+
+        if not policy.payment_required(already):
+            return None, False
+
+        hotkey = self.wallet.hotkey.ss58_address
+        print(f"   Free submission for this round already used; paying "
+              f"{policy.fee_tao} TAO to resubmit...", flush=True)
+        proof = submission_payment.pay_for_resubmission(
+            bt_compat=bt_compat, subtensor=self.subtensor, wallet=self.wallet,
+            policy=policy, round_id=round_id, hotkey=hotkey,
+            ledger=self._payment_ledger, logger=bt.logging,
+        )
+        if not proof:
+            bt.logging.error(
+                f"Round {round_id[:8]}...: resubmission payment did not go through; "
+                f"skipping this submission rather than sending one that will be refused"
+            )
+            return None, True
+        return proof, False
+
+    def _round_time_remaining(self, round_id) -> Optional[float]:
+        """Seconds left in the round's submission window, or None when no
+        deadline was recorded. Callers must read None as "unknown", not as
+        "closed", and proceed.
+        """
+        deadline = self._round_deadlines.get(round_id)
+        if deadline is None:
+            return None
+        return deadline - time.monotonic()
+
     async def _submit_result(self, round_id, tool_config, variant_count, elapsed):
         """Submit variant calling config to the platform and handle the response."""
+        # Re-check the window before anything is spent: the gate in process_round
+        # runs before the download and the calling run. Uses the recorded deadline
+        # rather than re-fetching status, which would delay this submission.
+        remaining = self._round_time_remaining(round_id)
+        if remaining is not None and remaining < MIN_SPEND_TIME_SECONDS:
+            bt.logging.warning(
+                f"Round {round_id[:8]}...: submission window closed while calling "
+                f"variants ({int(remaining)}s left); not paying a fee or publishing "
+                f"a commitment for a submission that cannot be accepted"
+            )
+            print(f"   Round closed before submission — skipping (no fee paid)", flush=True)
+            return False
+
+        payment_proof, blocked = await self._submission_payment(round_id)
+        if blocked:
+            return
+
+        # The platform decides whether miners commit on chain. Absence means
+        # disabled, so an older platform and a deliberately-disabled one behave
+        # the same — and a platform we cannot reach never starts us spending
+        # extrinsics we were not asked for.
+        commitment = commitment_block = commitment_nonce = None
+        if await self._config_commitment_enabled():
+            commitment, commitment_block, commitment_nonce = self._make_commitment(
+                round_id, tool_config
+            )
+
         # Submit config to platform
         print(f"   Submitting config to platform...", flush=True)
-        result = await self.platform_client.submit_config(
-            round_id=round_id,
-            tool_name=self.variant_caller,
-            tool_config=tool_config,
-            variant_count=variant_count,
-            runtime_seconds=elapsed
-        )
+        try:
+            result = await self.platform_client.submit_config(
+                round_id=round_id,
+                tool_name=self.variant_caller,
+                tool_config=tool_config,
+                variant_count=variant_count,
+                runtime_seconds=elapsed,
+                config_commitment=commitment,
+                commitment_block=commitment_block,
+                config_nonce=commitment_nonce,
+                payment_proof=payment_proof,
+            )
+        except PaymentRequiredError as e:
+            # Trust the platform's verdict over the local count. Resync to the
+            # allowance, not to 1: payment_required() fires at
+            # `count >= free_submissions`, so a smaller bump never reaches it.
+            required = max(1, getattr(self, "_free_submissions_seen", 1) or 1)
+            self.round_submit_counts[round_id] = max(
+                self.round_submit_counts.get(round_id, 0), required
+            )
+            bt.logging.warning(
+                f"Round {round_id[:8]}...: payment required ({e}); "
+                f"local count resynced to {self.round_submit_counts[round_id]}"
+            )
+            return
 
         if result.get("success"):
+            # Keyed on the platform's verdict, not the HTTP status: a 200 carrying
+            # success:false consumes neither the submit count nor the proof.
+            self.round_submit_counts[round_id] = (
+                self.round_submit_counts.get(round_id, 0) + 1
+            )
+            if payment_proof:
+                self._payment_ledger.mark_spent(
+                    round_id, self.wallet.hotkey.ss58_address, payment_proof
+                )
             self.submitted_rounds.add(round_id)
+            if round_id in self._submit_order:
+                self._submit_order.remove(round_id)
+            self._submit_order.append(round_id)
             submission_id = result.get("submission_id", "unknown")
             print(f"   Config submitted successfully", flush=True)
             print(f"   Submission ID: {str(submission_id)[:16]}...", flush=True)
@@ -662,7 +1017,14 @@ class Miner:
 
             # Cleanup old rounds from tracking (keep last 10)
             if len(self.submitted_rounds) > 10:
-                self.submitted_rounds = set(list(self.submitted_rounds)[-10:])
+                # submitted_rounds is a set and carries no order; _submit_order
+                # supplies it so the ten kept are the ten most recent.
+                keep = [r for r in self._submit_order if r in self.submitted_rounds][-10:]
+                self.submitted_rounds = set(keep)
+                self._submit_order = keep
+                self.round_submit_counts = {
+                    k: v for k, v in self.round_submit_counts.items() if k in self.submitted_rounds
+                }
 
             return True
         else:
@@ -758,17 +1120,21 @@ class Miner:
 
         # Test platform connectivity
         print(f"\n   Testing platform connection...", flush=True)
+        # A failed check must not end the process: the poll loop tolerates platform
+        # errors per round, so enter it regardless and let a later round recover.
         try:
-            if await self.platform_client.health_check():
+            healthy, reason = await self.platform_client.health_check_detail()
+            if healthy:
                 print(f"   Platform connection: OK", flush=True)
             else:
-                print(f"   Platform connection: FAILED", flush=True)
-                bt.logging.error("Cannot connect to platform")
-                return
+                print(f"   Platform connection: FAILED ({reason}) - "
+                      f"starting anyway, will retry each round", flush=True)
+                bt.logging.warning(f"Platform unreachable at startup ({reason}); "
+                                   f"entering poll loop and retrying per round")
         except Exception as e:
-            print(f"   Platform connection: ERROR - {e}", flush=True)
-            bt.logging.error(f"Platform connection error: {e}")
-            return
+            print(f"   Platform connection: ERROR - {e} - starting anyway", flush=True)
+            bt.logging.warning(f"Platform health check raised {type(e).__name__}: {e}; "
+                               f"entering poll loop and retrying per round")
 
         print(f"\n   Round Mode: ENABLED (polling every {POLL_INTERVAL_SECONDS}s)", flush=True)
         print(f"   Rounds: 72-minute continuous cycles (Bittensor tempo)", flush=True)
@@ -794,7 +1160,12 @@ class Miner:
 
                 # Sync metagraph every 2 minutes (skipped in demo — no chain conn)
                 if sync_count % 4 == 0 and self.metagraph is not None:
-                    self.metagraph.sync(subtensor=self.subtensor)
+                    # sync_metagraph propagates by design; a dropped websocket must
+                    # not take the poll loop down, and a stale metagraph is harmless.
+                    try:
+                        bt_compat.sync_metagraph(self.metagraph, self.subtensor)
+                    except Exception as e:
+                        bt.logging.warning(f"Metagraph sync failed (continuing): {e}")
 
                 # Heartbeat every 5 minutes
                 if sync_count % 10 == 0:
@@ -923,7 +1294,8 @@ class _PracticeUI:
             if allow_all:
                 print(f"     a. ALL — download every sample", flush=True)
 
-    def result_panel(self, metrics, advanced_score, combined_final, would_record, zero_input):
+    def result_panel(self, metrics, advanced_score, combined_final, would_record, zero_input,
+                     scoring_version=None):
         if not (self.console and self.Panel and self.Table):
             # Plain fallback
             print(f"\n{'='*60}\n   RESULT\n{'='*60}", flush=True)
@@ -931,7 +1303,8 @@ class _PracticeUI:
                   f"prec={metrics.get('precision_snp', 0):.4f}  FP={metrics.get('fp_snp', 0)}", flush=True)
             print(f"   INDEL  F1={metrics.get('f1_indel', 0):.4f}  recall={metrics.get('recall_indel', 0):.4f}  "
                   f"prec={metrics.get('precision_indel', 0):.4f}  FP={metrics.get('fp_indel', 0)}", flush=True)
-            print(f"\n   ADVANCED SCORE:   {advanced_score:.4f} / 100", flush=True)
+            _v = f"  (scoring {scoring_version})" if scoring_version else ""
+            print(f"\n   ADVANCED SCORE:   {advanced_score:.4f} / 100{_v}", flush=True)
             if would_record:
                 print(f"   COMBINED_FINAL:   {combined_final:.6f}   <-- what a validator records", flush=True)
             elif zero_input:
@@ -961,7 +1334,11 @@ class _PracticeUI:
         # Big score line, color-banded
         band = "green" if combined_final >= 0.90 else "yellow" if combined_final >= 0.70 else "red"
         if would_record:
-            verdict = f"[bold {band}]COMBINED_FINAL  {combined_final:.6f}[/]\n[dim]This is exactly what a validator would record.[/]"
+            _v = f" (scoring {scoring_version})" if scoring_version else ""
+            verdict = (
+                f"[bold {band}]COMBINED_FINAL  {combined_final:.6f}[/]\n"
+                f"[dim]This is exactly what a validator would record{_v}.[/]"
+            )
             border = band
         elif zero_input:
             verdict = (f"[bold red]COMBINED_FINAL  {combined_final:.6f}[/]\n"
@@ -1136,12 +1513,17 @@ def run_offline_score(cfg) -> int:
         region=region,
         confident_bed=cfg.confident_bed if cfg.confident_bed else None,
         reference_sdf=cfg.reference_sdf if cfg.reference_sdf else None,
+        # --score is fully offline, so there is no platform to ask. Use the
+        # version this machine last saw the network on; a box that has never
+        # reached the platform falls back to v1, the live formula.
+        scoring_version=scoring_version_util.resolve(None),
     )
     return 0 if score is not None else 1
 
 
 def _run_and_score(tool, tool_config, bam_path, ref_path, truth_path,
-                   mutations_path, region, confident_bed=None, reference_sdf=None):
+                   mutations_path, region, confident_bed=None, reference_sdf=None,
+                   scoring_version=None):
     """Run a config and score it exactly as a validator would.
 
     Shared by --score and --practice. Runs the template, then scores with
@@ -1149,6 +1531,11 @@ def _run_and_score(tool, tool_config, bam_path, ref_path, truth_path,
     plus the component breakdown. Returns combined_final (float) on success,
     or None on any failure (variant calling failed, no VCF, hap.py returned
     no metrics).
+
+    ``scoring_version`` selects the formula, and must be the one the PLATFORM
+    advertises. This output tells an operator it is "exactly what a validator
+    would record", so scoring with v1 while the network runs v2 would make that
+    sentence false by several points — the two are different scales.
     """
     from utils.scoring import HappyScorer, AdvancedScorer
     from templates import load_template
@@ -1229,7 +1616,36 @@ def _run_and_score(tool, tool_config, bam_path, ref_path, truth_path,
         print("   ERROR: hap.py returned no valid metrics", flush=True)
         return None
 
+    version = scoring_version or scoring_version_util.V1
     advanced_score = AdvancedScorer.compute_advanced_score(metrics)
+    if version == scoring_version_util.V2:
+        # v2 needs per-variant records, which live in the annotated hap.py VCF.
+        score_v2 = None
+        happy_vcf = metrics.get("happy_vcf_path")
+        if happy_vcf and Path(happy_vcf).exists():
+            try:
+                from utils.scoring import parse_happy_vcf, difficulty_class_counts
+
+                records = parse_happy_vcf(happy_vcf, truth_vcf_path=str(truth_path))
+                if records is None:
+                    print("   v2 score unavailable: hap.py VCF could not be parsed "
+                          "completely (a partial parse would inflate the score)", flush=True)
+                elif records:
+                    score_v2 = AdvancedScorer.compute_score_v2(
+                        metrics, difficulty_class_counts(records)
+                    )
+            except Exception as e:  # noqa: BLE001
+                print(f"   v2 score unavailable ({e})", flush=True)
+        if score_v2 is None:
+            # The validator skips a miner outright here rather than mixing
+            # scales. Say so instead of printing a v1 number under a v2 banner.
+            print(
+                "   ERROR: the network scores with v2, but v2 could not be "
+                "computed for this run — a validator would not record a score.",
+                flush=True,
+            )
+            return None
+        advanced_score = score_v2
     combined_final = advanced_score / 100.0
 
     # Two guards match what a validator applies before recording a score:
@@ -1253,7 +1669,8 @@ def _run_and_score(tool, tool_config, bam_path, ref_path, truth_path,
     would_record = valid_range and not zero_input
 
     # --- Report (mirror the validator's component breakdown), styled ---
-    _UI.result_panel(metrics, advanced_score, combined_final, would_record, zero_input)
+    _UI.result_panel(metrics, advanced_score, combined_final, would_record, zero_input,
+                     scoring_version=version)
     return combined_final
 
 
@@ -1295,7 +1712,11 @@ def _ensure_fasta_index(ref_path: Path) -> bool:
 
 def _resolve_reference_for(chrom: str) -> Optional[Path]:
     """Locate the reference FASTA for a chromosome (same convention as
-    execute_template). Returns None if not present."""
+    execute_template). Returns None if the contig is not allowlisted or the file
+    is not present; chrom is interpolated into the path, so it must be
+    validated here."""
+    if not isinstance(chrom, str) or not CHROMOSOME_PATTERN.match(chrom):
+        return None
     ref_path = BASE_DIR / "datasets" / "reference" / chrom / f"{chrom}.fa"
     if ref_path.exists():
         return ref_path
@@ -1425,7 +1846,10 @@ def _download_practice_files(sample: dict) -> Optional[dict]:
     # Reuse only if the file is non-empty AND (when the sample carries a
     # sha256) matches it — a truncated file from an interrupted prior run must
     # NOT be silently reused, or the self-score is wrong.
-    if _reuse_ok(truth_path, sample.get("truth_vcf_sha256")):
+    # The .tbi must be present too: it cannot be rebuilt here (tabix may be off
+    # PATH) and the scoring slice fails closed without it.
+    _truth_indexed = Path(str(truth_path) + ".tbi").exists()
+    if _reuse_ok(truth_path, sample.get("truth_vcf_sha256")) and _truth_indexed:
         print(f"   Truth already downloaded — reusing {truth_path.name}", flush=True)
     else:
         truth_url = sample.get("truth_vcf_presigned_url")
@@ -1454,7 +1878,8 @@ def _download_practice_files(sample: dict) -> Optional[dict]:
     # mutations VCF with the same checksum, and it defines the scoring scope,
     # so a corrupt copy would silently change the score.
     have_mutations = False
-    if _reuse_ok(mutations_path, sample.get("mutations_vcf_sha256")):
+    _mut_indexed = Path(str(mutations_path) + ".tbi").exists()
+    if _reuse_ok(mutations_path, sample.get("mutations_vcf_sha256")) and _mut_indexed:
         print(f"   Mutations already downloaded — reusing {mutations_path.name}", flush=True)
         have_mutations = True
     else:
@@ -1520,6 +1945,19 @@ async def run_practice(cfg) -> int:
 
     _UI.banner(tool)
 
+    # The platform decides which formula the network scores with. Ask it, so
+    # this preview matches what a validator would actually record — the output
+    # says exactly that, and v1 and v2 differ by several points on the same
+    # callset. A platform that cannot be reached falls back to the version this
+    # machine last saw, then to v1.
+    practice_scoring_version = scoring_version_util.V1
+    try:
+        practice_scoring_version = scoring_version_util.resolve(
+            await client.get_network_config()
+        )
+    except Exception:  # noqa: BLE001 - a preview is not worth failing over
+        practice_scoring_version = scoring_version_util.resolve(None)
+
     # --- Fetch the sample menu ---
     try:
         listing = await client.list_practice_samples()
@@ -1554,7 +1992,11 @@ async def run_practice(cfg) -> int:
     def _score_one(full, files, score_tool, score_config_src):
         """Resolve ref+SDF and score one downloaded sample with the given tool/config."""
         region = full.get("region")
-        chrom = region.split(":")[0] if region else "chr20"
+        chrom = safe_chrom(region)
+        if chrom is None:
+            print(f"   ERROR: sample region {region!r} does not name a supported "
+                  f"chromosome (chr1-22, chrX, chrY, chrM)", flush=True)
+            return False
         ref_path = _resolve_reference_for(chrom)
         if ref_path is None:
             print(f"   ERROR: reference not found for {chrom}. "
@@ -1586,6 +2028,7 @@ async def run_practice(cfg) -> int:
             truth_path=files["truth"],
             mutations_path=files["mutations"],
             region=region,
+            scoring_version=practice_scoring_version,
         )
         if result is None:
             print("   ERROR: scoring did not complete — see the messages above.", flush=True)
@@ -1744,6 +2187,10 @@ def _parse_side_mode_args(argv):
     p.add_argument("--sample_id", type=str, default=None)
     p.add_argument("--variant_caller", type=str, default=None)
     ns, _unknown = p.parse_known_args(argv)
+    # --config was lifted out of argv before bittensor was imported; see the
+    # note at the top of this module.
+    if ns.config is None and _SIDE_MODE_CONFIG is not None:
+        ns.config = _SIDE_MODE_CONFIG
     return ns
 
 

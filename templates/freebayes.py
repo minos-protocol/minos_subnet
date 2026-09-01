@@ -12,7 +12,7 @@ import shlex
 import time
 import os
 from .tool_params import validate_and_build_flags, validate_region
-from ._common import count_variants
+from ._common import container_name, count_variants, reap_container
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +27,15 @@ def variant_call(
     """Run FreeBayes variant calling via Docker."""
     timeout = config.get("timeout", 1800)
     threads = min(config.get("threads", os.cpu_count() or 2), os.cpu_count() or 2)
+
+    # Cap RAM as gatk.py and deepvariant.py do: the validator sizes its
+    # concurrency assuming every caller job stays inside a container limit.
+    try:
+        total_mem_bytes = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
+        auto_mem_gb = max(1, int(total_mem_bytes / (1024**3)) - 1)
+    except (ValueError, OSError, AttributeError):
+        auto_mem_gb = 2
+    memory_gb = config.get("memory_gb", auto_mem_gb)
 
     bam_path = Path(bam_path).resolve()
     reference_path = Path(reference_path).resolve()
@@ -73,11 +82,15 @@ def variant_call(
     # FreeBayes outputs uncompressed VCF to stdout, compress after
     temp_vcf = output_vcf_path.parent / f"{output_vcf_path.stem.replace('.vcf', '')}_temp.vcf"
 
-    freebayes_cmd = ["docker", "run", "--rm"]
+    _cname = container_name("freebayes")
+    # Bound before the try so the TimeoutExpired handler can tell whether the
+    # compress container was ever started.
+    _cname1 = None
+    freebayes_cmd = ["docker", "run", "--rm", "--name", _cname]
     if is_arm:
         freebayes_cmd.extend(["--platform", "linux/amd64"])
     freebayes_cmd.extend([
-        f"--cpus={threads}",
+        f"--cpus={threads}", f"--memory={memory_gb}g",
         "-v", f"{bam_path.parent}:/data:ro",
         "-v", f"{reference_path.parent}:/ref:ro",
         "staphb/freebayes:1.3.7",
@@ -102,7 +115,15 @@ def variant_call(
             )
 
         if result.returncode != 0:
-            error = result.stderr[-500:] if result.stderr else "FreeBayes failed"
+            # Keep both ends of stderr: the error can be at either, and a
+            # tail-only slice may hold nothing but the echoed command line.
+            _err = (result.stderr or "").strip()
+            if _err:
+                error = (_err if len(_err) <= 1200
+                         else _err[:700] + "\n...[truncated]...\n" + _err[-500:])
+            else:
+                error = "FreeBayes failed"
+            error = f"rc={result.returncode} {error}"
             if "Cannot connect to the Docker daemon" in str(result.stderr):
                 error = "Docker not running"
             elif "Unable to find image" in str(result.stderr):
@@ -119,11 +140,12 @@ def variant_call(
             return {"success": False, "variant_count": 0, "error": "VCF not created or empty"}
 
         # Compress with bgzip and index via bcftools (runs inside Docker, not on host)
-        compress_cmd = ["docker", "run", "--rm"]
+        _cname1 = container_name("freebayes-compress")
+        compress_cmd = ["docker", "run", "--rm", "--name", _cname1]
         if is_arm:
             compress_cmd.extend(["--platform", "linux/amd64"])
         compress_cmd.extend([
-            f"--cpus={threads}",
+            f"--cpus={threads}", f"--memory={memory_gb}g",
             "-v", f"{output_vcf_path.parent}:/data",
             "quay.io/biocontainers/bcftools:1.20--h8b25389_0",
             "sh", "-c",
@@ -140,6 +162,22 @@ def variant_call(
 
         if temp_vcf.exists():
             temp_vcf.unlink()
+
+        # The shell redirect creates the output file before bgzip writes a
+        # byte, so exists() cannot tell success from a killed compress step:
+        # branch on the returncode instead.
+        if compress_result.returncode != 0:
+            _cerr = (compress_result.stderr or compress_result.stdout or "").strip()
+            error = f"VCF compression failed: rc={compress_result.returncode}"
+            if _cerr:
+                error = f"{error} {_cerr[-500:]}"
+            if "Unable to find image" in str(compress_result.stderr):
+                error = "Run: docker pull quay.io/biocontainers/bcftools:1.20--h8b25389_0"
+            # A partial file must not survive to be scored as this round's
+            # callset.
+            if output_vcf_path.exists():
+                output_vcf_path.unlink()
+            return {"success": False, "variant_count": 0, "error": error}
 
         if not output_vcf_path.exists():
             return {"success": False, "variant_count": 0, "error": "VCF compression failed"}
@@ -158,8 +196,16 @@ def variant_call(
         }
 
     except subprocess.TimeoutExpired:
+        # Either subprocess.run can raise this, so both containers are reaped.
+        reap_container(_cname)
+        if _cname1:
+            reap_container(_cname1)
         if temp_vcf.exists():
             temp_vcf.unlink()
+        # A partial file must not survive to be scored as this round's
+        # callset.
+        if output_vcf_path.exists():
+            output_vcf_path.unlink()
         return {"success": False, "variant_count": 0, "error": f"Timeout after {timeout}s"}
     except FileNotFoundError:
         return {"success": False, "variant_count": 0, "error": "Docker not found"}

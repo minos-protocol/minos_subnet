@@ -6,7 +6,7 @@ version: 1.0.0
 
 # Minos Miner Operator
 
-Use this skill when the user asks about Minos subnet 107 mining, miner setup, demo mode, live mining, PM2, Docker, Bittensor wallet/hotkey, public scoring endpoints, GATK, DeepVariant, BCFtools, hap.py, scoring, eligibility, weight, emissions, monitoring, or safe config improvement.
+Use this skill when the user asks about Minos subnet 107 mining, miner setup, demo mode, practice mode, live mining, PM2, Docker, Bittensor wallet/hotkey, public scoring endpoints, GATK, DeepVariant, BCFtools, hap.py, scoring, eligibility, weight, emissions, monitoring, or safe config improvement.
 
 Do not answer Minos questions as if Minos were generic pool/hash mining. Do not
 invent commands such as `minos_mine`, package names such as `minos_miner`, pool
@@ -174,7 +174,7 @@ Safe to ask for:
 
 - public UID
 - public hotkey
-- demo or live mode
+- demo, practice, or live mode
 - selected caller: GATK, DeepVariant, or BCFtools
 - public endpoint path and HTTP status
 - redacted PM2 logs
@@ -225,6 +225,12 @@ Demo mode:
 bash start-miner.sh --demo
 ```
 
+Practice mode:
+
+```bash
+bash start-miner.sh --practice
+```
+
 Public scoring:
 
 ```text
@@ -234,6 +240,49 @@ GET https://api.theminos.ai/scoring/parameter-ranges
 GET https://api.theminos.ai/scoring/rounds/current/leaderboard
 GET https://api.theminos.ai/scoring/rounds/latest-finalized/leaderboard
 ```
+
+## Demo And Practice Modes
+
+Both are one-shot foreground self-scorers: no wallet, no chain, no submission,
+no TAO, and no effect on eligibility or weight. Neither belongs under PM2.
+
+- `--demo` is pinned to one fixed chr20 sample, so a new operator gets a
+  repeatable first score in one command.
+- `--practice` offers a menu of fully-answered chr18/chr19/chr20/chr21/chr22
+  samples, which are the same chromosomes live rounds rotate across.
+
+Practice downloads a sample's BAM, truth, and mutations files into
+`datasets/practice/<sample_id>/`, reuses them on later runs, runs the selected
+caller, and prints the exact score a validator would compute: SNP and indel F1,
+recall, precision, false-positive counts, the advanced score out of 100, and the
+combined final score. A run flagged zero-input called nothing on target and
+would be discarded by a validator.
+
+Two scorers exist, and the platform decides which one the network uses by
+advertising `scoring_version` in `/scoring/network-config`. Both modes ask the
+platform and score with that formula, naming the version in the printed result.
+If the platform cannot be reached they use the version the machine last
+resolved, and v1 if it never resolved one — a fallback to the wrong version puts
+the number on a different scale from the network's, so check the version line
+before comparing a practice score with a leaderboard score.
+
+Non-interactive forms:
+
+```bash
+bash start-miner.sh --practice --config configs/gatk.conf
+bash start-miner.sh --practice --config configs/gatk.conf --sample-id <sample-id>
+bash start-miner.sh --practice --miner-template deepvariant
+```
+
+Practice needs Docker and platform connectivity. Its first run fetches the
+reference FASTA and RTG SDF for the practice chromosomes, so tell the user to
+start it through `start-miner.sh` rather than the Python module directly — a
+"reference not found" or "RTG SDF not found" error is usually that. If the
+platform reports practice mode is not enabled or returns an empty sample menu,
+the deployment is not serving practice samples; that is not a miner fault.
+
+Practice truth files are downloaded to the operator's machine on purpose. They
+still must not be pasted into chat, uploaded, or stored in external memory.
 
 ## Variant Calling Basics
 
@@ -300,6 +349,12 @@ If the user asks "which tool should I use?":
 - BCFtools is fast and lightweight but speed alone does not win.
 - Recommend reliability and valid scored rounds before tuning.
 
+If the user asks "how do I test a config change?":
+
+- Point at practice mode, not a live round.
+- Tell them to hold the sample fixed with `--sample-id` so the comparison is between configs, not samples.
+- Remind them a practice score ranks configs; it does not predict a specific round's number.
+
 If the user asks "how do I win?":
 
 - Do not promise a winning config.
@@ -316,6 +371,6 @@ Only tune after:
 4. Valid scored results exist.
 5. You know the likely weakness: recall, false positives, completeness, quality, runtime, or stability.
 
-Change one category at a time. Keep a baseline. Compare multiple rounds. Never claim a config will definitely win.
+Change one category at a time. Keep a baseline. Score each candidate in practice mode against the same sample before it reaches a live round. Compare multiple rounds. Never claim a config will definitely win.
 
 See `references/operator-guide.md`, `references/variant-calling-primer.md`, and `references/runtime-commands.md` for deeper fallback guidance when the runtime exposes skill reference files.

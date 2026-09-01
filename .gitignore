@@ -73,3 +73,19 @@ temp/
 .mypy_cache/
 .coverage
 htmlcov/
+
+# The bare `.env` line below misses every variant an operator actually creates —
+# .env.local, .env.validator, .env.bak — each of which holds the same secrets.
+.env.*
+!.env.example
+!.env.miner.example
+!.env.validator.example
+
+# Local AI-assistant scratch directories. These accumulate host lists, tokens and
+# working notes that must never reach a public repo. Ignored rather than deleted
+# so the tooling keeps working locally.
+.grok/
+.claude/
+.cursor/
+.aider*
+.windsurfrules

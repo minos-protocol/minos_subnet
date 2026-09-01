@@ -16,6 +16,27 @@ set -eo pipefail
 trap 'fail "Unexpected error on line $LINENO. Re-run with: bash -x install.sh for debug output."' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Every download and log this installer writes goes under here. /tmp is
+# world-writable, so a predictable name there can be pre-created or symlinked
+# by another local user and swapped before the file is run. mktemp -d gives an
+# unguessable 0700 directory owned by whoever invoked the installer.
+MINOS_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/minos-install.XXXXXXXX")" || {
+    echo "Error: could not create a private temporary directory." >&2
+    exit 1
+}
+# fail()/warn() point operators at these logs, so only discard them when the
+# install actually succeeded.
+_cleanup_tmpdir() {
+    local rc=$?
+    if (( rc == 0 )); then
+        rm -rf "$MINOS_TMPDIR"
+    else
+        echo "Installer logs kept in $MINOS_TMPDIR" >&2
+    fi
+}
+trap _cleanup_tmpdir EXIT
+
 MIN_PYTHON_MAJOR=3
 MIN_PYTHON_MINOR=10
 DOCKER_JUST_INSTALLED=false
@@ -463,9 +484,10 @@ check_docker() {
             fi
 
             info "Downloading Docker install script..."
-            curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
-            sudo sh /tmp/get-docker.sh
-            rm -f /tmp/get-docker.sh
+            local docker_script="$MINOS_TMPDIR/get-docker.sh"
+            curl -fsSL https://get.docker.com -o "$docker_script"
+            sudo sh "$docker_script"
+            rm -f "$docker_script"
 
             # Add current user to docker group
             local current_user="${USER:-$(whoami)}"
@@ -606,12 +628,13 @@ install_deps() {
         exit 1
     fi
 
-    info "Installing Python dependencies (includes the CPU build of PyTorch ~200 MB; a few minutes)."
-    if ! run_quiet "Upgrading pip" "/tmp/minos-pip-upgrade.log" pip install --upgrade pip -q; then
-        fail "pip upgrade failed. Check /tmp/minos-pip-upgrade.log for details."
+    info "Installing Python dependencies (a few minutes)."
+    local pip_log="$MINOS_TMPDIR/pip-upgrade.log"
+    if ! run_quiet "Upgrading pip" "$pip_log" pip install --upgrade pip -q; then
+        fail "pip upgrade failed. Check $pip_log for details."
         exit 1
     fi
-    if ! run_quiet "Installing requirements.txt" "/tmp/minos-pip-requirements.log" pip install -r "$req_file" -q; then
+    if ! run_quiet "Installing requirements.txt" "$MINOS_TMPDIR/pip-requirements.log" pip install -r "$req_file" -q; then
         fail "pip install failed. Check the output above for details."
         if [[ "$PKG_MANAGER" == "apt" ]]; then
             fail "Common fix: sudo apt-get install python3-dev build-essential zlib1g-dev"
@@ -651,7 +674,7 @@ install_node() {
     # just because the network blocked NodeSource. Every command below uses
     # ||true / explicit guards so set -eo pipefail can't crash the outer
     # install path mid-step.
-    local nodelog="/tmp/minos-node-install.log"
+    local nodelog="$MINOS_TMPDIR/node-install.log"
     : > "$nodelog"
 
     case "$PKG_MANAGER" in
@@ -755,7 +778,7 @@ install_pm2() {
         install_cmd=(sudo npm install -g pm2)
     fi
 
-    local log="/tmp/minos-pm2-install.log"
+    local log="$MINOS_TMPDIR/pm2-install.log"
     local try
     for try in 1 2 3; do
         info "Installing PM2 (attempt $try/3): ${install_cmd[*]}"

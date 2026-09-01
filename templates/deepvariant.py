@@ -7,7 +7,8 @@ Note: DeepVariant needs more memory (~16GB) than GATK.
 from pathlib import Path
 from typing import Dict, Any
 import subprocess
-import gzip
+
+from ._common import container_name, count_variants, reap_container
 import time
 import shutil
 import os
@@ -89,8 +90,9 @@ def variant_call(
         auto_mem_gb = 16
     memory_gb = config.get("memory_gb", auto_mem_gb)
 
+    _cname = container_name("deepvariant")
     cmd = [
-        "docker", "run", "--rm",
+        "docker", "run", "--rm", "--name", _cname,
         f"--cpus={threads}", f"--memory={memory_gb}g",
         "-v", f"{bam_path.parent}:/input:ro",
         "-v", f"{reference_path.parent}:/reference:ro",
@@ -153,11 +155,12 @@ def variant_call(
 
         return {
             "success": True,
-            "variant_count": _count_variants(vcf_to_read),
+            "variant_count": count_variants(vcf_to_read),
             "metadata": {"tool": "DeepVariant", "version": "1.5.0", "runtime_seconds": elapsed}
         }
 
     except subprocess.TimeoutExpired:
+        reap_container(_cname)
         return {"success": False, "variant_count": 0, "error": f"Timeout after {timeout}s"}
     except FileNotFoundError:
         return {"success": False, "variant_count": 0, "error": "Docker not found"}
@@ -167,17 +170,3 @@ def variant_call(
         # Cleanup
         if intermediate_dir.exists():
             shutil.rmtree(intermediate_dir, ignore_errors=True)
-
-
-def _count_variants(vcf_path: Path) -> int:
-    """Count variants in VCF."""
-    count = 0
-    try:
-        opener = gzip.open if str(vcf_path).endswith(".gz") else open
-        with opener(vcf_path, "rt") as f:
-            for line in f:
-                if not line.startswith("#"):
-                    count += 1
-    except Exception:
-        pass
-    return count

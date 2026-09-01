@@ -3,8 +3,8 @@
 Memory name: Minos SN107 - Safe Config-Tuning Basics
 Version: 1.0.0
 Primary subject: Config tuning
-Subjects: Minos SN107; Config tuning; How to compete well; GATK; DeepVariant; BCFtools; Scoring basics; Safe support behavior
-Related memories: Minos SN107 - Safe Tuning Workflow; Minos SN107 - GATK Basics; Minos SN107 - DeepVariant Basics; Minos SN107 - BCFtools Basics; Minos SN107 - Scoring Basics
+Subjects: Minos SN107; Config tuning; How to compete well; Practice mode; GATK; DeepVariant; BCFtools; Scoring basics; Safe support behavior
+Related memories: Minos SN107 - Safe Tuning Workflow; Minos SN107 - Practice Mode; Minos SN107 - GATK Basics; Minos SN107 - DeepVariant Basics; Minos SN107 - BCFtools Basics; Minos SN107 - Scoring Basics
 
 This public guide gives beginner-safe tuning principles for Minos miners.
 
@@ -61,12 +61,23 @@ Explain these as tradeoffs, not magic values:
 - contamination filtering
 - soft-clipped base handling
 
+## Measure Before Going Live
+
+Practice mode (`--practice`) scores a config against a fully-answered sample with the same scorer a validator uses, off-chain and with no live round at stake. Compare two configs on the same sample:
+
+```bash
+bash start-miner.sh --practice --config configs/gatk.conf --sample-id <sample-id>
+```
+
+A live round is an expensive place to discover that a change was worse. Practice scores are not a prediction of a specific round, because the sample and region differ, but they rank configs against each other reliably.
+
 ## Safe Workflow
 
 1. Identify the score component or failure mode.
 2. Change one category at a time.
 3. Record the exact change.
-4. Compare multiple rounds.
-5. Keep improvements that help the target component without breaking others.
+4. Score it in practice mode against the baseline sample.
+5. Compare multiple live rounds.
+6. Keep improvements that help the target component without breaking others.
 
 Do not claim any config is guaranteed to win. Do not optimize against private truth data.

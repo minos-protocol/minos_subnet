@@ -71,18 +71,36 @@ POST /v2/round-status  →  {
 
 On an active round, the miner:
 
-1. Downloads the BAM (SHA256-verified, cached across rounds)
+1. Downloads the BAM (cached across rounds; digest handling described under [Download integrity](#download-integrity))
 2. Runs its configured variant caller via Docker on the given region
 3. Submits its tool config (quality parameters only — no VCF uploaded):
 
 ```json
 POST /v2/submit-config  →  {
   "hotkey", "round_id", "tool_name", "tool_config",
-  "variant_count", "runtime_seconds", "timestamp", "signature"
+  "variant_count", "runtime_seconds", "timestamp", "nonce", "signature",
+  "config_commitment", "commitment_block", "config_nonce", "payment_proof"
 }
 ```
 
-All API calls are authenticated via canonical request signing. Each request includes a `signature` (the Bittensor keypair signs `METHOD|PATH|BODY_HASH|TIMESTAMP|NONCE`) and a unique `nonce` to prevent replay attacks.
+All API calls are authenticated via canonical request signing. Each request includes a `signature` (the Bittensor keypair signs `METHOD|PATH|BODY_HASH|TIMESTAMP|NONCE`) and a unique `nonce` to prevent replay attacks. That `nonce` is the anti-replay
+value for the request itself and is unrelated to `config_nonce`, which salts the
+config commitment.
+
+The last four fields are optional and each is **omitted from the body entirely when absent**, rather than sent as `null`, so the signed body is unchanged when they are not in use:
+
+| Field | When it is sent | What it is |
+| --- | --- | --- |
+| `config_commitment` | Only when the platform advertises `config_commitment_enabled: true` in `/scoring/network-config` | 64 hex chars: SHA-256 over domain, version, `netuid`, `round_id`, `hotkey`, `tool_name`, the nonce, and the canonical form of the *stripped* config. The same digest the miner publishes on chain, as `m1:<round8>:<commitment>` |
+| `commitment_block` | Only when the height the commitment landed at is known | Block height read off the extrinsic receipt. Absent when the chain write was rate-limited or failed, or when the height could not be determined; the commitment itself is still submitted |
+| `config_nonce` | With a commitment | The salt, revealed so the platform can recompute the digest. The config space is small enough to enumerate, so the commitment is salted |
+| `payment_proof` | Only when this round's free submission allowance is used up and the extra submission was paid for | Proof of the TAO payment, from `utils/submission_payment.py` |
+
+### Download integrity
+
+The platform publishes a digest alongside each round file (`bam_sha256`, `truth_vcf_sha256`, `mutations_vcf_sha256`). Where one is published, a cached file is reused only if it matches, and a mismatching cache is discarded and re-downloaded.
+
+A mismatch on the **freshly downloaded** bytes is logged as a warning and the file is **accepted** by default. Set `MINOS_ENFORCE_DOWNLOAD_SHA256` to `1`, `true`, `yes` or `on` to discard it and fail the download instead. Files fetched without a published digest (the BAM index, for example) get an existence check only.
 
 ### Supported tools
 
@@ -107,7 +125,7 @@ while True:
     for round in rounds:
         assignment = get_assignment(round)      # primary + secondary miner lists
         submissions = get_submissions(round)    # miner configs + presigned BAM/truth URLs
-        download_round_files(round)             # BAM, truth VCF, mutations VCF; SHA256-verified
+        download_round_files(round)             # BAM, truth VCF, mutations VCF
 
         # Per-job thread/memory and total concurrency are auto-tuned from
         # host CPU/RAM (see auto_scoring_config). Primaries run as a barrier;
@@ -141,7 +159,11 @@ If the platform does not support assignments (e.g. single-validator testnet), th
 
 ### 5.1 Scoring formula
 
-hap.py computes SNP and INDEL precision/recall against the truth VCF. The `AdvancedScorer` combines these into a final score (0–100) with four components:
+hap.py computes SNP and INDEL precision/recall against the truth VCF, and the `AdvancedScorer` combines these into a final score (0–100).
+
+Which of the two scorers is applied is decided by the **platform**, which advertises it as `scoring_version` in `/scoring/network-config`; the validator resolves it once per round and every validator follows it. The default is **v1**, described below. **v2** is difficulty-weighted — `100 x (0.70 x core + 0.30 x germline)` behind a plausibility gate — and is a different scale, so scores from the two are not comparable. [docs/scoring.md](scoring.md) describes both in full.
+
+v1 has four components:
 
 | Component | Weight | What it measures |
 | --- | --- | --- |
@@ -197,7 +219,7 @@ minos_subnet/
 │   ├── subset_scoring.py  # Subset scoring helpers (assignments, deadlines)
 │   ├── config_loader.py   # Tool config file parser
 │   ├── path_utils.py      # Safe filesystem paths
-│   ├── file_utils.py      # SHA256-verified file download + caching
+│   ├── file_utils.py      # File download + caching; SHA256 checked, strict only with MINOS_ENFORCE_DOWNLOAD_SHA256
 │   └── README.md          # Utils documentation
 ├── base/
 │   └── genomics_config.py # Central config (Docker images, timeouts, scoring params)

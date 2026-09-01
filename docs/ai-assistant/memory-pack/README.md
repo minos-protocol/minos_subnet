@@ -77,7 +77,7 @@ does not create duplicate near-synonym subjects.
 Important subject groups:
 
 - Minos SN107, Public knowledge graph
-- Miner onboarding, Demo mode, Live mining, Bittensor wallet and hotkey
+- Miner onboarding, Demo mode, Practice mode, Live mining, Bittensor wallet and hotkey
 - Docker runtime, PM2 supervision, Hardware requirements, Runtime operations
 - Variant calling, BAM files, VCF files, Reference genome and reads, SNPs and indels
 - GATK, DeepVariant, BCFtools, hap.py benchmarking, AdvancedScorer

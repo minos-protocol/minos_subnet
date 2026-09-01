@@ -17,6 +17,8 @@ Useful Minos commands:
 bash install.sh
 bash scripts/verify.sh --miner
 bash start-miner.sh --demo
+bash start-miner.sh --practice
+bash start-miner.sh --practice --config configs/gatk.conf
 bash start-miner.sh
 bash start-miner.sh --setup-ditto
 bash start-miner.sh --setup-ai-assistant

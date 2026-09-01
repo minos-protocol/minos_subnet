@@ -8,6 +8,8 @@ metagraph and checking whether the scoring deadline is approaching.
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
+from utils.weight_tracking import parse_deadline
+
 
 def get_miners_from_metagraph(metagraph, my_uid: Optional[int] = None) -> List[str]:
     """
@@ -66,9 +68,17 @@ def seconds_until_deadline(
     scoring_end_time: datetime,
     tz: timezone = timezone.utc,
 ) -> float:
-    """Return seconds remaining until scoring_end_time. Negative if past deadline."""
-    now = datetime.now(scoring_end_time.tzinfo or tz)
-    return (scoring_end_time - now).total_seconds()
+    """Return seconds remaining until scoring_end_time. Negative if past deadline.
+
+    A naive deadline is read as UTC, matching parse_deadline, rather than as the
+    host's local time — otherwise two validators compute different remaining time
+    from the same assignment. `datetime.now(scoring_end_time.tzinfo or tz)` did
+    not do that: for a naive deadline it made `now` aware while the deadline
+    stayed naive, and the subtraction raised TypeError, which the round loop
+    catches as a failed round.
+    """
+    deadline = parse_deadline(scoring_end_time)
+    return (deadline - datetime.now(tz)).total_seconds()
 
 
 def should_stop_secondary_scoring(

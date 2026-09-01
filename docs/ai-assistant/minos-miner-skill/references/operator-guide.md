@@ -10,6 +10,7 @@ The agent should help with:
 
 - installation and first run
 - demo mode
+- practice mode and self-scoring
 - live mining readiness
 - PM2 and Docker troubleshooting
 - public endpoint checks
@@ -36,7 +37,7 @@ What it means: PM2 only proves the process is running. It does not prove the min
 
 Next exact check: Check `GET https://api.theminos.ai/scoring/all` for the public UID/hotkey, then inspect `pm2 logs minos-miner --lines 50`.
 
-What to paste back: Public UID/hotkey, demo/live mode, public score/eligibility/weight, and redacted logs.
+What to paste back: Public UID/hotkey, demo/practice/live mode, public score/eligibility/weight, and redacted logs.
 
 What not to do yet: Do not tune configs or repeatedly restart until participation and submission are confirmed.
 
@@ -67,11 +68,22 @@ If the user tries to paste a secret, tell them to rotate it if exposure was real
 ## Operator Priorities
 
 1. Make the miner complete demo mode.
-2. Make the miner reliably participate live.
-3. Make the miner submit valid results.
-4. Make the miner visible in public scoring.
-5. Make the miner eligible.
-6. Only then discuss config tuning.
+2. Make the miner score a config in practice mode.
+3. Make the miner reliably participate live.
+4. Make the miner submit valid results.
+5. Make the miner visible in public scoring.
+6. Make the miner eligible.
+7. Only then discuss config tuning, measuring each change in practice mode first.
+
+## Demo And Practice Modes
+
+`bash start-miner.sh --demo` is the one-shot pipeline proof, pinned to a fixed chr20 sample. `bash start-miner.sh --practice` is the same self-scorer over a menu of fully-answered chr18-chr22 samples, with `--config` and `--sample-id` to skip the menus.
+
+Both run in the foreground with no wallet and no chain, and neither submits, earns TAO, nor counts toward the 5-of-20 eligibility gate. Neither should be run under PM2.
+
+Practice keeps downloaded samples in `datasets/practice/<sample_id>/` and prints the exact score a validator would compute — under the scoring version the platform advertises, which the output names — so it is the right place to compare two configs. Hold the sample fixed while comparing, or the sample explains the difference.
+
+Practice truth files land on the operator's machine deliberately. They are still not paste-back material.
 
 ## Common Failure Buckets
 
@@ -107,9 +119,16 @@ Score but zero weight:
 - Explain eligibility and recent valid scored rounds.
 - Check public detailed scoring and history.
 
+Practice mode failure:
+
+- "Practice mode is not enabled" or an empty sample menu means the deployment is not serving practice samples. Check platform health and `PLATFORM_URL`.
+- A missing reference FASTA or RTG SDF for a chromosome means the run bypassed `start-miner.sh`, which is what fetches those assets for chr18-chr22.
+- A zero-input result means the config called nothing on target; a validator would discard it.
+
 Config tuning:
 
 - Only after valid scored results exist.
+- Measure each change in practice mode before a live round pays for it.
 - Identify target weakness first.
 
 ## Public Endpoints
@@ -144,6 +163,7 @@ Signed POST endpoints are miner-software-managed. Beginners should not manually 
 ## Good Miner Habits
 
 - Run demo first.
+- Score a config in practice mode before trusting it to a live round.
 - Use one caller that reliably completes before optimizing.
 - Watch logs across a full round.
 - Save a baseline config.
