@@ -1,12 +1,12 @@
 """Hardening tests for utils.platform_client.
 
-Covers three defects:
-  (a) the HTTPS guard was a raw string-prefix match, so URLs whose real host
-      was attacker-controlled passed as "localhost";
-  (b) score_id, which comes from the submit-score RESPONSE, was interpolated
-      into an S3 key without sanitisation;
-  (c) retry-on-timeout applied to non-idempotent POSTs, so a ReadTimeout on a
-      request the server had already committed caused a double submission.
+Three properties are pinned here:
+  (a) the HTTPS guard resolves the real host rather than matching a prefix, so
+      a URL whose authority only looks like localhost is not treated as local;
+  (b) score_id, which comes from the submit-score RESPONSE, is validated before
+      it is interpolated into an S3 key;
+  (c) retry-on-timeout applies only to requests that are safe to repeat, so a
+      ReadTimeout on a non-idempotent POST does not resend it.
 """
 
 import asyncio
@@ -38,14 +38,14 @@ def _keypair() -> Keypair:
 class TestHTTPSGuardHostParsing:
 
     @pytest.mark.parametrize("url", [
-        # Real host is localhost.attacker.tld — a prefix match on
+        # Real host is localhost.elsewhere.example — a prefix match on
         # "http://localhost" would treat this as loopback and allow cleartext.
-        "http://localhost.attacker.tld/v2",
-        "http://127.0.0.1.attacker.tld/v2",
-        # "127.0.0.1:8000" here is USERINFO — the real host is attacker.tld.
-        "http://127.0.0.1:8000@attacker.tld/v2",
-        "http://localhost@attacker.tld/v2",
-        "http://[::1]@attacker.tld/v2",
+        "http://localhost.elsewhere.example/v2",
+        "http://127.0.0.1.elsewhere.example/v2",
+        # "127.0.0.1:8000" here is USERINFO — the real host is elsewhere.example.
+        "http://127.0.0.1:8000@elsewhere.example/v2",
+        "http://localhost@elsewhere.example/v2",
+        "http://[::1]@elsewhere.example/v2",
         # Plain non-loopback http, and non-http schemes.
         "http://api.theminos.ai",
         "ftp://api.theminos.ai",
@@ -101,7 +101,8 @@ class TestSafeObjectId:
 
 
 class TestSubmitVariantResultsKey:
-    """submit_variant_results must refuse to build a key from a hostile score_id."""
+    """submit_variant_results must refuse to build a key from a score_id that
+    contains path separators."""
 
     def _client(self):
         return ValidatorPlatformClient(
@@ -117,7 +118,7 @@ class TestSubmitVariantResultsKey:
         ) as put:
             with pytest.raises(PlatformClientError, match="score_id"):
                 asyncio.run(client.submit_variant_results(
-                    score_id="../../../attacker/evil",
+                    score_id="../../../other/key",
                     round_id="2026-08-30T00:00:00",
                     results=[],
                 ))

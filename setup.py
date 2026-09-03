@@ -1743,8 +1743,10 @@ print("registered" if wallet.hotkey.ss58_address in metagraph.hotkeys else "not-
                         )
                         return False
                 # filter="data" adds the interpreter's own checks where it is
-                # available (3.12+); the explicit pass above is what protects
-                # older interpreters, which silently ignore the argument.
+                # available (3.12+, and some backported 3.8-3.11 patch releases);
+                # the explicit pass above is what protects interpreters without
+                # it, which reject the argument with TypeError -- hence the
+                # fallback extractall() below.
                 try:
                     tar.extractall(path=str(target_dir.parent), filter="data")
                 except TypeError:

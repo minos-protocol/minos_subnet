@@ -13,7 +13,7 @@ Public validator concepts:
 - validators verify miner work instead of trusting miner-provided output
 - validator workloads are heavier than normal miner operation
 - validators need reliable Docker, CPU, RAM, disk, reference data, and scoring resources
-- benchmark comparison uses private validator-side truth data
+- benchmark comparison uses round truth data that is held back while submissions are open and released publicly after the round closes
 - validator weights follow public subnet and scoring rules
 
 Public repo entrypoints may include:
@@ -25,4 +25,4 @@ bash pm2-validator.sh
 
 Use the public repository README and scripts for exact current setup steps.
 
-Do not upload private validator configs, truth files, confident regions, private benchmark data, database output, or infrastructure details into Ditto.
+Do not upload private validator configs, unreleased truth files, confident regions, non-public benchmark data, database output, or infrastructure details into Ditto.

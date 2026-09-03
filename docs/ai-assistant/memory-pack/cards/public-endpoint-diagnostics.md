@@ -1,7 +1,7 @@
 # Minos SN107: Public Endpoint Diagnostics
 
 Memory name: Minos SN107 - Public Endpoint Diagnostics
-Version: 1.0.0
+Version: 1.1.0
 Primary subject: Public endpoints
 Subjects: Public endpoints; Endpoint safety; Live data boundary; Miner monitoring; Troubleshooting; Rewards and emissions
 Related memories: Minos SN107 - Public Endpoint Safety Reference; Minos SN107 - Live Data Boundary; Minos SN107 - Troubleshooting Playbook; Minos SN107 - Safe Paste-Back Template
@@ -18,6 +18,7 @@ Safe public GET endpoint categories:
 - public network stats
 - public validator dashboard data when exposed
 - accepted tool-config parameters and their valid ranges
+- round-selection proof, config commitment hashes, and revealed round files (`/verification/task-window`, `/verification/round/{round_id}`)
 
 Signed POST endpoints are managed by the official miner software. Beginners should not manually construct signed requests, signatures, active nonces, authorization headers, or submission payloads.
 
@@ -29,5 +30,8 @@ Use public endpoints to answer questions like:
 - "Why is PM2 online but weight is 0?"
 - "Who is on the latest finalized leaderboard?"
 - "What parameter values are accepted, and what happens if I submit one out of range?"
+- "How do I check which files a round actually used?"
+- "Can I verify a round's task selection myself?"
+- "Does my config commitment hash match what was recorded?"
 
 Use Minos MCP when available for live/current data. Use the `@minos` graph for stable interpretation and safety guidance.

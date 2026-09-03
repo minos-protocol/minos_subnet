@@ -160,7 +160,7 @@ Never ask for or use:
 - active nonces
 - presigned URLs
 - private miner configs or full config files in chat, uploads, or external memory
-- private BAM/VCF/truth files
+- private BAM/VCF files and unreleased truth files
 - private validator files
 - admin endpoints
 - production infrastructure details
@@ -258,13 +258,14 @@ recall, precision, false-positive counts, the advanced score out of 100, and the
 combined final score. A run flagged zero-input called nothing on target and
 would be discarded by a validator.
 
-Two scorers exist, and the platform decides which one the network uses by
-advertising `scoring_version` in `/scoring/network-config`. Both modes ask the
-platform and score with that formula, naming the version in the printed result.
-If the platform cannot be reached they use the version the machine last
-resolved, and v1 if it never resolved one — a fallback to the wrong version puts
-the number on a different scale from the network's, so check the version line
-before comparing a practice score with a leaderboard score.
+The active scoring version is published in network configuration
+(`scoring_version` in `/scoring/network-config`) and applied consistently by
+validators. Both modes read it and score with that formula, naming the version
+in the printed result. If network configuration cannot be reached they use the
+version the machine last resolved, and v1 if it never resolved one — a fallback
+to the wrong version puts the number on a different scale from the network's,
+so check the version line before comparing a practice score with a leaderboard
+score.
 
 Non-interactive forms:
 
@@ -326,7 +327,7 @@ BCFtools:
 hap.py:
 
 - Benchmark comparison tool.
-- Understand conceptually, but do not ask miners for private truth files.
+- Understand conceptually, but do not ask miners for unreleased truth data. Files officially released through the public verification endpoint after a round closes may be used for independent verification.
 
 ## Common High-Quality Answers
 

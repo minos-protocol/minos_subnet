@@ -50,9 +50,7 @@ class TestClassification:
 
         This must exercise the SNP path. An indel is bucketed purely by allele
         length and never consults a genotype, so asserting the invariant with
-        ref="A", alt="AT" passed no matter what the SNP branch did — which is
-        exactly how the called-genotype bug survived a test named for the
-        invariant it broke.
+        ref="A", alt="AT" would pass regardless of what the SNP branch does.
         """
         a = rec(ref="A", alt="AT", cls="TP")
         b = rec(ref="A", alt="AT", cls="FN")
@@ -69,10 +67,10 @@ class TestClassification:
     def test_zygosity_comes_from_truth_not_from_the_call(self):
         """A missed hom SNP is still a hom SNP.
 
-        An FN has no query genotype by definition, so bucketing on the call put
-        every missed hom SNP in snp_het — charging 0.18 where 0.02 was correct,
-        a 9x error on precisely the variants a miner is penalised for, and
-        making a truth variant's class depend on who was scoring it.
+        An FN has no query genotype by definition, so bucketing on the call
+        would file every missed hom SNP under snp_het — 0.18 where 0.02 is
+        correct, on precisely the variants a miner is penalised for, and it
+        would make a truth variant's class depend on who scored it.
         """
         missed_hom = {"variant_type": "SNP", "ref": "A", "alt": "G",
                       "truth_genotype": "1/1", "called_genotype": None, "classification": "FN"}
@@ -90,14 +88,16 @@ class TestClassification:
     ])
     def test_any_homozygous_alt_genotype_is_hom(self, gt, expected):
         """2/2 is as homozygous as 1/1. Matching only the two literal spellings
-        filed multi-allelic hom sites under the 9x-heavier het class."""
+        would file multi-allelic hom sites under snp_het, which is weighted 9x
+        snp_hom."""
         r = {"variant_type": "SNP", "ref": "A", "alt": "G", "truth_genotype": gt}
         assert classify_variant_difficulty(r) == expected
 
     def test_same_length_alleles_do_not_take_the_heaviest_class(self):
         """A record typed INDEL whose alleles are the same length is a
-        substitution. indel_1bp carries the HIGHEST weight (0.40), so falling
-        through the length ladder handed an MNP the most-discriminating class."""
+        substitution. indel_1bp carries the highest weight (0.40), so an
+        equal-length record has to be caught before the length ladder, which
+        would otherwise place an MNP in the most heavily weighted class."""
         mnp = {"variant_type": "INDEL", "ref": "AT", "alt": "GC", "truth_genotype": "0/1"}
         assert classify_variant_difficulty(mnp) == "snp_het"
 
@@ -132,11 +132,11 @@ class TestDifficultyWeightedF1:
         assert difficulty_weighted_f1({"snp_het": {"tp": 0, "fn": 0, "fp": 0}}) is None
 
     def test_false_positives_are_not_free_in_a_class_with_no_truth(self):
-        """A class with no truth variants used to be renormalised away, which
-        made its false positives cost nothing: emit 500 long-indel FPs into a
-        region containing no long indels and the class simply vanished. Absent
-        truth only justifies dropping the class when the miner called nothing
-        there either."""
+        """A class with no truth variants must not be renormalised away while
+        the miner is calling in it, or its false positives cost nothing: 500
+        long-indel FPs in a region containing no long indels would drop the
+        class entirely. Absent truth only justifies dropping the class when the
+        miner called nothing there either."""
         assert difficulty_weighted_f1({"snp_het": {"tp": 0, "fn": 0, "fp": 5}}) == 0.0
 
         clean = {"snp_het": {"tp": 10, "fn": 0, "fp": 0}}
@@ -148,8 +148,9 @@ class TestDifficultyWeightedF1:
         assert difficulty_weighted_f1(polluted) < difficulty_weighted_f1(clean)
 
     def test_indel_failure_costs_far_more_than_snp_failure(self):
-        """THE POINT OF v2. Under truth-count weighting the SNP miss dominates
-        because SNPs are ~83% of the truth set; here the indel miss must."""
+        """Difficulty weighting must make the indel miss dominate. Under
+        truth-count weighting the SNP miss dominates instead, because SNPs are
+        ~83% of the truth set."""
         perfect = {k: {"tp": 100, "fn": 0, "fp": 0} for k in DIFFICULTY_WEIGHTS}
 
         snp_miss = {k: dict(v) for k, v in perfect.items()}
@@ -182,9 +183,10 @@ class TestPlausibilityGate:
                                   "hethom_query_snp": 1.5 + GATE_HETHOM_MAX_DELTA + 0.1}) is False
 
     def test_undefined_ratio_neither_passes_nor_earns(self):
-        """v1 paid FULL MARKS for an undefined ratio — an absent metric scored
-        better than an imperfect one. A gate cannot be farmed this way: there is
-        nothing to earn, only something to fail."""
+        """Under v1 an undefined ratio scored full marks, so an absent metric
+        could score better than an imperfect one. A gate is not scored, so
+        omitting the measurement earns nothing — there is only something to
+        fail."""
         assert plausibility_gate({"titv_truth_snp": 0, "titv_query_snp": 0}) is True
         assert plausibility_gate({}) is True
 
@@ -256,9 +258,9 @@ class TestClassCounts:
 
 class TestV2EnforcesItsInputContract:
     """max(0.0, nan) returns 0.0 because NaN compares False against everything,
-    so a broken fp_per_target silently became exp(0) == 1.0 -- a PERFECT
-    germline component. "This measurement is broken" must never read as "this
-    miner was flawless"."""
+    so an unusable fp_per_target would evaluate to exp(0) == 1.0 -- the maximum
+    germline component. An unusable measurement must not read as a perfect
+    callset, so the scorer rejects it at its input contract."""
 
     COUNTS = {"snp_het": {"tp": 10, "fp": 0, "fn": 0}}
 
@@ -286,8 +288,9 @@ class TestV2EnforcesItsInputContract:
 
 class TestTheGateCannotBeSidesteppedByOmission:
     """Under v1 these ratios were scored components, so an absent one earned
-    nothing. In v2 the gate is pass/fail, so "absent means skip" is a free pass
-    a miner can choose -- e.g. by emitting no homozygous SNP calls."""
+    nothing. In v2 the gate is pass/fail, so "absent means skip" would be a free
+    pass -- a callset with no homozygous SNP calls would never face the
+    het/hom check."""
 
     def _metrics(self, **kw):
         m = {"fp_per_target": 0.0,

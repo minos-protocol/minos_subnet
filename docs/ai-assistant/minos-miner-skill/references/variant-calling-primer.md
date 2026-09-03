@@ -122,7 +122,7 @@ Good practice:
 
 ### hap.py
 
-hap.py compares calls to truth and reports metrics. Miners should understand the concepts, but they should not request private truth files or validator data.
+hap.py compares calls to truth and reports metrics. Miners should understand the concepts, but they should not request unreleased truth data or other non-public validator materials. Files officially released through the public verification endpoint after a round closes may be used for independent verification.
 
 ## Diagnosing Score Shape
 

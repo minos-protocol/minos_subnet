@@ -26,8 +26,8 @@ PY
 )"
 
 if [[ -n "$token" ]]; then
-  # Passing --token put the gateway token on argv, where any local user could
-  # read it from `ps -eo args` or /proc/<pid>/cmdline, which defeated the
+  # Passing --token would put the gateway token on argv, where any local user
+  # could read it from `ps -eo args` or /proc/<pid>/cmdline, defeating the
   # chmod 600 on openclaw.json. OpenClaw reads OPENCLAW_GATEWAY_TOKEN for the
   # configured gateway when no --url/host target is given, which is this
   # wrapper's local-loopback case.

@@ -1,13 +1,13 @@
 """Platform deadlines must parse identically on every validator.
 
-Same class of bug as parse_submitted_at, one layer up. datetime.fromisoformat
-accepts a trailing Z only from Python 3.11 while install.sh still accepts a
-python3.10 interpreter, and each deadline site spelled the Z workaround
-differently or not at all. A naive deadline was worse than inconsistent: one site
-compared it against a local-time now (19800s of skew on a +05:30 host, from
-identical data), another against an aware now, which raised TypeError. Two honest
-validators reading the same assignment therefore disagreed about how much of the
-scoring window was left.
+Same shape as parse_submitted_at, one layer up. datetime.fromisoformat accepts
+a trailing Z only from Python 3.11 while install.sh still accepts a python3.10
+interpreter, so the Z suffix needs one shared workaround rather than a per-site
+one. A naive deadline needs one shared rule too: compared against a local-time
+now it drifts by the host's offset (19800s on a +05:30 host, from identical
+data), and against an aware now the subtraction raises TypeError. One parse, one
+rule — naive means UTC — so two validators reading the same assignment agree on
+how much of the scoring window is left.
 """
 
 import datetime as dt
@@ -31,7 +31,8 @@ class TestParseDeadline:
         assert parse_deadline("2026-02-15T12:00:00+00:00") == REFERENCE
 
     def test_naive_is_read_as_utc_not_local_time(self):
-        """The whole point: the result must not depend on the host's TZ."""
+        """A naive timestamp is read as UTC, so the parsed deadline does not
+        depend on the host's TZ."""
         parsed = parse_deadline("2026-02-15T12:00:00")
         assert parsed.tzinfo is not None
         assert parsed.utcoffset() == dt.timedelta(0)
@@ -74,9 +75,9 @@ class TestParseDeadline:
 
 
 class TestDeadlineArithmetic:
-    """Downstream of the parse: a naive deadline used to raise TypeError here,
-    because `datetime.now(scoring_end_time.tzinfo or tz)` returned an aware now
-    while the deadline itself stayed naive."""
+    """Downstream of the parse: a naive deadline must not raise here.
+    `datetime.now(scoring_end_time.tzinfo or tz)` returns an aware now, so an
+    unnormalised deadline would stay naive and the subtraction would fail."""
 
     def test_naive_deadline_does_not_raise(self):
         naive = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) + dt.timedelta(minutes=30)
@@ -96,7 +97,7 @@ class TestDeadlineArithmetic:
 
 
 class TestEveryDeadlineSiteRoutesThroughTheHelper:
-    """The bug was three private parses drifting apart, so pin that there is one.
+    """One shared parse, not three private ones that can drift apart.
     Source-level because importing neurons.validator pulls in bittensor."""
 
     @pytest.mark.parametrize(

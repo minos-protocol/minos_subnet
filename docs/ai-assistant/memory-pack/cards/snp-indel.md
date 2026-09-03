@@ -19,4 +19,4 @@ Safe explanation pattern:
 - "This setting may affect sensitivity or filtering."
 - "Compare several scored rounds before trusting a change."
 - "Use public score summaries and public endpoint data."
-- "Do not optimize against private truth files."
+- "Do not optimize against unreleased truth data; files released after a round closes may be used for verification."

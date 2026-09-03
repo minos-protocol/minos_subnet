@@ -22,4 +22,4 @@ Beginner-safe GATK tuning categories:
 
 GATK tuning should be measured across multiple scored rounds. A single round can be noisy or unrepresentative.
 
-Do not present magic winning values. Do not optimize against private truth data. Do not copy configs from private validator material. Explain tradeoffs and require public score evidence.
+Do not present magic winning values. Do not optimize against unreleased truth data. Do not copy configs from private validator material. Explain tradeoffs and require public score evidence.

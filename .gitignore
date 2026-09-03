@@ -74,8 +74,8 @@ temp/
 .coverage
 htmlcov/
 
-# The bare `.env` line below misses every variant an operator actually creates —
-# .env.local, .env.validator, .env.bak — each of which holds the same secrets.
+# Covers every .env variant an operator may create (.env.local, .env.validator,
+# .env.bak); each holds the same secrets as .env itself.
 .env.*
 !.env.example
 !.env.miner.example

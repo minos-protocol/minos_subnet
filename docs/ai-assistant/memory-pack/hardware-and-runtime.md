@@ -26,7 +26,7 @@ Practice mode needs extra disk. Its first run fetches the reference FASTA and RT
 
 Validators are heavier than basic miners because they rerun miner configs and score outputs. Validator machines need more CPU, RAM, disk, Docker capacity, reference/scoring data, and operational reliability.
 
-Do not paste validator private files or truth data into support. Share only public-safe status and redacted errors.
+Do not paste validator private files or unreleased truth data into support. Share only public-safe status and redacted errors.
 
 ## Tool Tradeoffs
 

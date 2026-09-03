@@ -1,9 +1,13 @@
 """Paid resubmission: one free config submission per round, pay for the rest.
 
-Fee, destination and free allowance are read from the platform's
-/scoring/network-config. With no advertised policy this module reports "no
-payment required". An advertised allowance of zero is not honoured without a
-local opt-in — see zero_free_allowance_permitted.
+Paid resubmission is disabled by default. It requires both network support
+(``resubmission_fee_enabled`` in /scoring/network-config) and an explicit
+operator opt-in (``MINER_PAY_FOR_RESUBMISSIONS``); neither alone moves TAO.
+
+Fee, destination and free allowance are read from network configuration. With
+nothing advertised this module reports "no payment required". An advertised
+allowance of zero is not honoured without a further local opt-in — see
+zero_free_allowance_permitted.
 
 Ordering contract. A payment is real money and the submission it buys can still
 fail, so these steps must stay in this order:
@@ -39,17 +43,16 @@ logger = logging.getLogger(__name__)
 # unless zero_free_allowance_permitted().
 DEFAULT_FREE_SUBMISSIONS = 1
 
-# Hard ceiling on what a platform response can make this miner spend, per
-# submission. The fee arrives in an unauthenticated HTTP body and the transfer
-# is signed with the coldkey, so the ceiling is local and an operator has to
-# raise it deliberately.
+# Hard per-submission ceiling, enforced locally. Payment limits are kept on the
+# miner side so an operator sets their own maximum; raising it is a deliberate
+# local change.
 DEFAULT_MAX_FEE_TAO = 0.01
 # 24h aggregate ceiling. Deliberately small: a miner paying more than this in
 # one day is far more likely to be looping than competing.
 DEFAULT_MAX_DAILY_TAO = 0.05
 # Ceiling on what EVERY hotkey sharing this ledger may spend in a rolling 24h.
-# The per-hotkey cap bounds one miner; without this, an operator running K
-# hotkeys on a host has K times the exposure they think they configured.
+# The per-hotkey cap bounds one miner; this one keeps a host running K hotkeys
+# from multiplying that ceiling by K.
 DEFAULT_MAX_DAILY_WALLET_TAO = 0.10
 
 
@@ -79,9 +82,9 @@ def max_fee_tao() -> float:
 def zero_free_allowance_permitted() -> bool:
     """Whether an advertised allowance of ZERO free submissions is honoured.
 
-    Off by default. The allowance arrives in the same unauthenticated body as
-    the fee, and a zero there charges for the round's first submission, so
-    honouring it stays a local decision.
+    Off by default. A zero allowance charges for the round's first
+    submission, so honouring it stays a local decision rather than one the
+    advertised policy can make on the operator's behalf.
     """
     return os.getenv("MINER_ALLOW_ZERO_FREE_SUBMISSIONS", "").lower() in ("1", "true", "yes")
 
@@ -89,15 +92,13 @@ def zero_free_allowance_permitted() -> bool:
 def pinned_destination() -> Optional[str]:
     """The destination this operator will pay, if they pinned one.
 
-    The fee and address arrive in the platform's network-config response, which
-    is authenticated as a TRANSPORT (HTTPS proves which server answered) but is
-    not itself signed. An operator who pins the address here refuses to pay
-    anywhere else, so a changed or substituted destination stops the payment
-    instead of redirecting it.
+    The fee and address arrive in the network-config response. An operator who
+    pins the address here will pay that address and no other: any different
+    destination stops the payment rather than receiving it.
 
     Unset means "accept the advertised destination", which is the status quo.
-    Pinning is the stronger position and is what an unattended miner holding a
-    funded coldkey should do.
+    Pinning is the stronger setting, and is what an unattended miner holding a
+    funded coldkey should use.
 
     Read from MINOS_EXPECTED_PAYMENT_ADDRESS.
     """
@@ -108,15 +109,14 @@ def pinned_destination() -> Optional[str]:
 def payment_opted_in() -> bool:
     """Whether this operator has explicitly agreed to pay for resubmissions.
 
-    Spending is OFF unless the operator turns it on. The platform still decides
-    whether resubmissions cost anything and what they cost, but a platform
-    policy alone can never move TAO: this software auto-updates, so a policy
-    published at any moment would otherwise start spending on every miner that
-    had never asked to spend anything.
+    Spending is off unless the operator turns it on. Network configuration
+    determines whether resubmissions carry a fee and what it is, but network
+    configuration alone never moves TAO: a payment also requires this local
+    opt-in, so an unattended or auto-updating miner does not begin spending on
+    its own.
 
-    ``max_fee_tao()`` and the daily ceilings bound how much a wrong or hostile
-    policy can cost. They are not a substitute for consent -- they bound the
-    damage, they do not authorise it.
+    ``max_fee_tao()`` and the daily ceilings bound what an opted-in miner can
+    spend. They are limits, not authorisation; neither replaces this switch.
 
     Set MINER_PAY_FOR_RESUBMISSIONS to 1/true/yes/on to take part. Anything
     else, including unset, means no payment and no resubmission beyond the free
@@ -128,14 +128,12 @@ def payment_opted_in() -> bool:
 def max_daily_tao() -> float:
     """Hard ceiling on TOTAL resubmission spend in a rolling 24h, in TAO.
 
-    The per-submission ceiling bounds one payment; it does not bound a stuck
-    loop, a misconfigured platform, or a round that keeps asking. With ~20 rounds
-    a day and several submissions each, an unbounded miner can spend far more
-    than any single fee would suggest.
+    The per-submission ceiling bounds one payment; it does not bound repeated
+    payments across a day. With ~20 rounds a day and several submissions each,
+    the total can exceed what any single fee suggests.
 
-    This matters more since spending follows the platform's advertised policy
-    rather than a local opt-in: an operator who auto-updates and never reads a
-    release note should still have a bounded worst case.
+    Spending already requires the local opt-in in ``payment_opted_in()``; this
+    ceiling bounds the total once that opt-in is set.
 
     Read from MINOS_MAX_DAILY_RESUBMISSION_TAO. A non-finite or negative
     override falls back to the default, for the same reason as max_fee_tao().
@@ -187,8 +185,8 @@ class SubmissionPolicy:
         if self.free_submissions < 0:
             self.free_submissions = DEFAULT_FREE_SUBMISSIONS
         elif self.free_submissions == 0 and not zero_free_allowance_permitted():
-            # An unauthenticated 0 must not silently start charging for the
-            # round's first submission.
+            # A zero allowance must not start charging for the round's first
+            # submission without the operator's opt-in.
             logger.warning(
                 "Platform advertises free_submissions_per_round=0, which would "
                 "charge a fee for this round's first submission; using %s instead. "
@@ -283,8 +281,8 @@ def max_daily_wallet_tao() -> float:
     hotkeys on one host multiplies that ceiling by the number of hotkeys, which
     is not what "a 0.05 TAO daily cap" reads as. This bounds the host.
 
-    It is honest about its scope: the ledger is a file on this machine, so this
-    is per-machine, not per-coldkey. Hotkeys of the same coldkey on other hosts
+    Scope: the ledger is a file on this machine, so this ceiling is
+    per-machine, not per-coldkey. Hotkeys of the same coldkey on other hosts
     keep their own ledgers and their own ceilings. A true coldkey-wide cap needs
     accounting this side of the wallet cannot see.
 
@@ -418,11 +416,16 @@ class PaymentLedger:
         Passing None sums the whole ledger, which is what an operator wants when
         asking "what has this machine spent".
 
-        A malformed or unreadable line is skipped rather than raising — this
-        feeds a safety ceiling, and a ledger we cannot fully parse must not take
-        the miner down. It fails toward spending less, never more: an
-        unparseable payment simply is not counted, and the ceiling still applies
-        to everything that is.
+        This feeds a safety ceiling, so it must never under-report. A payment
+        record it cannot read is money it cannot rule out, and skipping one
+        would raise the remaining allowance — the wrong direction. So anything
+        that leaves the ledger not fully accounted for returns ``inf``, which
+        makes every ceiling comparison refuse rather than permit. Recovering is
+        the operator's call: inspect or move the file.
+
+        Records this function is not summing — other hotkeys when filtering,
+        and intents, which may never have moved money — are skipped normally.
+        Only unreadable PAYMENT records are unaccountable.
         """
         if not self.path.exists():
             return 0.0
@@ -436,7 +439,7 @@ class PaymentLedger:
                     try:
                         entry = json.loads(line)
                     except (ValueError, TypeError):
-                        continue
+                        return self._unaccountable("a line is not valid JSON")
                     kind = entry.get("kind")
                     # "spent_unprovable" is money that left the wallet without
                     # yielding a usable proof. Excluding it would make the
@@ -444,19 +447,46 @@ class PaymentLedger:
                     # since no proof line is ever written for them.
                     if kind not in ("proof", "spent_unprovable"):
                         continue
-                    if hotkey is not None and entry.get("hotkey") != hotkey:
-                        continue
+                    entry_hotkey = entry.get("hotkey")
+                    if hotkey is not None:
+                        if not entry_hotkey:
+                            return self._unaccountable(
+                                "a payment record carries no hotkey, so it cannot be "
+                                "attributed when filtering"
+                            )
+                        if entry_hotkey != hotkey:
+                            continue
                     proof = entry.get("proof") or entry.get("spend") or {}
+                    if not isinstance(proof, dict):
+                        return self._unaccountable(
+                            "a payment record's proof is not an object"
+                        )
                     try:
                         paid_at = int(proof.get("paid_at", 0))
                         amount = float(proof.get("amount_tao", 0) or 0)
                     except (TypeError, ValueError):
-                        continue
+                        return self._unaccountable(
+                            "a payment record has an unreadable amount or timestamp"
+                        )
                     if paid_at >= cutoff_ts and amount > 0:
                         total += amount
-        except OSError:
-            return 0.0
+        except (OSError, UnicodeDecodeError) as exc:
+            return self._unaccountable(f"the ledger could not be read ({exc})")
         return total
+
+    def _unaccountable(self, reason: str) -> float:
+        """Report unbounded spend so every ceiling refuses.
+
+        Returned instead of a partial sum whenever the ledger cannot be fully
+        accounted for. A partial sum would look like room left under the cap.
+        """
+        logger.error(
+            "Payment ledger %s cannot be fully accounted for: %s. Reporting "
+            "unlimited spend, so the daily ceilings will refuse further paid "
+            "submissions. Inspect or move the file to resume paying.",
+            self.path, reason,
+        )
+        return float("inf")
 
     def unspent_proof(self, round_id: str, hotkey: str) -> Optional[Dict[str, Any]]:
         """A proof already paid for but not yet accepted — reuse it, don't re-pay."""
@@ -528,10 +558,10 @@ class PaymentSignerMismatch(Exception):
 def preflight_payment_signer(*, subtensor, wallet, hotkey: str, logger=None) -> bool:
     """Check we may pay before we do. False means do not transfer.
 
-    The platform accepts a payment only when the signing coldkey owned the
-    submitting hotkey at the payment block. That check happens after the money
-    has moved, so mirroring it here is what stops a miner paying a fee that is
-    then refused — the TAO is gone either way, and only this side can prevent it.
+    A payment is accepted only when the signing coldkey owned the submitting
+    hotkey at the payment block. That check runs after the transfer, so the
+    same check is mirrored here beforehand: an on-chain transfer cannot be
+    reversed, so ownership is verified before spending.
 
     A wallet or chain read that fails returns False. Refusing to pay when
     ownership cannot be established is recoverable; paying when it cannot is not.

@@ -1,21 +1,14 @@
-"""Which scoring formula this validator should apply, decided by the platform.
+"""Which scoring version this validator applies.
 
-v1 and v2 are different SCALES. A round scored partly by each produces a
-meaningless ranking, and ranking is what pays — so the choice cannot be left to
-each operator's environment, where any rollout guarantees a mixed fleet for as
-long as the slowest operator takes to notice. The platform advertises it in
-network-config and every validator follows.
+Two versions exist, v1 and v2. The active one is published in network
+configuration as ``scoring_version`` and applied consistently by every
+validator, so every score in a round is on the same scale: v1 and v2 are
+different scales, and a ranking built from both would not be meaningful.
 
-WHAT HAPPENS WHEN THE PLATFORM CANNOT BE REACHED is the whole reason this module
-exists. Defaulting to v1 on a failed fetch would be worse than useless: during a
-v2 rollout, every validator that briefly lost the platform would drop back to v1
-and diverge from the fleet precisely when the network is least able to notice.
-So a resolved version is PERSISTED and reused. An unreachable platform changes
-nothing; it just keeps doing what it was doing.
-
-Only a validator that has never successfully read the platform falls back to v1,
-which is the live formula and the safe assumption for a node that has never been
-told otherwise.
+When network configuration cannot be read, the validator keeps the version it
+last resolved, recorded in a small state file, which keeps it on the same
+scale as the rest of the network across a transient outage. A validator that
+has never resolved a version uses v1.
 """
 from __future__ import annotations
 
@@ -45,11 +38,10 @@ def scorer_name(version: Any) -> str:
     would label a v1 number AdvancedV2, which is exactly the confusion the label
     exists to prevent.
 
-    The v1 label is "Advanced", matching what every deployed validator already
-    writes, because v1 IS that formula -- identical arithmetic, verified against
-    minos_subnet main. A new spelling for the same numbers would make the
-    platform's consensus marker read "mixed" on any fleet that is not upgrading
-    in lockstep, reporting a blend of two scales where there is only one.
+    The v1 label is "Advanced", matching what deployed validators already
+    write, because v1 is that same formula. A new spelling for the same numbers
+    would make the consensus marker read "mixed" while validators are
+    upgrading, reporting a blend of two scales where there is only one.
     """
     return "AdvancedV2" if version == V2 else "Advanced"
 
@@ -86,8 +78,8 @@ def record_used(version: str, path: Optional[Path] = None) -> None:
     """Persist the version being used, atomically.
 
     Written via a temp file and os.replace so a crash mid-write cannot leave a
-    truncated file — which read_last_used would treat as "never resolved" and
-    silently drop the validator back to v1.
+    truncated file — which read_last_used would treat as "never resolved",
+    dropping the validator back to v1.
     """
     if normalise(version) is None:
         return

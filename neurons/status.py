@@ -82,18 +82,18 @@ def expected_chromosomes() -> List[str]:
     """Chromosomes setup.py actually installs on this node.
 
     setup.py step_reference_data() filters its download list down to "/chr20/"
-    whenever MINER_DEMO is truthy, so demanding all 22 here reported 63 missing
-    reference files on a demo miner whose install had completed successfully.
+    whenever MINER_DEMO is truthy, so a demo install has only chr20 present.
+    Requiring all 22 here would report the rest as missing on a node whose
+    install completed correctly.
     """
     return ["chr20"] if _demo_mode() else list(SUPPORTED_CHROMOSOMES)
 
 
 # Reference files exist only in the per-chromosome layout
-# datasets/reference/{chrom}/{chrom}.fa — the flat layout this used to claim as
-# a fallback is not something setup.py can leave behind:
-# setup.py._migrate_legacy_reference_data() MOVES a legacy datasets/reference/
-# chr20.* into the per-chromosome directory before anything else runs, so
-# accepting flat paths would only ever have reported a half-migrated tree
+# datasets/reference/{chrom}/{chrom}.fa. A flat layout is not something setup.py
+# can leave behind: setup.py._migrate_legacy_reference_data() MOVES a legacy
+# datasets/reference/chr20.* into the per-chromosome directory before anything
+# else runs, so accepting flat paths would only report a half-migrated tree
 # (which the callers then fail to open) as healthy.
 def _build_reference_files(chromosomes):
     files = []
@@ -248,8 +248,8 @@ def check_docker_daemon() -> Check:
 def check_docker_images(role: str, template: Optional[str]) -> List[Check]:
     if role == "miner" and template:
         # Surface deprecated miner templates as a FAIL so this matches the
-        # runtime block in neurons/miner.py — keeps `verify`/`status` output
-        # honest instead of pretending freebayes is a valid miner choice.
+        # runtime block in neurons/miner.py, rather than reporting freebayes
+        # as a valid miner choice.
         from templates import DEPRECATED_TEMPLATES  # local import to avoid cycle
         if template in DEPRECATED_TEMPLATES:
             return [Check(
@@ -402,7 +402,9 @@ def check_bittensor_chain(timeout: float = CHAIN_PROBE_TIMEOUT) -> Check:
         import bittensor as bt
         if not hasattr(bt, "subtensor"):
             bt.subtensor = bt.Subtensor
-        network = os.getenv("SUBTENSOR_NETWORK", "finney")
+        # miner.py and validator.py both read NETWORK; keep SUBTENSOR_NETWORK
+        # as a fallback so the probe reports the chain the neuron really uses.
+        network = os.getenv("NETWORK") or os.getenv("SUBTENSOR_NETWORK") or "finney"
         sub = bt.subtensor(network=network)
         block = sub.block
         return f"{network} (block {block})"
@@ -479,10 +481,10 @@ def _call_with_timeout(fn: Callable, timeout: float) -> Any:
     Not a ThreadPoolExecutor: its context manager shuts down with wait=True, so
     the TimeoutError could not reach the caller until the worker returned, and
     even shutdown(wait=False) leaves the pool's non-daemon worker to be joined
-    by the interpreter's atexit hook. Against a black-holed SUBTENSOR_NETWORK
-    that made `status.py --json` print nothing and never exit, so a health cron
-    stacked hung processes. A daemon thread is abandoned instead: the probe is
-    reported as a timeout on schedule and the process can still exit.
+    by the interpreter's atexit hook — so against an unresponsive
+    SUBTENSOR_NETWORK the command would wait indefinitely. A daemon thread is
+    abandoned instead: the probe is reported as a timeout on schedule and the
+    process can still exit.
     """
     import threading
 
@@ -692,11 +694,10 @@ def detect_role(explicit_role: Optional[str] = None, base_dir: Optional[Path] = 
 
     An unset MINER_TEMPLATE is not "no miner": templates.get_template_name()
     resolves it to DEFAULT_TEMPLATE, so a default gatk miner runs fine without
-    it. Treating that as a validator checked the node against the validator
+    it. Treating that as a validator would check the node against validator
     Docker images (hap.py, DeepVariant, freebayes) and 22 .sdf directories it
-    will never own — ~25 FAILs and exit 1 on a healthy node — while
-    check_config_files SKIPped the gatk.conf parse, the one check that mattered
-    for it.
+    does not own, and skip the gatk.conf parse, which is the check that
+    matters for a miner.
 
     Validator intent is therefore only ever taken from an explicit signal: the
     --role flag, or an .env that says so. MINER_TEMPLATE outranks the files

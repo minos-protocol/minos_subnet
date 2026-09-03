@@ -71,11 +71,10 @@ def seconds_until_deadline(
     """Return seconds remaining until scoring_end_time. Negative if past deadline.
 
     A naive deadline is read as UTC, matching parse_deadline, rather than as the
-    host's local time — otherwise two validators compute different remaining time
-    from the same assignment. `datetime.now(scoring_end_time.tzinfo or tz)` did
-    not do that: for a naive deadline it made `now` aware while the deadline
-    stayed naive, and the subtraction raised TypeError, which the round loop
-    catches as a failed round.
+    host's local time, so two validators compute the same remaining time from the
+    same assignment. Taking the timezone from the deadline itself
+    (`scoring_end_time.tzinfo or tz`) does not do that: it leaves a naive deadline
+    naive while `now` is aware, and the subtraction raises TypeError.
     """
     deadline = parse_deadline(scoring_end_time)
     return (deadline - datetime.now(tz)).total_seconds()

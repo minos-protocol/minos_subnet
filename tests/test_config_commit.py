@@ -1,8 +1,8 @@
 """Tests for the miner-side config commitment.
 
-The properties that matter are adversarial: the commitment must be reproducible
-by the miner who made it, and useless to anyone trying to work out what config
-it describes.
+Two properties define it: the miner who made a commitment can reproduce it from
+their own ledger, and the commitment on its own does not reveal the
+configuration it covers.
 """
 
 import json
@@ -73,7 +73,7 @@ class TestHiding:
         b = cc.compute_commitment(tool_config=CONFIG, nonce=cc.new_nonce(), **BASE)
         assert a != b
 
-    def test_attacker_with_the_exact_config_cannot_match_without_the_nonce(self):
+    def test_the_config_alone_does_not_reproduce_the_commitment(self):
         target = cc.compute_commitment(tool_config=CONFIG, nonce=cc.new_nonce(), **BASE)
         guesses = [
             cc.compute_commitment(tool_config=CONFIG, nonce=cc.new_nonce(), **BASE)
@@ -239,11 +239,11 @@ class TestCommitmentLedger:
         assert target.exists()
 
 
-class TestTheLedgerCanStillOpenAPublishedCommitment:
+class TestLedgerOpensAPublishedCommitment:
     """A commitment is written in two parts: the nonce and config when built,
-    then the block once published. Returning only the last line returned the
-    publication record -- which carries no nonce, so the commitment it describes
-    could never be opened."""
+    then the block once published. find() must merge both, because the
+    publication record carries no nonce and a commitment cannot be opened
+    without one."""
 
     def _ledger(self, tmp_path, monkeypatch):
         monkeypatch.setenv("MINOS_COMMITMENT_LEDGER", str(tmp_path / "c.jsonl"))

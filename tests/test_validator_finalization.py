@@ -1,4 +1,6 @@
-"""Regression tests for validator round finalization."""
+"""Validator round finalization: a round that finished with no valid scores
+must clear tracker state rather than carry the previous round's scores into
+weight setting."""
 
 import asyncio
 import importlib

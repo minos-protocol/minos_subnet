@@ -14,7 +14,7 @@
 
 # Minos – Decentralized Genomic Variant Calling & Benchmarking Platform
 
-Minos (SN107) is a subnet for genomic variant calling and benchmarking powered by Bittensor. Every 72 minutes, the platform generates a fresh challenge genome (BAM file) containing hidden synthetic mutations injected using HelixForge at read level. Miners are rewarded for performing hyperparameter search and providing configurations for state-of-the-art variant calling tools that can accurately identify these hidden mutations in the genome. Once the hyperparameter space has been saturated, miners will compete to provide their own custom algorithms to identify mutations. Validators are responsible for downloading miner's hyperparam config and they will run each miner's submitted config, and evaluate the results using industry standard tools and approaches such as hap.py. Miners will never be asked to upload outputs, they submit their variant-calling configuration (and pipelines in later stages), which the validator executes trustlessly.
+Minos (SN107) is a subnet for genomic variant calling and benchmarking powered by Bittensor. Every 72 minutes, the platform generates a fresh challenge genome (BAM file) containing hidden synthetic mutations injected using HelixForge at read level. Miners are rewarded for performing hyperparameter search and providing configurations for state-of-the-art variant calling tools that can accurately identify these hidden mutations in the genome. Once the hyperparameter space has been saturated, miners will compete to provide their own custom algorithms to identify mutations. Validators are responsible for downloading miner's hyperparam config and they will run each miner's submitted config, and evaluate the results using industry standard tools and approaches such as hap.py. Miners will never be asked to upload outputs, they submit their variant-calling configuration (and pipelines in later stages), which the validator executes independently.
 
 > **Subnet 107** on Bittensor mainnet (finney).
 
@@ -93,7 +93,7 @@ minos_subnet/
 │   ├── subset_scoring.py     # Subset scoring helpers (assignments, deadlines)
 │   ├── config_loader.py      # Tool config file parser
 │   ├── path_utils.py         # Safe filesystem paths
-│   ├── file_utils.py         # File download + caching; SHA256 checked, strict only with MINOS_ENFORCE_DOWNLOAD_SHA256
+│   ├── file_utils.py         # File download + caching; SHA256 checked, with MINOS_ENFORCE_DOWNLOAD_SHA256 to reject a mismatching download
 │   └── README.md             # Utils documentation
 ├── base/                     # Core subnet config
 │   └── genomics_config.py    # Central config (Docker images, timeouts, scoring params)
@@ -530,6 +530,22 @@ The Minos Platform is a hosted service at `https://api.theminos.ai` that handles
 | `POST /v2/canonical-ranking`    | Validator | Cross-validator ranking, used to break a tie at the top |
 | `POST /v2/owner-map`            | Validator | Fallback ownership map, only when `reward_normalization` is on and the chain read failed |
 | `GET /scoring/network-config`   | Both      | Reward policy and `scoring_version` — which scorer the network uses |
+| `GET /verification/task-window` | Public    | Upcoming task hashes and recently drawn rounds |
+| `GET /verification/round/{round_id}` | Public | How a round drew its task and, once it closes, its committed file hashes, the released round files, and config commitment hashes (miner commitments when that feature is enabled) |
+
+### Round Verification
+
+After a round's submission window closes, Minos publishes the round-selection
+record, the committed file hashes, and the released round files, so
+participants can verify selection and file integrity and reproduce scoring
+locally. Miner commitment fields are included when that feature is enabled.
+Full detail in [docs/verification.md](docs/verification.md); the fastest way
+to see it live:
+
+```bash
+bash check_round.sh                    # latest revealed round
+bash check_round.sh --download output  # + download the files and check their hashes
+```
 
 ### Storage Backends
 
@@ -558,9 +574,9 @@ Both URLs always point at the same files. Pick whichever is faster from your net
 
 Validators run each miner's tool config and score the resulting VCF from that against the truth data shared by the platform with them using hap.py. Scores are combined by Minos' developed `AdvancedScorer` into a scaled 0–100 final score.
 
-Two scorers exist. The **platform** chooses which one the network uses and advertises it as `scoring_version` in `/scoring/network-config`; every validator follows that, and the default is v1. The two are different scales, so a score produced under one is not comparable with a score produced under the other. [docs/scoring.md](docs/scoring.md) is the full description of both — tune against the version the platform is advertising.
+Two scoring versions exist. The active one is published in network configuration (`scoring_version` in `/scoring/network-config`) and applied consistently by validators. The two are different scales, so a score produced under one is not comparable with a score produced under the other. [docs/scoring.md](docs/scoring.md) is the full description of both — tune against the version network configuration advertises.
 
-**v1** (the default) weights four components and then subtracts an overcall penalty:
+**v1** weights four components and then subtracts an overcall penalty:
 
 | Component    | Weight |
 | -------------|--------|
@@ -585,7 +601,7 @@ Only finite scores where `0 < current_score <= 1.0` are eligible for ranking. Ro
 
 ### Weight Distribution
 
-Validators apply the reward policy from `/scoring/network-config` (winner-heavy pruning dust). Currently the top eligible current-round miner receives ~90% of the weight (`winner_weight = 0.9`), eligible ranks #2 through #20 split the remaining ~10% as ranked pruning dust (`dust_top_n = 20`) using 0.8 geometric weighting, and burn is 0% (`burn_rate = 0.0`). These are dynamic protocol values — **check `/scoring/network-config` for the latest**. If fewer dust recipients exist, the dust is renormalized across the available ranks; any weight that cannot be assigned to an eligible miner is sent to burn.
+Validators apply the reward policy from `/scoring/network-config` (winner-heavy pruning dust): the top eligible current-round miner receives the `winner_weight` share, eligible ranks #2 through `dust_top_n` split the remainder as ranked pruning dust with `dust_decay` geometric weighting, and `burn_rate` goes to burn. These are dynamic protocol values — **read the current numbers from `/scoring/network-config`**. If fewer dust recipients exist, the dust is renormalized across the available ranks; any weight that cannot be assigned to an eligible miner is sent to burn.
 
 Eligibility requires scoring in at least 5 of the last 20 rounds, including the current round. Miners below the participation threshold receive 0 weight until they qualify. Close current-round ties use deterministic round data from the validator/platform flow; historical scores are not part of the ranking.
 
@@ -644,10 +660,12 @@ btcli subnet metagraph --netuid 107
 - [docs/parameter_ranges.md](docs/parameter_ranges.md) - Accepted parameters and valid ranges per tool (from `templates/tool_params.py`, the definitions the validator enforces; also published at `GET /scoring/parameter-ranges`)
 - [docs/scoring.md](docs/scoring.md) - How scoring works, the overcall penalty, and scoring v2
 - [docs/miner_features.md](docs/miner_features.md) - Config commitment and paid resubmission (currently off; read before enabling auto-updates)
+- [docs/verification.md](docs/verification.md) - What you can check independently: round-selection proof, config commitment hashes, and self-scoring against a round's revealed files
 - [docs/hap_py_docker.md](docs/hap_py_docker.md) - hap.py Docker image reference
 - [docs/ai-assistant/memory-pack/README.md](docs/ai-assistant/memory-pack/README.md) - Public Minos SN107 knowledge source for Ditto and agent runtimes
 - [docs/ai-assistant/README.md](docs/ai-assistant/README.md) - OpenClaw/Hermes local skill, persona, and model setup assets
 - [scripts/verify.sh](scripts/verify.sh) - Pre-flight environment check (`bash scripts/verify.sh --miner`)
+- [check_round.sh](check_round.sh) - Fetch a round's draw, config commitments, and revealed files (`bash check_round.sh`, or `--download DIR` to fetch and hash-check them)
 - [scripts/demo.sh](scripts/demo.sh) - Run a single demo round end-to-end (`bash scripts/demo.sh`)
 - [scripts/minosvm_first_run.sh](scripts/minosvm_first_run.sh) - Friendly MinosVM first-run menu
 - [scripts/prompt_ai_assistant.sh](scripts/prompt_ai_assistant.sh) - One-time AI assistant prompt for installs and VM first run

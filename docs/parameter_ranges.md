@@ -45,7 +45,13 @@ Two things define a valid config:
    so a typo'd parameter name costs the round rather than being skipped. The one
    exception is the local-execution settings `memory_gb`, `num_threads`,
    `ref_build`, `threads` and `timeout`, which the miner strips before the config
-   is sent (`utils/config_commit.INFRA_PARAMS`).
+   is sent (`utils/config_commit.INFRA_PARAMS`). Left unset, these default per
+   tool: `timeout` is 1200s for GATK and 1800s for DeepVariant and bcftools, and
+   exceeding it fails the round rather than submitting a partial callset. The
+   container is given every host core unless `threads` is set. GATK, DeepVariant
+   and FreeBayes are also given total host RAM minus 1 GB unless `memory_gb` is
+   set (GATK's `-Xmx` is 80% of that); bcftools sets no memory limit. Set them
+   explicitly if the box runs anything else.
 2. **Valid ranges** — every accepted parameter has a valid range (or a set of
    allowed values), and its declared type is enforced too: an `int` parameter
    given `20.0` is rejected as the wrong type, not coerced.

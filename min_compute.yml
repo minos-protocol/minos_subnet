@@ -110,7 +110,7 @@ compute_spec:
       min_version: "24.0"                      # Minimum Docker version
       images_size: 15                          # Approximate size of required Docker images (GB)
       required_images:                         # Validators re-run ALL miner tool configs, so all images are needed
-        - "genonet/hap-py:0.3.15"              # hap.py + RTG Tools scoring (~2GB)
+        - "genonet/hap-py@sha256:03acabe84bbfba35f5a7234129d524c563f5657e1f21150a2ea2797f8e6d05f2"  # hap.py + RTG Tools scoring (~2GB), pinned by digest to match utils/scoring.py
         - "broadinstitute/gatk:4.5.0.0"        # GATK template (~4GB)
         - "google/deepvariant:1.5.0"            # DeepVariant template (~6GB)
         - "staphb/freebayes:1.3.7"              # FreeBayes template (~500MB) — DEPRECATED 2026-05-09; retained so in-flight pre-cutover rounds can be scored; removed in a follow-up release

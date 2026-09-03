@@ -8,14 +8,14 @@ Practical guide to maximizing your variant-calling scores on Bittensor Subnet 10
 
 Validators compare your VCF output against a truth VCF using **hap.py** (the GA4GH benchmarking tool). Your raw metrics feed into the **AdvancedScorer**, which produces a score from 0 to 100.
 
-> **Check which scorer is live before you tune.** Two exist, and the **platform**
-> picks the one the whole network uses — it advertises it as `scoring_version` in
-> `/scoring/network-config`, and validators follow it. The default is **v1**, and
-> v1 is what this guide describes. **v2** is difficulty-weighted
-> (`100 x (0.70 x core + 0.30 x germline)`, gated) and is a different scale, so
-> the same callset scores differently under it and the levers that pay are not
-> the same. [docs/scoring.md](scoring.md) describes both, including the v2
-> difficulty weights.
+> **Check which scoring version is active before you tune.** Two exist; the
+> active one is published in network configuration (`scoring_version` in
+> `/scoring/network-config`) and applied consistently by validators. The
+> component breakdown in this guide describes **v1**. **v2** is
+> difficulty-weighted (`100 x (0.70 x core + 0.30 x germline)`, gated) and is a
+> different scale, so the same callset scores differently under it and the
+> levers that pay are not the same. [docs/scoring.md](scoring.md) describes
+> both, including the v2 difficulty weights.
 
 ### AdvancedScorer Breakdown (v1)
 
@@ -66,7 +66,7 @@ The AdvancedScorer outputs a raw score on a 0–100 scale. Validators normalize 
 
 **Before eligibility:** miners receive 0 weight until they have enough recent valid scored rounds. Validators keep the unassigned budget in burn rather than paying ineligible miners.
 
-**After eligibility:** **winner-heavy with pruning dust** among eligible miners — rank #1 gets ~90% and eligible ranks #2 through #20 split the remaining ~10% with ranked (0.8) decay; burn is currently 0%. Ineligible miners and ranks below the dust cutoff get 0. (Reward values are dynamic — check `/scoring/network-config` for the latest.)
+**After eligibility:** **winner-heavy with pruning dust** among eligible miners — rank #1 gets the `winner_weight` share and eligible ranks #2 through `dust_top_n` split the remainder with geometric (`dust_decay`) decay; `burn_rate` goes to burn. Ineligible miners and ranks below the dust cutoff get 0. (Read the live values from `/scoring/network-config`.)
 
 Consistency matters as much as peak performance.
 
@@ -76,7 +76,7 @@ This is the most common question for new miners. There are three distinct causes
 
 **1. You are not eligible yet (most likely).** Eligibility requires participating in **at least 5 of the last 20 rounds**. With ~20 rounds per day, a fresh miner needs roughly 6 hours of continuous uptime before they can earn any weight, even with perfect scores. During this time you appear in validator logs but receive 0 weight. This is expected.
 
-**2. You are eligible but outside the paid ranks.** Once eligible, the top miner gets the main (~90%) miner weight and eligible ranks #2 through #20 split the pruning dust. If your current-round score ranks below the paid cutoff, you get 0. The fix is to score better — see Section 4 (Tuning Strategy).
+**2. You are eligible but outside the paid ranks.** Once eligible, the top miner gets the winner share and eligible ranks below it split the pruning dust (values in `/scoring/network-config`). If your current-round score ranks below the paid cutoff, you get 0. The fix is to score better — see Section 4 (Tuning Strategy).
 
 **3. You are submitting but the score is 0.** Causes: wrong reference build, malformed VCF (multi-sample, missing index), tool config rejected by the parameter whitelist or by an out-of-range value (rejected, not clamped), or a Docker error. Check your logs for the line `Score: 0.00/100`. If you see it, the variant call ran but produced no usable output. If you do not see a score line at all, your submission never made it to the scoring phase — check the platform connectivity / round timing.
 
@@ -202,13 +202,13 @@ Under v1 the scoring weights (60% F1, 15% completeness, 15% FP) mean you want to
 | 40-60   | Something is suboptimal. Check tool parameters and Docker image.  |
 | Below 40| Likely a configuration error. See Common Mistakes below.          |
 
-The genomic region rotates across chr18–chr22 (5 MB and 10 MB windows) and varies per round, so some score variance is normal. Focus on your current-round score trend and consistency across regions.
+The genomic region rotates across the chromosomes listed in `chromosome_rotation` in `/scoring/network-config`, in 5 MB and 10 MB windows, and varies per round, so some score variance is normal. Focus on your current-round score trend and consistency across regions.
 
 ---
 
 ## 6. Common Mistakes
 
-**Wrong model_type in DeepVariant.** Using `WES` instead of `WGS` will silently produce worse calls. Minos BAMs are whole-genome. Always use `WGS`.
+**Wrong model_type in DeepVariant.** `WES` is an accepted value, so it passes validation and the run completes normally — but it applies an exome model to Minos BAMs, which are whole-genome, and the resulting calls score lower. Always use `WGS`.
 
 **Over-filtering.** Setting `min_base_quality_score` to 30+ or `standard_min_confidence_threshold_for_calling` to 50+ will kill your recall. The completeness penalty (15%) will eat your score. Start conservative with thresholds and only raise them if your FP rate is clearly too high.
 

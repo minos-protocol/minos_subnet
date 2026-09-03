@@ -95,16 +95,22 @@ class Miner:
 
     def __init__(self, config=None):
         self.config = config or self.get_config()
+        self.submit_only = bool(getattr(self.config, "submit_only", False))
 
         bt.logging.info("Setting up miner...")
         bt.logging.set_trace(self.config.logging.trace)
         bt.logging.set_debug(self.config.logging.debug)
 
-        try:
-            require_docker()
-        except RuntimeError as e:
-            bt.logging.error(str(e))
-            sys.exit(1)
+        if not self.submit_only:
+            try:
+                require_docker()
+            except RuntimeError as e:
+                bt.logging.error(str(e))
+                sys.exit(1)
+        else:
+            bt.logging.info(
+                "Submit-only mode enabled: BAM download and local variant calling are disabled"
+            )
 
         self.demo = bool(getattr(self.config, "demo", False))
 
@@ -221,8 +227,23 @@ class Miner:
             sys.exit(1)
 
     def setup_variant_caller(self):
-        """Setup variant caller from MINER_TEMPLATE env var."""
-        self.variant_caller = os.getenv("MINER_TEMPLATE", "").lower() or MINER_CONFIG.get("default_caller", "gatk")
+        """Resolve the variant caller: explicit --variant_caller, else MINER_TEMPLATE.
+
+        Read from argv for the same reason _parse_side_mode_args does -- the
+        bittensor Config does not reliably surface every flag this parser
+        declares. Only an explicitly passed flag counts: the argparse default
+        would otherwise always outrank MINER_TEMPLATE. get_config() has already
+        run, so an out-of-choices value has been rejected before we get here.
+        """
+        explicit = ""
+        for i, arg in enumerate(sys.argv):
+            if arg == "--variant_caller" and i + 1 < len(sys.argv):
+                explicit = sys.argv[i + 1]
+            elif arg.startswith("--variant_caller="):
+                explicit = arg.split("=", 1)[1]
+        self.variant_caller = (
+            explicit or os.getenv("MINER_TEMPLATE", "") or MINER_CONFIG.get("default_caller", "gatk")
+        ).lower()
 
         # Refuse to run with a deprecated template. The runner is still
         # registered (validators need it for in-flight pre-cutover rounds),
@@ -311,6 +332,16 @@ class Miner:
                 "MINER_PAY_FOR_RESUBMISSIONS to be set as well."
             ),
         )
+        parser.add_argument(
+            "--submit-only",
+            action="store_true",
+            default=False,
+            help=(
+                "Submit the configured caller parameters without downloading the round BAM "
+                "or running the caller locally. The normal signed platform request, protocol "
+                "spec version, payment guard, and optional config commitment/nonce are retained."
+            ),
+        )
         parser.add_argument("--bam", type=str, default=None, help="[--score] Path to input BAM.")
         parser.add_argument("--truth", type=str, default=None, help="[--score] Path to truth VCF (.vcf.gz).")
         parser.add_argument(
@@ -354,6 +385,8 @@ class Miner:
         # MINER_DEMO=1/true/yes opts in via env (PM2 / systemd convenience)
         if os.getenv("MINER_DEMO", "").strip().lower() in ("1", "true", "yes", "on"):
             config.demo = True
+        if os.getenv("MINOS_SUBMIT_ONLY", "").strip().lower() in ("1", "true", "yes", "on"):
+            config.submit_only = True
 
         return config
 
@@ -484,8 +517,8 @@ class Miner:
             # The price of the NEXT paid submission, quoted for this hotkey. It
             # is NOT the advertised base fee: the fee escalates with the owning
             # coldkey's paid submissions this round, so paying the base fee for
-            # anything past the first is an underpayment — and the transfer is
-            # already on chain when the platform refuses it, so the TAO is gone.
+            # anything past the first would underpay. An on-chain transfer
+            # cannot be reversed, so the quote is read rather than derived.
             quoted_fee = round_data.get("next_submission_fee_tao")
             if quoted_fee is not None:
                 try:
@@ -502,8 +535,7 @@ class Miner:
                 # the NEXT paid submission for this hotkey's coldkey, fetched in
                 # this same response -- so it already reflects the escalation
                 # from every submission counted so far. Paying an older quote
-                # underpays, and the transfer is on chain before the platform
-                # refuses it.
+                # would underpay, and an on-chain transfer cannot be reversed.
                 if quoted_fee is None:
                     bt.logging.error(
                         f"Round {round_id[:8]}...: --resubmit given but the "
@@ -518,8 +550,14 @@ class Miner:
                     f"{quoted_fee} TAO and will be PAID FOR if it goes ahead."
                 )
 
-            # Check if enough time remaining (need at least 10 minutes for variant calling)
-            if time_remaining < MIN_SUBMISSION_TIME_SECONDS:
+            # A normal miner needs enough time to download the BAM and run its
+            # caller. Submit-only miners do neither, but still retain the spend
+            # margin used by _submit_result for a possible payment/commitment.
+            minimum_time = (
+                MIN_SPEND_TIME_SECONDS if self.submit_only
+                else MIN_SUBMISSION_TIME_SECONDS
+            )
+            if time_remaining < minimum_time:
                 bt.logging.warning(f"Only {time_remaining}s remaining in round - skipping")
                 return False
 
@@ -543,13 +581,23 @@ class Miner:
             print(f"   Time remaining: {time_remaining // 60} min", flush=True)
             print(f"{'='*60}", flush=True)
 
+            # Get tool config BEFORE running template (so we use what we submit)
+            tool_config = self._get_tool_config()
+
+            if self.submit_only:
+                print(
+                    f"   Submit-only mode: skipping BAM download and local "
+                    f"{self.variant_caller.upper()} execution",
+                    flush=True,
+                )
+                return await self._submit_result(
+                    round_id, tool_config, variant_count=None, elapsed=None
+                )
+
             # Download BAM file and index
             bam_path = self._download_bam(round_data, round_id)
             if bam_path is None:
                 return False
-
-            # Get tool config BEFORE running template (so we use what we submit)
-            tool_config = self._get_tool_config()
 
             # Run variant calling (or reuse existing results)
             output_dir = bam_path.parent
@@ -740,11 +788,10 @@ class Miner:
         Returns ``(commitment, block, nonce)``; any may be None. Never raises —
         a commitment is supplementary evidence, not a precondition for mining.
 
-        The nonce is returned so it can be REVEALED to the platform with the
-        config. Without it the platform holds a digest it cannot check, so the
-        commitment proves nothing to anyone but us. Revealing it costs nothing:
-        it only opens this one commitment, over a config we are sending in the
-        same request anyway.
+        The nonce is returned so it can be sent with the config. Without it the
+        digest cannot be recomputed on receipt, so the commitment stays
+        verifiable only by this miner. Sending it discloses nothing further: it
+        opens this one commitment, over a config travelling in the same request.
 
         Two ordering invariants: the nonce is persisted before anything is
         published (a commitment whose nonce was lost can never be opened), and
@@ -826,11 +873,11 @@ class Miner:
         return commitment, block, nonce
 
     async def _config_commitment_enabled(self) -> bool:
-        """Whether the platform is asking miners to commit on chain.
+        """Whether network configuration advertises config commitment.
 
-        Fails to False on any doubt: an unreadable policy, an unreachable
-        platform, or a demo run. Committing costs an extrinsic per submission,
-        so the safe direction when we cannot tell is not to.
+        Resolves to False on any doubt: an unreadable setting, unreachable
+        network configuration, or a demo run. Committing costs an extrinsic per
+        submission, so the default when it cannot be determined is not to.
         """
         if (
             getattr(self, "demo", False)
@@ -933,10 +980,10 @@ class Miner:
         if blocked:
             return
 
-        # The platform decides whether miners commit on chain. Absence means
-        # disabled, so an older platform and a deliberately-disabled one behave
-        # the same — and a platform we cannot reach never starts us spending
-        # extrinsics we were not asked for.
+        # Config commitment follows network configuration. An absent setting
+        # reads as disabled, so an older deployment and a disabled one behave
+        # the same, and unreadable network configuration does not start
+        # extrinsic spending.
         commitment = commitment_block = commitment_nonce = None
         if await self._config_commitment_enabled():
             commitment, commitment_block, commitment_nonce = self._make_commitment(
@@ -958,7 +1005,7 @@ class Miner:
                 payment_proof=payment_proof,
             )
         except PaymentRequiredError as e:
-            # Trust the platform's verdict over the local count. Resync to the
+            # Follow the reported count over the local one. Resync to the
             # allowance, not to 1: payment_required() fires at
             # `count >= free_submissions`, so a smaller bump never reaches it.
             required = max(1, getattr(self, "_free_submissions_seen", 1) or 1)
@@ -1036,8 +1083,9 @@ class Miner:
 
         Loads parameters from configs/{tool}.conf files.
         Only includes QUALITY-AFFECTING parameters that are whitelisted in templates/tool_params.py.
-        System parameters (threads, memory, timeout) are handled separately and NOT submitted to platform
-        to prevent exploitation (e.g., miner submitting threads=999 to crash validators).
+        System parameters (threads, memory, timeout) are host-specific, so they are handled
+        separately and not submitted: a validator re-running the config applies its own
+        resource settings rather than the miner's.
         """
         base_config = {
             "tool": self.variant_caller,
@@ -1652,8 +1700,8 @@ def _run_and_score(tool, tool_config, bam_path, ref_path, truth_path,
     #   1. combined_final must be a finite number in (0, 1].
     #   2. a config that calls nothing on-target (SNP and indel F1 both 0) is
     #      not a scorable result — it is discarded rather than recorded, so it
-    #      earns no on-chain score. Report that honestly instead of implying
-    #      the number would count.
+    #      earns no on-chain score. Report it as discarded rather than as a
+    #      number that would count.
     valid_range = (isinstance(combined_final, float) and combined_final == combined_final
                    and 0.0 < combined_final <= 1.0)
     # Match the validator's empty-on-target discard EXACTLY (see the validator's
@@ -1945,11 +1993,10 @@ async def run_practice(cfg) -> int:
 
     _UI.banner(tool)
 
-    # The platform decides which formula the network scores with. Ask it, so
-    # this preview matches what a validator would actually record — the output
-    # says exactly that, and v1 and v2 differ by several points on the same
-    # callset. A platform that cannot be reached falls back to the version this
-    # machine last saw, then to v1.
+    # The active scoring version is published in network configuration. Read it
+    # so this preview uses the same formula a validator would: v1 and v2 differ
+    # by several points on the same callset. If it cannot be read, fall back to
+    # the version this machine last resolved, then to v1.
     practice_scoring_version = scoring_version_util.V1
     try:
         practice_scoring_version = scoring_version_util.resolve(

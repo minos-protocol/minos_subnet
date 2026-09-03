@@ -140,6 +140,92 @@ class _BT:
         return {"block_hash": block_hash, "block_number": 42, "extrinsic_index": 3}
 
 
+class TestAnUnaccountableLedgerRefusesRatherThanPermits:
+    """spend_since() feeds the daily ceilings, so under-reporting is the one
+    direction it must never fail in.
+
+    A payment record it cannot read is money it cannot rule out. Skipping it
+    would make the remaining allowance look larger than it is, which is how a
+    corrupt ledger turns into unbounded spending.
+    """
+
+    def _ledger(self, tmp_path, *lines):
+        path = tmp_path / "p.jsonl"
+        path.write_text("".join(l + "\n" for l in lines))
+        return sp.PaymentLedger(path)
+
+    GOOD = json.dumps({
+        "kind": "proof", "round_id": "r1", "hotkey": "hk",
+        "proof": {"amount_tao": 0.004, "paid_at": 4102444800},
+    })
+
+    def test_a_readable_ledger_still_sums_normally(self, tmp_path):
+        led = self._ledger(tmp_path, self.GOOD, self.GOOD)
+        assert led.spend_since(0, hotkey="hk") == pytest.approx(0.008)
+
+    def test_a_missing_ledger_is_zero_not_unaccountable(self, tmp_path):
+        """No file means nothing was ever paid, which is genuinely 0.0."""
+        assert sp.PaymentLedger(tmp_path / "absent.jsonl").spend_since(0) == 0.0
+
+    def test_an_intent_line_is_skipped_not_unaccountable(self, tmp_path):
+        """Intents may never have moved money, so they are excluded by design
+        -- that is a deliberate skip, not a hole."""
+        intent = json.dumps({"kind": "intent", "round_id": "r1", "hotkey": "hk"})
+        led = self._ledger(tmp_path, intent, self.GOOD)
+        assert led.spend_since(0, hotkey="hk") == pytest.approx(0.004)
+
+    def test_another_hotkeys_payment_is_skipped_not_unaccountable(self, tmp_path):
+        other = json.dumps({
+            "kind": "proof", "hotkey": "other",
+            "proof": {"amount_tao": 9.0, "paid_at": 4102444800},
+        })
+        led = self._ledger(tmp_path, other, self.GOOD)
+        assert led.spend_since(0, hotkey="hk") == pytest.approx(0.004)
+
+    @pytest.mark.parametrize("bad", [
+        "{not json",
+        '{"kind": "proof", "hotkey": "hk", "proof": {"amount_tao": "abc", "paid_at": 1}}',
+        '{"kind": "proof", "hotkey": "hk", "proof": {"amount_tao": 1, "paid_at": "soon"}}',
+    ])
+    def test_an_unreadable_payment_record_reports_unlimited_spend(self, tmp_path, bad):
+        led = self._ledger(tmp_path, self.GOOD, bad)
+        assert led.spend_since(0, hotkey="hk") == float("inf")
+
+    def test_a_payment_record_with_no_hotkey_cannot_be_attributed(self, tmp_path):
+        """Unfiltered it is countable; filtered it is not, so only the filtered
+        read is unaccountable."""
+        anon = json.dumps({
+            "kind": "proof", "proof": {"amount_tao": 2.0, "paid_at": 4102444800},
+        })
+        led = self._ledger(tmp_path, anon)
+        assert led.spend_since(0) == pytest.approx(2.0)
+        assert led.spend_since(0, hotkey="hk") == float("inf")
+
+    def test_an_unreadable_file_reports_unlimited_spend(self, tmp_path, monkeypatch):
+        led = self._ledger(tmp_path, self.GOOD)
+
+        def _boom(*a, **kw):
+            raise OSError("disk gone")
+
+        monkeypatch.setattr("builtins.open", _boom)
+        assert led.spend_since(0, hotkey="hk") == float("inf")
+
+    def test_unlimited_spend_makes_the_daily_ceiling_refuse(self, tmp_path, monkeypatch):
+        """The inf returned for an unaccountable ledger must reach the daily
+        ceiling guard and stop the transfer, not just be computed."""
+        monkeypatch.setenv("MINOS_MAX_DAILY_RESUBMISSION_TAO", "100")
+        led = self._ledger(tmp_path, self.GOOD, "{not json")
+        bt = _BT()
+        # A NEW round, so the unspent-proof reuse path (which spends nothing and
+        # is therefore not ceiling-gated) cannot short-circuit the guard.
+        out = sp.pay_for_resubmission(
+            bt_compat=bt, subtensor=_subtensor(), wallet=_wallet(), policy=policy(),
+            round_id="r2", hotkey="hk", ledger=led,
+        )
+        assert out is None
+        assert bt.calls == [], "transferred against a ledger it could not account for"
+
+
 class TestPayForResubmission:
     def test_pays_and_returns_a_proof(self, tmp_path):
         bt = _BT()
@@ -203,15 +289,14 @@ class TestPayForResubmission:
 
 
 class TestSpendingGuards:
-    """The fee arrives in an unauthenticated HTTP body and the transfer is signed
-    with the COLDKEY, so these guards are the only thing between a platform slip
-    and every miner's balance."""
+    """The transfer is signed with the COLDKEY, so every limit that bounds it is
+    enforced locally: the operator opt-in, the per-submission cap, the daily
+    ceilings and the destination pin."""
 
     def test_unset_means_no_spending_however_good_the_policy(self, monkeypatch):
-        """The operator switch is the gate. A complete, valid platform policy
-        must not move TAO on a miner that never opted in -- this software
-        auto-updates, so a policy published at any moment would otherwise start
-        spending on miners that never asked to spend anything."""
+        """The operator switch is the gate. A complete, valid fee policy must
+        not move TAO on a miner that has not opted in, so an unattended or
+        auto-updating miner never begins spending on its own."""
         monkeypatch.delenv("MINER_PAY_FOR_RESUBMISSIONS", raising=False)
         assert sp.payment_opted_in() is False
         assert policy().usable is False
@@ -239,9 +324,9 @@ class TestSpendingGuards:
         assert sp.SubmissionPolicy(raw).usable is False
 
     def test_an_unexpected_destination_is_refused(self, monkeypatch):
-        """A well-formed address is not the same as the RIGHT address. The
-        policy is delivered over HTTPS but is not itself signed, so an operator
-        who pins the destination must not pay a substituted one."""
+        """A well-formed address is not the same as the address the operator
+        chose. Once a destination is pinned, any other address stops the
+        payment rather than receiving it."""
         monkeypatch.setenv("MINER_PAY_FOR_RESUBMISSIONS", "1")
         monkeypatch.setenv("MINOS_EXPECTED_PAYMENT_ADDRESS",
                            "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY")
@@ -333,9 +418,9 @@ class TestSpendingGuards:
 class TestTheQuotedPriceWins:
     """The fee escalates per coldkey within a round, so the advertised base fee
     is only correct for the first paid submission. Paying it for a later one
-    underpays — and the transfer is already on chain when the platform refuses
-    it, so the TAO is gone. round-status quotes the real price; it is
-    authoritative over the advertised one."""
+    underpays, and the transfer is already on chain by the time the submission
+    is refused. round-status quotes the real price, so it is authoritative over
+    the advertised one."""
 
     ADVERTISED = {
         "resubmission_fee_enabled": True,

@@ -80,4 +80,4 @@ A live round is an expensive place to discover that a change was worse. Practice
 5. Compare multiple live rounds.
 6. Keep improvements that help the target component without breaking others.
 
-Do not claim any config is guaranteed to win. Do not optimize against private truth data.
+Do not claim any config is guaranteed to win. Do not optimize against unreleased truth data; files released after a round closes may be used for verification.

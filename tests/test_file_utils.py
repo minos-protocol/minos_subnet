@@ -1,8 +1,9 @@
 """Download integrity tests for utils.file_utils.
 
 These exercise the real download path against a local socket server that can
-lie about Content-Length, because the failure mode being guarded against only
-shows up at the HTTP layer: CPython's HTTPResponse.read(amt) calls _close_conn()
+under-deliver against its declared Content-Length, because the failure mode
+being guarded against only shows up at the HTTP layer: CPython's
+HTTPResponse.read(amt) calls _close_conn()
 on a premature close instead of raising IncompleteRead, so a truncated body
 looks exactly like a finished one to the read loop.
 """
@@ -24,7 +25,7 @@ from utils.file_utils import (
 
 
 class CannedServer:
-    """Minimal HTTP server that serves fixed, optionally dishonest responses.
+    """Minimal HTTP server that serves fixed, optionally truncated responses.
 
     routes maps path -> {"body": bytes, "declared": int|None, "send": bytes,
     "no_content_length": bool}.
@@ -103,7 +104,8 @@ class CannedServer:
 
 @pytest.fixture
 def server():
-    """Server whose /full route is honest and whose /truncated route lies."""
+    """Server whose /full route delivers its declared length and whose
+    /truncated route does not."""
     body = b"C" * 1000
     srv = CannedServer({
         "/full": {"body": body},
@@ -167,8 +169,9 @@ def test_truncated_body_leaves_no_partial_for_next_run(tmp_path, server):
     dest = tmp_path / "truth.vcf.gz.tbi"
     assert download_file(server.url("/truncated"), dest, show_progress=False) is None
 
-    # use_cache=True is the real caller's default; with a leftover partial at
-    # the final path this returned the corrupt file without touching the network.
+    # use_cache=True is the real caller's default; a leftover partial at the
+    # final path would be served as a cache hit with no network request, so the
+    # GET asserted below is what proves it was not.
     server.hits.clear()
     second = download_file(server.url("/truncated"), dest, show_progress=False)
     assert second is None
@@ -220,8 +223,8 @@ def test_verified_download_wrong_hash_rejected_when_enforced(tmp_path, server, m
 
 
 def test_verified_download_wrong_hash_warns_by_default(tmp_path, server, monkeypatch):
-    """Enforcement is opt-in: the published digest has not been exercised on
-    this path, so a mismatch must not fail every download by default."""
+    """Enforcement is opt-in, so a mismatch on a fresh download warns and the
+    bytes are kept unless MINOS_ENFORCE_DOWNLOAD_SHA256 is set."""
     monkeypatch.delenv("MINOS_ENFORCE_DOWNLOAD_SHA256", raising=False)
     dest = tmp_path / "sample.bam"
     result = download_file_verified(
@@ -344,9 +347,9 @@ def test_s3_branch_failure_leaves_nothing(tmp_path, monkeypatch):
 
 
 class TestABadPrimaryFallsBackToTheBackup:
-    """A digest mismatch on the primary used to be accepted outright, which
-    returned the bad bytes and never asked the backup -- defeating the point of
-    having two sources."""
+    """A digest mismatch on the primary defers to the backup rather than
+    returning immediately, so a second source gets the chance to supply
+    matching bytes."""
 
     @staticmethod
     def _serve(mapping):

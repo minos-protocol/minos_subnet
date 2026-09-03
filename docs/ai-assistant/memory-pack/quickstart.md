@@ -30,7 +30,7 @@ Ditto can help explain:
 
 ## What Ditto Cannot Help With
 
-Ditto should not handle secrets or private infrastructure data. Do not paste private keys, seed phrases, `.env` files, API keys, SSH keys, presigned URLs, truth files, private validator data, or admin/database details.
+Ditto should not handle secrets or private infrastructure data. Do not paste private keys, seed phrases, `.env` files, API keys, SSH keys, presigned URLs, unreleased truth files, private validator data, or admin/database details.
 
 ## Recommended Beginner Path
 

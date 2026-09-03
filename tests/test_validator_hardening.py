@@ -1,7 +1,4 @@
-"""Tests for the validator-hardening changes.
-
-Covers three behaviours that had no coverage and each cost a real round in
-production:
+"""Tests for three validator behaviours that decide a round's outcome.
 
 * ``ScoreTracker.refresh_participation_window`` — rebuilds the eligibility
   window without discarding the round in progress.
@@ -30,9 +27,9 @@ def _load(name, path):
 
 
 class TestRefreshParticipationWindow:
-    """The distinction from recover_from_platform_state is the whole point: a
-    restart whose startup recovery ran while the platform was unreachable left
-    the window empty and burned a round."""
+    """This is deliberately distinct from recover_from_platform_state: it
+    rebuilds the eligibility window on its own, so a restart whose startup
+    recovery could not reach the network still scores the round in progress."""
 
     def test_rebuilds_window_from_snapshot(self, score_tracker):
         ok = score_tracker.refresh_participation_window([
@@ -111,11 +108,10 @@ class TestTieOrdering:
     ):
         """An exact score tie with no timestamps must NOT depend on input order.
 
-        This previously fell through to whatever order the caller passed, which
-        is per-validator round_scores insertion order — so two honest validators
-        picked different winners from identical data, on the code path built to
-        prevent exactly that. Hotkeys are unique and identical everywhere, so
-        they make the ordering total and reproducible.
+        Falling through to whatever order the caller passed would use
+        per-validator round_scores insertion order, which is not shared state.
+        Hotkeys are unique and identical everywhere, so they make the ordering
+        total and reproducible from the same inputs.
         """
         t = score_tracker_low_threshold
         hotkeys = ["c", "a", "b"]
@@ -125,8 +121,8 @@ class TestTieOrdering:
         assert t._sort_by_round_score(["b", "c", "a"]) == ["a", "b", "c"]
 
     def test_get_rankings_forwards_submission_times(self, score_tracker_low_threshold):
-        """The regression: get_rankings dropped the argument, so the rank sent
-        to the platform contradicted the winner actually chosen."""
+        """get_rankings must receive submission_times, or the rank reported to
+        the platform can contradict the winner actually chosen."""
         t = score_tracker_low_threshold
         hotkeys = ["late", "early"]
         self._tie(t, hotkeys)
@@ -214,13 +210,12 @@ class TestRoundFileRetryBudget:
 
 
 class TestParseSubmittedAt:
-    """All three call sites used to parse this differently. datetime.fromisoformat
-    accepts a trailing Z only from Python 3.11, while setup.py declares 3.10+ and
-    install.sh will select python3.10 — so on a 3.10 validator the personally
-    scored miners silently lost their timestamps while backfilled ones kept
-    theirs. Missing timestamps fall to inf in the tie comparator, so two honest
-    validators on different Python minors could pick different winners from
-    identical data."""
+    """All three call sites must parse this identically. datetime.fromisoformat
+    accepts a trailing Z only from Python 3.11, while setup.py declares 3.10+
+    and install.sh will select python3.10 — so a per-site parse would drop
+    timestamps on some interpreters and keep them on others. Missing timestamps
+    fall to inf in the tie comparator, so validators on different Python minors
+    could order a tie differently from identical data."""
 
     def test_all_three_encodings_agree(self):
         z = parse_submitted_at("2026-02-15T12:00:00Z")

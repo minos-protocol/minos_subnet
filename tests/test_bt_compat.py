@@ -198,8 +198,8 @@ class TestRegisterNormalization:
 
 
 class TestSyncMetagraph:
-    """Regression tests: this helper must not swallow TypeError, and must never
-    sync without a subtensor (that would hit the SDK default network)."""
+    """This helper must not swallow TypeError, and must never sync without a
+    subtensor (that would hit the SDK default network)."""
 
     def test_passes_subtensor_through_on_the_10_3_shape(self):
         bt_compat, _ = _load_bt_compat()
@@ -214,7 +214,8 @@ class TestSyncMetagraph:
         assert seen["subtensor"] == "SUBTENSOR"
 
     def test_type_error_raised_inside_sync_propagates(self):
-        """Previously three nested handlers turned this into a silent retry."""
+        """A TypeError raised inside sync must reach the caller rather than
+        being absorbed into a retry."""
         bt_compat, _ = _load_bt_compat()
 
         class MG:

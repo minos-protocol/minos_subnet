@@ -1,7 +1,7 @@
 """Tests for neurons/status.py — the operator health command.
 
-Its failure mode is lying: reporting a healthy node as broken (or hanging
-forever instead of reporting anything), so the checks here assert on observed
+The failure mode that matters is a wrong diagnosis: reporting a healthy node as
+broken, or not returning at all. The checks here assert on the observed
 behaviour of the diagnosis, not on wording.
 """
 
@@ -40,12 +40,11 @@ def test_unset_miner_template_is_a_default_miner(tmp_path):
 
 
 def test_default_miner_is_not_diagnosed_against_validator_assets(tmp_path):
-    """The concrete regression: ~25 phantom FAILs and a skipped config parse.
+    """A default miner must be diagnosed as a miner.
 
-    A default miner used to be diagnosed as a validator, so it was checked for
-    hap.py/DeepVariant/freebayes images and 22 .sdf directories it will never
-    own, while the gatk.conf parse — the check that actually matters for it —
-    was SKIPped.
+    Diagnosed as a validator it would be checked against hap.py/DeepVariant/
+    freebayes images and 22 .sdf directories it does not own, and the gatk.conf
+    parse — the check that actually matters for it — would be skipped.
     """
     role, template = status.detect_role(base_dir=tmp_path)
 
@@ -193,8 +192,8 @@ def test_chain_check_reports_timeout_against_a_black_holed_endpoint(monkeypatch,
 
 
 def test_hung_probe_does_not_keep_the_process_alive():
-    """`status.py --json` printed nothing and never exited; a health cron then
-    stacked hung processes. The abandoned probe must not delay interpreter exit.
+    """An abandoned probe must not delay interpreter exit, so `status.py
+    --json` returns and exits even when the chain probe never answers.
     """
     program = (
         "import threading, neurons.status as s\n"

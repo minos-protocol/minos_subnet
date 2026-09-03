@@ -193,10 +193,10 @@ class PlatformClient:
         sign_request), so a new field is covered symmetrically, and a platform
         that does not know the field ignores it.
 
-        The declaration is signed, so it cannot be forged by a third party. It
-        is still a CLAIM -- nothing proves which code actually ran. It catches
-        a stale neuron, not a lying one; the chain's version_key is what makes
-        a lie attributable after the fact.
+        The declaration is signed, so a third party cannot forge it. It remains
+        a claim: it reports what the neuron says it is running, which is what
+        catches a stale deployment. The chain's version_key is the on-chain
+        record of the same value.
         """
         timestamp = int(time.time())
         nonce = uuid.uuid4().hex
@@ -828,7 +828,7 @@ class ValidatorPlatformClient(PlatformClient):
         return await retry_async(_do_request, max_retries=3, idempotent=False)
 
     async def get_upload_url(self, s3_key: str) -> str:
-        """Get a presigned PUT URL to upload a file to S3.
+        """Get a presigned PUT URL to upload a file to platform storage.
 
         Args:
             s3_key: The S3 key to upload to (must start with 'scoring/')
@@ -860,7 +860,7 @@ class ValidatorPlatformClient(PlatformClient):
         return await retry_async(_do_request, max_retries=2)
 
     async def upload_file_to_s3(self, local_path: str, s3_key: str) -> bool:
-        """Upload a file to S3 via presigned PUT URL.
+        """Upload a file to platform storage via presigned PUT URL.
 
         Args:
             local_path: Path to local file
@@ -884,14 +884,14 @@ class ValidatorPlatformClient(PlatformClient):
                 )
 
             if response.status_code in (200, 201, 204):
-                logger.info(f"Uploaded {os.path.basename(local_path)} to S3: {s3_key}")
+                logger.info(f"Uploaded {os.path.basename(local_path)} to storage: {s3_key}")
                 return True
             else:
-                logger.error(f"S3 upload failed ({response.status_code}): {response.text[:200]}")
+                logger.error(f"Upload failed ({response.status_code}): {response.text[:200]}")
                 return False
 
         except Exception as e:
-            logger.error(f"Failed to upload {local_path} to S3: {e}")
+            logger.error(f"Failed to upload {local_path} to storage: {e}")
             return False
 
     # Wire-format version for the gzipped NDJSON variant-results file.

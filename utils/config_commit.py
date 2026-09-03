@@ -1,10 +1,14 @@
 """Miner-side commitment over a submitted tool config.
 
-The miner hashes the config it is about to submit, publishes that hash on chain,
-and sends the same hash to the platform. Revealing the nonce later proves what
-was submitted, at a time the chain attests to. The platform commits to the
-config it STORED; this is the other half, over the config as SENT, so the
-difference between the two is the submit-time clamping.
+The miner hashes the config it is about to submit, publishes that hash on
+chain, and sends the same hash with the submission. Revealing the nonce later
+reproduces the digest, so the miner can show which config the on-chain record
+corresponds to, at a time the chain attests to.
+
+Minos separately records its own commitment over the configuration it stores
+for scoring. The two use different constructions and different nonces, so
+their hash values are not comparable with each other; each is verified on its
+own terms.
 
 The nonce is required, not optional: the parameter ranges are bounded and the
 config space small enough to enumerate, so the commitment has to be salted.

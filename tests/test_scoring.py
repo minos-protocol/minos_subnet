@@ -269,13 +269,11 @@ class TestComputeAdvancedScore:
             )
 
     def test_high_frac_na_penalizes_completeness_unreachable(self):
-        """UNREACHABLE PATH. No real hap.py run can produce a nonzero frac_na
-        here: both producers overwrite METRIC.Frac_NA with a hardcoded 0.0, so
-        this exercises arithmetic the live pipeline never reaches. It asserted
-        that the coverage half of completeness discriminates between miners,
-        which made a dead 7.5% of the score look covered. Kept to pin the
-        arithmetic for whoever wires frac_na through; see
-        TestCoverageIsADeadConstant for what the live pipeline actually feeds in.
+        """UNREACHABLE PATH. No real hap.py run produces a nonzero frac_na
+        here: both producers set METRIC.Frac_NA to 0.0, so this exercises
+        arithmetic the live pipeline does not reach. Kept to pin the arithmetic
+        for whoever wires frac_na through; see TestCoverageIsADeadConstant for
+        what the live pipeline actually feeds in.
         """
         base = {
             'f1_snp': 0.90, 'f1_indel': 0.85,
@@ -409,9 +407,9 @@ class TestNonFiniteMetrics:
         return m
 
     def test_an_infinite_ratio_does_not_collapse_a_perfect_score_to_zero(self):
-        """inf passed the `> 0` gate, inf-inf gave nan, and max(0.0, nan)
-        returns 0.0 because nan loses every comparison. A perfect callset
-        scored zero, deterministically, with nothing in the logs.
+        """inf passes the `> 0` gate, inf-inf gives nan, and max(0.0, nan)
+        returns 0.0 because nan loses every comparison — so without this guard
+        a complete callset evaluates to zero.
 
         The callset still loses the quality component — a query ti/tv of inf
         against a finite truth ti/tv means no transversions were called, which
@@ -492,14 +490,13 @@ class TestCompletenessWeighting:
 class TestCoverageIsADeadConstant:
     """The coverage half of the completeness component is fixed at 1.0.
 
-    Both metric producers hardcode frac_na to 0.0, discarding hap.py's
-    METRIC.Frac_NA, so 7.5 of the 100 points are a constant that cannot
-    separate one miner from another. That is a deliberate choice (Frac_NA is
+    Both metric producers set frac_na to 0.0 rather than passing hap.py's
+    METRIC.Frac_NA through, so 7.5 of the 100 points are a constant that does
+    not separate one miner from another. That is deliberate — Frac_NA is
     computed over the whole query VCF and comes back ~0.99 against a small eval
-    region), but it was invisible: the only test touching frac_na hand-built
-    metrics the pipeline can never emit. These tests pin the real behavior so
-    the constant is not mistaken for a live signal, and so wiring frac_na
-    through has to be a deliberate act that breaks them.
+    region. These tests pin the real behaviour so the constant is not read as a
+    live signal, and so wiring frac_na through has to be a deliberate act that
+    breaks them.
     """
 
     HAPPY_HEADER = (
@@ -586,11 +583,11 @@ class TestV1IsFrozen:
     """v1 must score identically to the deployed scorer.
 
     v2 exists so that v1 never has to change. Changing compute_advanced_score
-    reorders a live leaderboard with nothing to signal it, and fields are
-    routinely tied to fifteen decimal places.
+    would reorder a live leaderboard, and fields are routinely tied to fifteen
+    decimal places.
 
-    These pin the behaviours that were altered once and reverted, so a future
-    change to v1 has to be deliberate rather than incidental.
+    These pin its behaviour, so any change to v1 has to be deliberate rather
+    than incidental.
     """
 
     def _m(self, **over):

@@ -1,14 +1,13 @@
 """The scoring chain end to end: hap.py output -> metrics -> score.
 
-Every link here has its own tests. The CHAIN did not: a change that shifts what
-the parser emits, or what the scorer expects of it, passes both suites and still
-produces a wrong score. These drive the real parser and the real scorer over
-hap.py VCFs written in the format hap.py actually emits — no mocks, nothing
-stubbed but hap.py itself, whose OUTPUT is the input here.
+Every link has its own tests, but those cover each link in isolation: a change
+to what the parser emits, or to what the scorer expects of it, can satisfy both
+suites while the two no longer agree at the seam. These drive the real parser
+and the real scorer over hap.py VCFs in the format hap.py emits; only hap.py
+itself is stubbed, and its output is the input here.
 
-They assert ORDERING and BANDS rather than exact numbers. Pinning exact scores
-would make every deliberate reweighting look like a regression, while the
-properties below must hold under any weighting worth shipping.
+They assert ordering and bands rather than exact numbers, so a deliberate
+reweighting does not read as a failure while the properties below still hold.
 """
 import gzip
 import pathlib
@@ -103,7 +102,7 @@ class TestTheChainProducesSaneScores:
 class TestWhatTheParserFeedsTheScorer:
     def test_unassessed_calls_stay_out_of_the_query_total(self, tmp_path):
         """hap.py marks calls outside the confident BED as UNK. Counting them
-        would inflate query_total and make an honest caller look like it
+        would inflate query_total and make a correct caller look like it
         overcalled."""
         rows = _perfect(5) + [_row(4000 + i, "A", "G", "", "UNK") for i in range(50)]
         _, metrics = _score(tmp_path, rows)

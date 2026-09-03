@@ -1,8 +1,8 @@
 """One reward-eligible representative per coldkey.
 
 Several hotkeys can share one coldkey, and emissions are paid to the coldkey.
-Without this, an operator registering K hotkeys occupies K rank slots and is paid
-K times for the same work, which is the whole economics of a sybil fleet.
+Without this, an operator registering K hotkeys occupies K rank slots and is
+paid K times for one round's work.
 
 WHERE THE OWNERSHIP COMES FROM
 ------------------------------
@@ -27,7 +27,7 @@ performer. Ties are already resolved upstream by score then submission time, so
 this adds no new tiebreak and cannot reorder anything.
 
 A hotkey whose owner cannot be resolved is KEPT. Dropping it would let a stale
-or partial metagraph silently remove real miners from the reward set; the failure
+or partial metagraph remove real miners from the reward set; the failure
 direction has to be "pay someone twice" rather than "pay a legitimate miner
 nothing".
 """
@@ -76,7 +76,7 @@ def one_per_owner(
     for hotkey in ranked_hotkeys:
         coldkey = owner_by_hotkey.get(hotkey)
         if not coldkey:
-            # Unknown owner: keep. A stale metagraph must not silently remove a
+            # Unknown owner: keep. A stale metagraph must not remove a
             # legitimate miner from the reward set.
             kept.append(hotkey)
             continue
@@ -100,8 +100,8 @@ def apply(
     """``one_per_owner`` against the metagraph, or a no-op when disabled.
 
     Disabled, and when ownership cannot be read at all, the ranking is returned
-    untouched. Both are the safe direction: the cost is that a sybil fleet is
-    paid more than once for one round, which is recoverable. The other direction
+    untouched. Both are the safe direction: the cost is that one operator's
+    hotkeys may be paid more than once for one round, which is recoverable. The other direction
     -- dropping miners because ownership was unreadable -- is not.
     """
     log = logger_ or logger

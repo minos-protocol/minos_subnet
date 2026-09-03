@@ -22,7 +22,7 @@ def test_format_matches_expected_regex():
     assert re.fullmatch(r"round_[0-9a-f]{16}", result)
 
 
-def test_adversarial_input_produces_safe_name():
+def test_traversal_input_produces_safe_name():
     result = safe_round_dir_name("../../etc/passwd")
     assert "/" not in result
     assert ".." not in result

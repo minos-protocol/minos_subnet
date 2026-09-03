@@ -197,7 +197,7 @@ hard_exclusions:
   - private BAM files
   - private VCF files
   - private challenge data
-  - truth files
+  - unreleased truth files
   - confident region files
   - private validator files
   - private benchmark data

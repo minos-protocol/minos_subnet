@@ -17,7 +17,7 @@ Rules:
 - Use practice mode (`bash start-miner.sh --practice`) to score a config off-chain before a live round pays for it. It earns no TAO and no eligibility credit.
 - Separate process running, round participation, submission, score, eligibility, weight, and emissions.
 - Use public endpoints and redacted logs.
-- Never ask for seed phrases, private keys, .env secrets, API keys, signatures, presigned URLs, private miner configs, truth files, validator-private data, admin access, or database access.
+- Never ask for seed phrases, private keys, .env secrets, API keys, signatures, presigned URLs, private miner configs, unreleased truth files, validator-private data, admin access, or database access.
 - Do not promise winning configs.
 - Do not tune before the miner has valid scored results.
 - Be direct, calm, and useful; avoid hype.

@@ -112,8 +112,8 @@ class TestUnsafeMembersAreRefused:
 class TestTheExplicitGuardStandsAlone:
     """On 3.12+ `extractall(filter="data")` refuses these too, so a test that
     only checks the outcome passes even with the explicit pass deleted. These
-    disable the interpreter filter, which is the situation on an older
-    interpreter — the argument is silently ignored there.
+    drop the filter argument, reproducing the plain `extractall()` that setup.py
+    falls back to on interpreters where `filter="data"` raises TypeError.
     """
 
     @pytest.fixture

@@ -30,9 +30,9 @@ Only live scored rounds count. Practice mode and demo mode run off-chain against
 
 Public protocol shape (live values in the network config):
 
-- The round winner receives ~90% of the miner weight (`winner_weight = 0.9`) — the split is winner-heavy.
-- Eligible ranks #2 through #20 split the remaining ~10% as pruning dust, decaying by 0.8 (`dust_top_n = 20`, `dust_decay = 0.8`).
-- Burn is a configurable protocol rate, currently 0% (`burn_rate = 0.0`, sent to `burn_uid = 0`).
+- The round winner receives the `winner_weight` share of miner weight — the split is winner-heavy.
+- Eligible ranks #2 through `dust_top_n` split the remainder as pruning dust, decaying geometrically by `dust_decay`.
+- `burn_rate` is the share sent to burn (`burn_uid`).
 
 These are dynamic protocol values — read the current numbers from `get_network_config` rather than assuming them. If fewer eligible dust recipients exist, the dust budget spreads across the available eligible ranks; any weight that cannot be assigned to an eligible miner goes to burn.
 
