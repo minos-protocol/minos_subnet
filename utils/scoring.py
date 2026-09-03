@@ -87,16 +87,21 @@ def slice_truth_vcf(source_vcf: Path, target_vcf: Path, region: str) -> bool:
         index_csi = Path(str(source_vcf) + '.csi')
         index_tbi = Path(str(source_vcf) + '.tbi')
         if not index_csi.exists() and not index_tbi.exists():
-            logger.warning(f"VCF not indexed, extraction will be slow")
+            logger.warning("VCF has no index; building one without overwriting source bytes")
+            try:
+                if str(source_vcf).endswith(".gz"):
+                    import pysam
+                    pysam.tabix_index(str(source_vcf), preset="vcf", force=False)
+            except Exception as e:
+                logger.warning(
+                    f"missing VCF index could not be created for {source_vcf.name} "
+                    f"(continuing): {e}"
+                )
 
-        # Defensive reindex so slicing sees a fresh .tbi. Uses pysam's bundled
-        # htslib rather than a `tabix` CLI, which is not guaranteed on PATH.
-        try:
-            if str(source_vcf).endswith(".gz"):
-                import pysam
-                pysam.tabix_index(str(source_vcf), preset="vcf", force=True)
-        except Exception as e:
-            logger.warning(f"defensive reindex skipped for {source_vcf.name} (continuing): {e}")
+        # A supplied truth index is part of the round input contract.  Never
+        # regenerate it in place: scoring often reads from a content-addressed
+        # immutable seed, and force-reindexing here silently invalidates that
+        # seed's manifest while other workers are still using it.
 
         source_dir = source_vcf.parent
         target_dir = target_vcf.parent
