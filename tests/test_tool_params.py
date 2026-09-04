@@ -88,7 +88,7 @@ class TestValidateRegion:
         assert result["valid"] is False
 
     def test_injection_newline(self):
-        result = validate_region("chr20:1-100\nmalicious")
+        result = validate_region("chr20:1-100\nextra")
         assert result["valid"] is False
 
     def test_injection_command_substitution(self):

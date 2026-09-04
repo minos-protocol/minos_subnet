@@ -20,6 +20,11 @@ FLAG_PRACTICE_CONFIG=""
 FLAG_PRACTICE_SAMPLE_ID=""
 FLAG_SETUP_DITTO=false
 FLAG_SETUP_AI_ASSISTANT=false
+FLAG_SUBMIT_ONLY=false
+# MINOS_SUBMIT_ONLY=1 opts in via env, matching neurons/miner.py.
+case "$(printf '%s' "${MINOS_SUBMIT_ONLY:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) FLAG_SUBMIT_ONLY=true ;;
+esac
 RUN_SETUP=false
 CREATED_OR_UPDATED_ENV=false
 
@@ -42,6 +47,9 @@ show_help() {
     echo "  --sample-id <id>            [--practice] Skip the picker; use this sample directly"
     echo "  --setup-ditto               Subscribe Ditto to the public @minos knowledge graph"
     echo "  --setup-ai-assistant        Open the Minos assistant setup menu"
+    echo "  --submit-only               Submit caller parameters without downloading the"
+    echo "                              round BAM or running the caller locally. Needs no"
+    echo "                              Docker. Also settable with MINOS_SUBMIT_ONLY=1"
     echo "  --setup                     Re-run interactive setup wizard"
     echo "  --help                      Show this help message"
     echo ""
@@ -78,6 +86,7 @@ while [[ $# -gt 0 ]]; do
         --practice) FLAG_PRACTICE=true; shift ;;
         --config) require_value "$1" "${2:-}"; FLAG_PRACTICE_CONFIG="$2"; shift 2 ;;
         --sample-id) require_value "$1" "${2:-}"; FLAG_PRACTICE_SAMPLE_ID="$2"; shift 2 ;;
+        --submit-only) FLAG_SUBMIT_ONLY=true; shift ;;
         --setup-ditto) FLAG_SETUP_DITTO=true; shift ;;
         --setup-ai-assistant) FLAG_SETUP_AI_ASSISTANT=true; shift ;;
         --setup) RUN_SETUP=true; shift ;;
@@ -144,8 +153,18 @@ if [ -z "$VENV" ]; then
     exit 1
 fi
 
-# 2. Docker
-if ! docker info >/dev/null 2>&1; then
+# .env is not sourced until later, so read this one key now: an operator who
+# sets MINOS_SUBMIT_ONLY there expects it to apply to the checks below too.
+if [ "$FLAG_SUBMIT_ONLY" != true ] && [ -f .env ]; then
+    _so=$(grep -m1 '^[[:space:]]*MINOS_SUBMIT_ONLY=' .env 2>/dev/null | cut -d= -f2- | tr -d '"'"'"'[:space:]' | tr '[:upper:]' '[:lower:]')
+    case "$_so" in
+        1|true|yes|on) FLAG_SUBMIT_ONLY=true ;;
+    esac
+    unset _so
+fi
+
+# 2. Docker — not needed in submit-only mode, which runs no container.
+if [ "$FLAG_SUBMIT_ONLY" != true ] && ! docker info >/dev/null 2>&1; then
     echo -e "${RED}Docker is not running.${NC}"
     echo "  Run: bash install.sh"
     exit 1
@@ -381,15 +400,16 @@ first_existing_wallet_hotkey() {
 }
 
 # --- Demo fast-path: any signal of demo intent + no .env → skip wallet wizard ---
-# The demo flow uses an ephemeral keypair generated inside the Python miner,
-# so wallet prompts are actively wrong here. We write a self-documenting .env
-# so downstream tooling (PM2, .env loaders, etc.) finds the expected file,
-# AND so the user can switch back to live by editing two lines.
+# The demo flow uses an ephemeral keypair generated inside the Python miner, so
+# no wallet prompt applies here. A commented .env is written so downstream
+# tooling (PM2, .env loaders) finds the expected file, and so the user can
+# switch to live mode by editing two lines.
 #
-# WALLET_NAME/HOTKEY are written as `default` placeholders (not omitted) so
-# (a) the .env is a complete template the user can edit for live mode, and
-# (b) the --wallet-name / --wallet-hotkey flag handlers below find existing
-# keys to sed-replace instead of silently no-op'ing.
+# WALLET_NAME/HOTKEY are written as `default` placeholders (not omitted) so the
+# .env is a complete template for live mode: the keys sit directly under the
+# switch-to-live instructions above, where the user edits them in place and
+# where set_env_value rewrites them, rather than set_env_value appending a
+# second copy at the end of the file.
 if [ "$DEMO_INTENT" = true ] && [ ! -f .env ]; then
     DEMO_TEMPLATE="${FLAG_MINER_TEMPLATE:-${MINER_TEMPLATE:-gatk}}"
     case "$DEMO_TEMPLATE" in
@@ -658,14 +678,21 @@ if [ -f .env ] && [ -z "${MINER_TEMPLATE:-}" ]; then
     set_env_value "MINER_TEMPLATE" "$MINER_TEMPLATE"
 fi
 
-ensure_runtime_assets
+if [ "$FLAG_SUBMIT_ONLY" != true ]; then
+    ensure_runtime_assets
+fi
 maybe_prompt_ai_assistant
 
 # Live mining. (Demo intent — --demo / MINER_DEMO — is handled by the
 # practice/demo scoring fast-path above, which exec's and never returns here.)
 echo -e "${GREEN}Starting Minos Miner (${MINER_TEMPLATE:-gatk})...${NC}"
-python -m neurons.miner \
-    --netuid ${NETUID:-107} \
-    --subtensor.network finney \
-    --wallet.name ${WALLET_NAME:-default} \
-    --wallet.hotkey ${WALLET_HOTKEY:-default}
+MINER_ARGS=(
+    --netuid "${NETUID:-107}"
+    --subtensor.network finney
+    --wallet.name "${WALLET_NAME:-default}"
+    --wallet.hotkey "${WALLET_HOTKEY:-default}"
+)
+if [ "$FLAG_SUBMIT_ONLY" = true ]; then
+    MINER_ARGS+=(--submit-only)
+fi
+python -m neurons.miner "${MINER_ARGS[@]}"

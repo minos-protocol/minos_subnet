@@ -345,9 +345,8 @@ def transfer(
     The destination is passed under BOTH names: 10.3 declares
     ``destination_ss58``, older builds declare ``dest``. _call_accepted keeps
     only the one the installed signature actually declares, so this is correct on
-    both without a version check — and passing only the wrong one is silently
-    dropped and then fails as a missing required argument, which is exactly the
-    bug this shape prevents.
+    both without a version check. Passing just one name would be dropped on the
+    build that does not declare it, and then fail as a missing argument.
 
     The amount is passed as a ``Balance``: some SDK versions read a bare float as
     RAO rather than TAO. Without ``Balance.from_tao`` this refuses rather than

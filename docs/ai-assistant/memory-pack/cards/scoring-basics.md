@@ -21,4 +21,4 @@ hap.py-style benchmarking is commonly used to compare called variants against tr
 
 Do not tell miners to "call more variants" as a universal strategy. Overcalling can hurt precision. Over-filtering can hurt recall. Good configs balance quality, completeness, and runtime.
 
-Private truth data must never be shared.
+Do not request or disclose unreleased round truth data or other non-public validator materials. Files officially released through the public verification endpoint after a round closes may be used for independent verification.

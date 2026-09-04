@@ -49,8 +49,8 @@ class TestBenchmarkDecisions:
         assert [r["classification"] for r in recs] == ["TP", "FN", "FP"]
 
     def test_a_multi_allelic_site_is_one_decision_not_one_per_allele(self, tmp_path):
-        """BD and BVT describe the whole record. Expanding over record.alts
-        replayed one TP/FP/FN once per allele and inflated every downstream
+        """BD and BVT describe the whole record, so expanding over record.alts
+        would replay one TP/FP/FN per allele and inflate every downstream
         class count at exactly the messy sites."""
         vcf = _write_vcf(tmp_path, [
             _row(100, "A", "G,T,C", "1/1:TP:SNP:30", "1/1:TP:SNP:30"),
@@ -71,8 +71,8 @@ class TestBenchmarkDecisions:
 
 class TestZygosity:
     def test_a_missed_hom_snp_keeps_its_truth_zygosity(self, tmp_path):
-        """An FN has no query genotype, so reading zygosity from the call filed
-        every missed hom SNP under the 9x-heavier het class."""
+        """An FN has no query genotype, so reading zygosity from the call would
+        file every missed hom SNP under the heavier het class."""
         vcf = _write_vcf(tmp_path, [
             _row(100, "A", "G", "1/1:FN:SNP:0", "./.:.:.:0"),
         ])
@@ -91,8 +91,9 @@ class TestZygosity:
 
 class TestSyntheticFlag:
     def test_synthetic_variants_are_detected(self, tmp_path):
-        """This never fired: the flag was matched against str() of a pysam
-        VariantRecordInfo, which renders as '<... object at 0x...>'."""
+        """The flag has to be tested against the INFO keys: str() of a pysam
+        VariantRecordInfo renders as '<... object at 0x...>' and matches
+        nothing."""
         truth = _write_vcf(tmp_path, [
             _row(100, "A", "G", "1/1:.:.:0", "1/1:.:.:0", info="SYNTHETIC"),
             _row(200, "A", "G", "0/1:.:.:0", "0/1:.:.:0", info="."),
@@ -112,9 +113,9 @@ class TestSyntheticFlag:
 
 
 class TestVariantType:
-    def test_an_unrecognised_bvt_is_inferred_not_silently_called_snp(self, tmp_path):
+    def test_an_unrecognised_bvt_is_inferred_not_defaulted_to_snp(self, tmp_path):
         """SNP is the lowest-weighted class in v2, so coercing an unknown type
-        to it let a parsing surprise quietly discount itself."""
+        to it would let a parsing surprise discount itself."""
         vcf = _write_vcf(tmp_path, [
             _row(100, "A", "ATTT", "0/1:TP:NOCALL:30", "0/1:TP:NOCALL:30"),
         ])
@@ -133,8 +134,9 @@ class TestRobustness:
 class TestTheParseIsAtomic:
     """A partial parse is indistinguishable from a complete one, and the v2 core
     is built from these records. Dropping the FNs and FPs after a mid-file
-    failure while keeping the TPs before it inflates the score in the miner's
-    favour, silently."""
+    failure while keeping the TPs before it would inflate the score in the
+    miner's favour, and a partial list is indistinguishable from a complete
+    one."""
 
     def _corrupt_after_good_records(self, tmp_path):
         """Valid early TPs, a record pysam cannot read, then the FNs and FPs
@@ -149,9 +151,9 @@ class TestTheParseIsAtomic:
         return _write_vcf(tmp_path, rows, name="corrupt.vcf")
 
     def test_a_mid_file_failure_discards_the_whole_parse(self, tmp_path):
-        """pysam aborts on the bad position after reading two TPs. Before this
-        was atomic those two were returned and the FN and FP after them were
-        lost -- a strictly better-looking callset than the miner produced."""
+        """pysam aborts on the bad position after reading two TPs. Without
+        atomic parsing those two would be returned while the FN and FP after
+        them were lost -- a better-looking callset than the miner produced."""
         recs = parse_happy_vcf(self._corrupt_after_good_records(tmp_path))
         assert recs is None, (
             f"returned a partial callset ({recs if recs is None else len(recs)} "

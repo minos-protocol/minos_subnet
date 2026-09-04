@@ -48,11 +48,10 @@ require_command() {
   fi
 }
 
-# The lock dir is a fixed path, and the old RETURN-only trap never fired when
-# pm2 restarted us or the OOM killer stopped us mid-check. The orphaned dir then
-# made every later run bail out with "already running", so auto-update stopped
-# forever while pm2 still reported the process online. Release on signals too,
-# and reclaim a lock too old to belong to a live check.
+# The lock dir is a fixed path, so a run stopped mid-check (a pm2 restart, an
+# OOM kill) could leave it behind and every later run would read it as "already
+# running" while pm2 still reported the process online. Release on signals as
+# well as on return, and reclaim a lock too old to belong to a live check.
 LOCK_HELD=false
 
 release_lock() {

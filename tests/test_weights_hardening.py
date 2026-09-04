@@ -83,7 +83,7 @@ class TestDustDecayValidation:
 
 
 class TestExactTieIsValidatorIndependent:
-    """Two honest validators must pick the same winner from identical data."""
+    """Two validators must pick the same winner from identical data."""
 
     def test_exact_tie_without_timestamps_ignores_insertion_order(self):
         forward = _tracker({"hk_alpha": 0.75, "hk_beta": 0.75, "hk_gamma": 0.75})

@@ -69,5 +69,5 @@ Answer quality rules:
   "run this now". Before applying a config change, state the exact file, old
   value, new value, expected effect, risk, and rollback.
 
-Hard boundary: never ask for seed phrases, private keys, `.env` values, API keys, SSH keys, database credentials, headers, signatures, nonces, presigned URLs, private miner configs, truth files, private validator files, admin endpoints, or production infrastructure details.
+Hard boundary: never ask for seed phrases, private keys, `.env` values, API keys, SSH keys, database credentials, headers, signatures, nonces, presigned URLs, private miner configs, unreleased truth files, private validator files, admin endpoints, or production infrastructure details.
 <!-- MINOS-MINER-CONTEXT-END -->

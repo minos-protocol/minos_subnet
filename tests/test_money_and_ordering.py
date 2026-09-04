@@ -28,7 +28,7 @@ from utils.submission_payment import (
 # here — see tests/test_bt_compat.py, which stubs the SDK the same way. The
 # sentinel is duplicated as a literal on purpose: if the constant is ever
 # renamed, test_ambiguous_sentinel_matches_the_shim fails loudly rather than
-# every "never pay twice" test silently passing against a stale value.
+# every "never pay twice" test passing against a stale value.
 AMBIGUOUS = "ambiguous:outcome-unknown"
 
 
@@ -162,9 +162,9 @@ class TestNeverPayTwice:
         assert compat.calls == 2
 
     def test_two_distinct_payments_are_distinguishable(self, ledger, paying_on):
-        """Proof identity used to be whole-JSON equality, so two payments that
-        agreed on every field read as the same proof and the second could be
-        discarded as already spent."""
+        """Proof identity must not be whole-JSON equality: two payments that
+        agree on every field would read as the same proof, and the second
+        could be discarded as already spent."""
         compat = FakeCompat([(True, "0xsame"), (True, "0xsame")])
         policy = SubmissionPolicy(USABLE_POLICY)
 
@@ -178,8 +178,8 @@ class TestNeverPayTwice:
 
 class TestOptInIsHonoured:
     def test_disabling_payment_stops_a_stored_proof_being_reused(self, ledger, monkeypatch):
-        """Turning the feature off has to actually turn it off. The stored proof
-        was previously returned before any policy check ran."""
+        """Turning the feature off has to actually turn it off, so the policy
+        check runs before any stored proof is returned."""
         monkeypatch.setenv("MINER_PAY_FOR_RESUBMISSIONS", "1")
         compat = FakeCompat([(True, "0xabc")])
         assert _pay(compat, SubmissionPolicy(USABLE_POLICY), ledger) is not None
@@ -205,8 +205,8 @@ class TestOptInIsHonoured:
 class TestFeeCeiling:
     @pytest.mark.parametrize("raw", ["nan", "inf", "-inf", "-1", "abc", ""])
     def test_an_unusable_ceiling_falls_back_instead_of_disabling_itself(self, raw, monkeypatch):
-        """nan parses fine and every comparison against it is False, so the cap
-        silently became "no cap" — worse than having none."""
+        """nan parses fine and every comparison against it is False, so an
+        unguarded cap would evaluate as "no cap" — worse than having none."""
         monkeypatch.setenv("MINOS_MAX_RESUBMISSION_FEE_TAO", raw)
         assert max_fee_tao() == submission_payment.DEFAULT_MAX_FEE_TAO
 

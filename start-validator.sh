@@ -32,11 +32,21 @@ show_help() {
     exit 0
 }
 
+require_value() {
+    local flag="$1"
+    local value="${2:-}"
+    if [ -z "$value" ] || [[ "$value" == --* ]]; then
+        echo -e "${RED}Missing value for $flag${NC}" >&2
+        echo "Run with --help for usage." >&2
+        exit 1
+    fi
+}
+
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --wallet-name) FLAG_WALLET_NAME="$2"; shift 2 ;;
-        --wallet-hotkey) FLAG_WALLET_HOTKEY="$2"; shift 2 ;;
-        --storage) FLAG_STORAGE="$2"; shift 2 ;;
+        --wallet-name) require_value "$1" "${2:-}"; FLAG_WALLET_NAME="$2"; shift 2 ;;
+        --wallet-hotkey) require_value "$1" "${2:-}"; FLAG_WALLET_HOTKEY="$2"; shift 2 ;;
+        --storage) require_value "$1" "${2:-}"; FLAG_STORAGE="$2"; shift 2 ;;
         --setup) RUN_SETUP=true; shift ;;
         --help|-h) show_help ;;
         *) echo -e "${RED}Unknown option: $1${NC}"; echo "Run with --help for usage."; exit 1 ;;
@@ -117,10 +127,10 @@ if [ -f .env ]; then
     set -a; source .env; set +a
 fi
 
-# A bare "sed s/^KEY=.*/KEY=value/" only substitutes: when the key was absent
-# from an older .env the write silently did nothing and the flag reverted on the
-# next pm2 restart, and any value containing '/' (an S3-style endpoint) broke the
-# s/// expression outright. Same helper as start-miner.sh.
+# A bare "sed s/^KEY=.*/KEY=value/" only substitutes an existing key, and reads
+# a '/' in the value (an S3-style endpoint) as its own delimiter. This helper
+# appends when the key is absent and avoids s/// entirely. Same helper as
+# start-miner.sh.
 set_env_value() {
     local key="$1"
     local value="$2"
@@ -195,10 +205,11 @@ if [ ! -f .env ] || [ "$RUN_SETUP" = true ]; then
             done
             read -p "  Select wallet (1-${#WALLETS[@]}): " W_IDX
             # Bash >= 4.3 resolves a negative subscript from the END of the
-            # array, so a bare Enter here made W_IDX-1 == -1 and silently
-            # launched the validator on the last wallet in the list.
+            # array, so a bare Enter would make W_IDX-1 == -1 and select the
+            # LAST wallet. Require a number in range and default to the first.
             if ! [[ "$W_IDX" =~ ^[0-9]+$ ]] || [ "$W_IDX" -lt 1 ] || [ "$W_IDX" -gt "${#WALLETS[@]}" ]; then
                 W_IDX=1
+                echo -e "  ${YELLOW}No valid selection; using ${WALLETS[0]}.${NC}"
             fi
             WALLET_NAME="${WALLETS[$((W_IDX-1))]}"
             WALLET_NAME=${WALLET_NAME:-${WALLETS[0]}}
@@ -219,6 +230,7 @@ if [ ! -f .env ] || [ "$RUN_SETUP" = true ]; then
                     read -p "  Select hotkey (1-${#HOTKEYS[@]}): " H_IDX
                     if ! [[ "$H_IDX" =~ ^[0-9]+$ ]] || [ "$H_IDX" -lt 1 ] || [ "$H_IDX" -gt "${#HOTKEYS[@]}" ]; then
                         H_IDX=1
+                        echo -e "  ${YELLOW}No valid selection; using ${HOTKEYS[0]}.${NC}"
                     fi
                     HOTKEY_NAME="${HOTKEYS[$((H_IDX-1))]}"
                     HOTKEY_NAME=${HOTKEY_NAME:-${HOTKEYS[0]}}

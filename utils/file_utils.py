@@ -330,10 +330,9 @@ def download_file_with_fallback(
     """
     local_path = Path(local_path)
 
-    # With a backup available, a digest mismatch on the primary must not be
-    # accepted outright: the backup may hold the correct bytes, and accepting
-    # here would return the bad copy without ever asking. With no backup there
-    # is nothing to fall back to, so the lenient path applies as before.
+    # With a backup available, a digest mismatch on the primary defers rather
+    # than returning immediately, so the backup gets a chance to supply
+    # matching bytes. With no backup configured there is nothing to defer to.
     result = download_file_verified(
         primary_url, local_path, expected_sha256=expected_sha256,
         show_progress=show_progress,
@@ -344,9 +343,9 @@ def download_file_with_fallback(
 
     if backup_url:
         logger.warning(f"Primary download failed, trying backup URL for {local_path.name}")
-        # Keep the primary's bytes aside rather than deleting them. They may be
-        # a digest mismatch we deferred on, and if the backup is worse -- a dead
-        # URL, or a mismatch of its own -- they are still better than nothing.
+        # Hold the primary's bytes aside rather than deleting them, so they can
+        # be restored if the backup does not produce a usable file. What counts
+        # as usable on a digest mismatch follows enforce_download_sha256().
         quarantined = None
         if local_path.exists():
             quarantined = local_path.with_suffix(local_path.suffix + ".primary")
@@ -393,12 +392,16 @@ def _normalised_digest(value) -> Optional[str]:
 
 
 def enforce_download_sha256() -> bool:
-    """Whether a digest mismatch rejects the file.
+    """Whether a digest mismatch on a fresh download fails the download.
 
-    Off by default: the published digest has not been exercised on the fresh
-    download path, and enforcing it everywhere at once would fail every round
-    for every node if any published value is wrong. Enable once logs confirm
-    digests match on live rounds for both storage backends.
+    Cached files are always checked against the published digest, and a
+    mismatching cache is discarded and re-fetched. This setting covers the
+    freshly downloaded bytes: off (the default), a mismatch that survives the
+    backup URL is logged and the bytes are used; on, they are discarded and the
+    download fails. Files served without a published digest (indexes, for
+    example) are unaffected either way.
+
+    Set MINOS_ENFORCE_DOWNLOAD_SHA256 to 1/true/yes/on to enable.
     """
     return os.getenv("MINOS_ENFORCE_DOWNLOAD_SHA256", "").strip().lower() in ("1", "true", "yes", "on")
 
@@ -464,10 +467,9 @@ def download_file_verified(
                 _discard_partial(result)
                 return None
             if on_mismatch == "defer":
-                # Signal the mismatch WITHOUT discarding: a caller holding a
-                # backup URL can now fetch it, and restore these bytes if the
-                # backup turns out to be worse. Accepting here instead would
-                # short-circuit that fallback and keep the bad copy.
+                # Signal the mismatch without discarding: a caller holding a
+                # backup URL can fetch it, and restore these bytes if the
+                # backup does not produce a usable file.
                 logger.warning(
                     f"SHA256 mismatch after downloading {local_path.name} "
                     f"(expected={expected[:16]}..., actual={actual_hash[:16]}...). "

@@ -27,4 +27,4 @@ Safe workflow:
 
 Practice mode is where a change should be measured first. It prints the exact score a validator would compute, under the scoring version the platform advertises, so a config can be rejected before a live round pays for it. Keep the sample fixed with `--sample-id` when comparing two configs, or the sample difference explains the score difference.
 
-Do not promise guaranteed winning configs. Do not tune from private truth data. Do not ask users to paste private configs. For live score and history, use Minos MCP or public endpoints.
+Do not promise guaranteed winning configs. Do not tune from unreleased truth data. Do not ask users to paste private configs. For live score and history, use Minos MCP or public endpoints.

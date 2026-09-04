@@ -4,7 +4,7 @@ The rest of the payment tests use hand-written doubles, which can only show that
 the code agrees with itself. These derive everything from the SDK instead: the
 signature comes from `inspect.signature(Subtensor.transfer)`, and results are the
 SDK's own `ExtrinsicResponse`. A renamed parameter or a restructured receipt
-therefore fails here rather than in production.
+therefore fails here rather than on a live node.
 
 Two SDK facts these depend on, both of which a future version could change:
   * the transfer destination is declared as `destination_ss58`
@@ -179,14 +179,14 @@ class TestExtrinsicResponseIsReadCorrectly:
         """extrinsic_idx is a property that can query the chain."""
         bt_compat = _load_bt_compat()
 
-        class Hostile:
+        class RaisesOnRead:
             block_hash = "0x" + "ab" * 32
             block_number = 1
             @property
             def extrinsic_idx(self):
                 raise ConnectionError("rpc down")
 
-        assert bt_compat._locator_from_result(self._response(receipt=Hostile())) is None
+        assert bt_compat._locator_from_result(self._response(receipt=RaisesOnRead())) is None
 
 
 class TestCommitAgainstTheRealSdk:

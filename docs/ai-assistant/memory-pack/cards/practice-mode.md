@@ -18,10 +18,10 @@ Practice mode picks a fully-answered sample from the platform, downloads its BAM
 
 - One-shot and interactive. It scores and exits; it is not a long-running process and should not run under PM2.
 - No wallet, no hotkey, no registration, no chain. It uses an ephemeral keypair against the platform's practice namespace.
-- Samples cover chr18, chr19, chr20, chr21, and chr22 — the same chromosomes live rounds rotate across.
+- Samples cover chr18, chr19, chr20, chr21, and chr22. Live rounds rotate over the set in `chromosome_rotation` in `/scoring/network-config`, which is wider than the practice set.
 - Sample files land in `datasets/practice/<sample_id>/` and are reused on later runs instead of re-downloaded.
 - The printed result includes SNP and indel F1, recall, precision, and false-positive counts, the advanced score out of 100, and the combined final score a validator would record. A run that called nothing on target is flagged as zero-input, which a validator discards.
-- Two scorers exist and the platform decides which one the network uses, advertising it as `scoring_version` in `/scoring/network-config`. Practice asks the platform and scores with that formula, and the printed result names the version. If the platform cannot be reached it falls back to the version the machine last resolved, and to v1 if it never has — that fallback can put the number on a different scale from the network's.
+- Two scoring versions exist; the active one is published in network configuration (`scoring_version` in `/scoring/network-config`) and applied consistently by validators. Practice reads it and scores with that formula, and the printed result names the version. If network configuration cannot be reached it falls back to the version the machine last resolved, and to v1 if it never has — that fallback can put the number on a different scale from the network's.
 
 ## What Practice Mode Is Not
 

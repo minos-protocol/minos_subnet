@@ -1,4 +1,5 @@
-"""Regression tests for the fp_per_target denominator."""
+"""Tests for the fp_per_target denominator: one synthetic target counts once,
+however many query records represent it."""
 from pathlib import Path
 
 
@@ -27,9 +28,9 @@ def _happy(rows):
 
 
 class TestTheDenominatorIsQueryIndependent:
-    """The denominator used to be TP+FN reconstructed from hap.py output after
-    +/-10bp non-consuming matching, so several decomposed query records could
-    match one target and inflate it."""
+    """The denominator is counted from the mutations VCF, not reconstructed
+    from hap.py output: after +/-10bp non-consuming matching several decomposed
+    query records can match one target, which would inflate a TP+FN count."""
 
     MUT = [("chr20", 1000, "AT", "A")]   # one indel target
 
@@ -53,7 +54,8 @@ class TestTheDenominatorIsQueryIndependent:
         assert m_many["target_total_indel"] == m_one["target_total_indel"] == 1.0, (
             "the target count moved with how many query records matched it"
         )
-        # The old denominator did move -- kept for contrast, not asserted equal.
+        # truth_total_indel is tp+fn counted from the hap.py records, so it rises
+        # with how many of them matched the one target -- hence >=, not ==.
         assert m_many["truth_total_indel"] >= m_one["truth_total_indel"]
 
     def test_multiallelic_targets_count_per_alt_allele(self, tmp_path):

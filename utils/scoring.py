@@ -87,16 +87,21 @@ def slice_truth_vcf(source_vcf: Path, target_vcf: Path, region: str) -> bool:
         index_csi = Path(str(source_vcf) + '.csi')
         index_tbi = Path(str(source_vcf) + '.tbi')
         if not index_csi.exists() and not index_tbi.exists():
-            logger.warning(f"VCF not indexed, extraction will be slow")
+            logger.warning("VCF has no index; building one without overwriting source bytes")
+            try:
+                if str(source_vcf).endswith(".gz"):
+                    import pysam
+                    pysam.tabix_index(str(source_vcf), preset="vcf", force=False)
+            except Exception as e:
+                logger.warning(
+                    f"missing VCF index could not be created for {source_vcf.name} "
+                    f"(continuing): {e}"
+                )
 
-        # Defensive reindex so slicing sees a fresh .tbi. Uses pysam's bundled
-        # htslib rather than a `tabix` CLI, which is not guaranteed on PATH.
-        try:
-            if str(source_vcf).endswith(".gz"):
-                import pysam
-                pysam.tabix_index(str(source_vcf), preset="vcf", force=True)
-        except Exception as e:
-            logger.warning(f"defensive reindex skipped for {source_vcf.name} (continuing): {e}")
+        # A supplied truth index is part of the round input contract. It is
+        # never regenerated in place: the source file may be shared and read
+        # concurrently, so rewriting its index would change input another
+        # reader is relying on.
 
         source_dir = source_vcf.parent
         target_dir = target_vcf.parent
@@ -524,8 +529,8 @@ def parse_happy_vcf_assessed_metrics(happy_vcf_path: str) -> Optional[Dict[str, 
 
     hap.py's summary.csv reports QUERY.TOTAL, Frac_NA, TiTv_ratio, and
     het_hom_ratio over the ENTIRE query VCF, including variants outside
-    the -f BED regions (marked UNK). This inflates query_total, tanks
-    Frac_NA, and skews ratio calculations.
+    the -f BED regions (marked UNK). That raises query_total, lowers
+    Frac_NA, and skews the ratio calculations.
 
     This function parses the annotated output VCF and computes these
     metrics from only assessed variants (BD=TP or BD=FP), giving accurate
@@ -889,9 +894,10 @@ class HappyScorer:
                 """Whether this invocation produced the file.
 
                 The purge above should make this redundant; it is kept because
-                an unlink that silently failed would otherwise let a stale
-                artifact be scored as if it were fresh. One second of slack
-                absorbs coarse filesystem timestamp granularity.
+                a stale artifact the purge could not remove -- the unlink logs a
+                warning and continues -- would otherwise be scored as if it were
+                fresh. One second of slack absorbs coarse filesystem timestamp
+                granularity.
                 """
                 try:
                     return path.exists() and path.stat().st_mtime >= (invocation_start - 1.0)
@@ -1097,7 +1103,7 @@ class HappyScorer:
 #
 # The weights are fixed constants and must not be derived from observed results:
 # a validator scores only its assigned subset, so field-derived weights would
-# make two honest validators disagree about the same submission. Classes are
+# make two validators disagree about the same submission. Classes are
 # defined by intrinsic properties of the truth variant only — type, indel
 # length, zygosity.
 DIFFICULTY_WEIGHTS = {
@@ -1232,9 +1238,9 @@ def plausibility_gate(metrics: Dict[str, float]) -> bool:
       that is the round's property, not the miner's.
     * Truth measurable, query not -- FAIL. Under v1 these ratios were scored
       components, so an absent one simply earned nothing. In v2 the gate is
-      pass/fail, so treating absent as "skip" turns it into a free pass: a
-      callset with no homozygous SNP calls would sidestep the het/hom check
-      entirely, which is a bypass a miner can choose.
+      pass/fail, so treating absent as "skip" would turn it into a free pass:
+      a callset with no homozygous SNP calls would skip the het/hom check
+      entirely, and a gate that omission can satisfy is not a gate.
     * Both measurable -- compare against the threshold.
     """
     for truth_key, query_key, max_delta in (
@@ -1424,9 +1430,9 @@ class AdvancedScorer:
 
         # Enforce the scorer's own input contract rather than trusting the
         # producer. max(0.0, nan) returns 0.0 -- NaN compares False against
-        # everything -- so a non-finite rate silently became exp(0) == 1.0, a
-        # PERFECT germline component. A negative rate does the same. Both are
-        # "this measurement is broken", never "this miner was flawless".
+        # everything -- so a non-finite rate would evaluate to exp(0) == 1.0,
+        # the maximum germline component; a negative rate does the same. Both
+        # mean the measurement is unusable, not that the callset was perfect.
         try:
             fp_rate = float(fp_per_target)
         except (TypeError, ValueError):

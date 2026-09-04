@@ -34,7 +34,7 @@ Use the public README and repo scripts for exact current setup steps. Do not cop
 
 Validator workloads are heavier than basic miner operation. Validators need enough CPU, RAM, disk, Docker capacity, reference data, and scoring resources to rerun miner configs and benchmark outputs.
 
-Validators use hap.py-style benchmarking and Minos scoring logic at a high level. The private truth files and validator-side data must never be shared.
+Validators use hap.py-style benchmarking and Minos scoring logic at a high level. Do not request or disclose unreleased round truth data or other non-public validator materials. Files officially released through the public verification endpoint after a round closes may be used for independent verification.
 
 ## Public-Safe Validator Troubleshooting
 

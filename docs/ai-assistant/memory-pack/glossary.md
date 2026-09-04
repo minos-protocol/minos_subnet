@@ -98,4 +98,4 @@ Live data: Current round, leaderboard, score, eligibility, weight, emissions, an
 
 ## Sensitive Terms
 
-Do not paste private keys, seed phrases, `.env` values, API keys, signatures, active nonces, presigned URLs, truth files, admin endpoints, or database credentials into public support channels.
+Do not paste private keys, seed phrases, `.env` values, API keys, signatures, active nonces, presigned URLs, unreleased truth files, admin endpoints, or database credentials into public support channels.

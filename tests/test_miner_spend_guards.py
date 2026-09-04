@@ -1,15 +1,15 @@
-"""Tests for the two places the miner can spend money for nothing.
+"""Tests for the two guards on the miner's spending path.
 
-Both defects cost real TAO with no submission to show for it:
+Both protect the same thing: the miner must not spend for a submission that
+cannot be accepted.
 
-  1. the round deadline was read ONCE, before a multi-GB BAM download and up to
-     an hour of variant calling, and never again — so an overlong round paid a
-     resubmission fee and burned the hotkey's rate-limited commitment slot for a
-     submission the platform had already stopped accepting;
+  1. the round deadline is re-checked immediately before anything is spent, not
+     only when the round was picked up — a multi-GB BAM download and a long
+     calling run sit in between, so the window can have closed by then;
 
-  2. a ``free_submissions_per_round`` of 0 in an UNAUTHENTICATED platform
-     response made the round's FIRST submission — the one the feature documents
-     as free — chargeable, on every round, on every running miner.
+  2. an advertised ``free_submissions_per_round`` of 0 does not make a round's
+     first submission chargeable; it is treated as 1 unless the operator opts
+     in.
 
 The miner half is exercised on a bare ``Miner`` instance with the spending
 collaborators replaced by spies: the point being pinned is the ORDER of the
@@ -129,8 +129,8 @@ def submit(m):
 
 class TestClosedRoundIsNotPaidFor:
     def test_a_window_that_closed_during_variant_calling_spends_nothing(self):
-        """The whole defect: the fee and the commitment both went out before
-        submit_config discovered the round was gone."""
+        """The window check runs before the fee and the commitment, not after
+        submit_config reports the round closed."""
         m = make_miner(remaining=-60)
 
         assert submit(m) is False
@@ -160,8 +160,8 @@ class TestClosedRoundIsNotPaidFor:
         assert not m._make_commitment.called
 
     def test_an_unknown_deadline_does_not_block_the_submission(self):
-        """A missing deadline is not evidence the round closed. Bailing out here
-        would turn a bookkeeping gap into a silently skipped round."""
+        """A missing deadline is not evidence the round closed, so an incomplete
+        record lets the submission proceed rather than skipping it."""
         m = make_miner(remaining=None)
 
         assert submit(m) is True
@@ -175,6 +175,72 @@ class TestClosedRoundIsNotPaidFor:
         assert not submit(m)
         assert not m._make_commitment.called
         assert not m.platform_client.submit_config.called
+
+
+class TestSubmitOnlyRoundPath:
+    @staticmethod
+    def _miner(*, submit_only=True, remaining=None):
+        m = miner_mod.Miner.__new__(miner_mod.Miner)
+        m.submit_only = submit_only
+        m.config = types.SimpleNamespace(resubmit=False)
+        m.submitted_rounds = set()
+        m._hotkey_submissions_used = {}
+        m._quoted_fee_tao = {}
+        m._round_deadlines = {}
+        m.variant_caller = "gatk"
+        m.demo = False
+        m.platform_client = types.SimpleNamespace(
+            get_round_status=AsyncSpy({
+                "has_active_round": True,
+                "round_id": ROUND_ID,
+                "status": "open",
+                "region": "chr20:1-1000",
+                "time_remaining_seconds": (
+                    remaining if remaining is not None
+                    else miner_mod.MIN_SPEND_TIME_SECONDS + 5
+                ),
+                "has_submitted": False,
+            })
+        )
+        m._get_tool_config = Spy(
+            {"tool": "gatk", "version": "4.5.0.0", "gatk_options": {}}
+        )
+        m._download_bam = Spy(None)
+        m._run_variant_calling = AsyncSpy((123, 4.5))
+        m._submit_result = AsyncSpy(True)
+        return m
+
+    @staticmethod
+    def _process(m):
+        import asyncio
+        return asyncio.run(m.process_round())
+
+    def test_submits_without_downloading_or_running_the_caller(self):
+        m = self._miner()
+
+        assert self._process(m) is True
+        assert not m._download_bam.called
+        assert not m._run_variant_calling.called
+        assert m._submit_result.called
+        args, kwargs = m._submit_result.calls[0]
+        assert args[0] == ROUND_ID
+        assert kwargs == {"variant_count": None, "elapsed": None}
+
+    def test_uses_spend_margin_instead_of_ten_minute_calling_margin(self):
+        m = self._miner(remaining=miner_mod.MIN_SPEND_TIME_SECONDS + 1)
+
+        assert self._process(m) is True
+        assert m._submit_result.called
+
+    def test_normal_mode_keeps_the_ten_minute_guard(self):
+        m = self._miner(
+            submit_only=False,
+            remaining=miner_mod.MIN_SUBMISSION_TIME_SECONDS - 1,
+        )
+
+        assert self._process(m) is False
+        assert not m._download_bam.called
+        assert not m._submit_result.called
 
 
 DEST = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
@@ -202,8 +268,8 @@ def policy(**kw):
 
 class TestZeroFreeAllowance:
     def test_an_advertised_zero_does_not_charge_the_first_submission(self):
-        """The value arrives unauthenticated; a 0 would bill every miner for the
-        submission the feature documents as free, every round."""
+        """An advertised 0 would charge for the submission the feature
+        documents as free, so it reads as the default allowance instead."""
         p = policy(free_submissions_per_round=0)
 
         assert p.free_submissions == sp.DEFAULT_FREE_SUBMISSIONS
@@ -215,8 +281,8 @@ class TestZeroFreeAllowance:
 
     @pytest.mark.parametrize("advertised", [0, -5, None, "abc", "0"])
     def test_every_unusable_allowance_lands_on_the_same_default(self, advertised):
-        """Consistency with the pre-existing negative/missing handling: one
-        documented fallback, not a second quietly-different rule for 0."""
+        """0 lands on the same documented fallback as a negative or missing
+        allowance: one rule for every unusable value, not a separate one for 0."""
         p = policy(free_submissions_per_round=advertised)
 
         assert p.free_submissions == sp.DEFAULT_FREE_SUBMISSIONS
@@ -232,8 +298,8 @@ class TestZeroFreeAllowance:
 
 class TestZeroAllowanceOptIn:
     def test_zero_is_honoured_when_the_operator_opts_in(self, monkeypatch):
-        """Charging for the first submission stays a reachable policy — it just
-        cannot be switched on by an unauthenticated HTTP body alone."""
+        """Charging for the first submission stays a reachable policy — it is
+        the operator who turns it on."""
         monkeypatch.setenv("MINER_ALLOW_ZERO_FREE_SUBMISSIONS", "1")
 
         p = policy(free_submissions_per_round=0)
@@ -268,11 +334,10 @@ class TestZeroAllowanceOptIn:
 
 
 class TestTheCommitmentIsBehindThePlatformSwitch:
-    """Committing costs the miner an extrinsic per submission, so like every
-    other change that runs on other people's machines it has an off switch we
-    control. Absence means disabled: an older platform and a deliberately
-    disabled one behave the same, and a platform we cannot reach never starts
-    miners spending extrinsics nobody asked for."""
+    """Committing costs an extrinsic per submission, so it is gated on network
+    configuration. An absent setting reads as disabled, so an older deployment
+    and a disabled one behave the same, and unreadable network configuration
+    does not start extrinsic spending."""
 
     @staticmethod
     def _miner(network_config, *, demo=False):
@@ -330,10 +395,10 @@ class TestTheCommitmentIsBehindThePlatformSwitch:
 
 class TestConfigFlagIsTakenBackFromBittensor:
     """bittensor builds its logging config at IMPORT time and reads --config
-    straight out of sys.argv, expecting YAML. Our side modes use --config for
-    the variant-caller .conf, so `--practice --config configs/gatk.conf` died
-    inside `import bittensor` with a YAML parse error — before any of our code
-    ran, naming neither this program nor the real problem.
+    straight out of sys.argv, expecting YAML. The side modes use --config for
+    the variant-caller .conf, so `--practice --config configs/gatk.conf` would
+    otherwise fail inside `import bittensor` with a YAML parse error naming
+    neither this program nor the flag.
 
     The value is lifted out of argv ahead of that import. These drive the lift
     itself, since the import-time behaviour cannot be re-triggered in-process.
@@ -361,7 +426,7 @@ class TestConfigFlagIsTakenBackFromBittensor:
             i += 1
         return kept, lifted
 
-    def test_the_start_script_invocation_no_longer_leaves_config_in_argv(self):
+    def test_the_start_script_invocation_leaves_no_config_in_argv(self):
         argv = ["--practice", "--sample_id", "abc", "--config", "configs/gatk.conf"]
         kept, lifted = self._lift(argv)
         assert "--config" not in kept, "bittensor would still try to YAML-parse it"

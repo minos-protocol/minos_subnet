@@ -113,7 +113,7 @@ Related scripts:
 
 The runtime pack is public-only. It must not include or ask for wallet secrets,
 `.env`, API keys, SSH keys, request signatures, presigned URLs, private miner
-configs, private BAM/VCF/truth files, private validator data, admin endpoints,
+configs, private BAM/VCF files, unreleased truth files, private validator data, admin endpoints,
 database access, or production infrastructure details.
 
 Model provider keys should be entered only into OpenClaw, Hermes, or the

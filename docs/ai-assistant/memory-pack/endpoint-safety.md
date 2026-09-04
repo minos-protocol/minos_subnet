@@ -54,4 +54,4 @@ Beginners should not manually call signed POST endpoints. The miner software han
 
 ## Not For Beginner Support
 
-Do not suggest admin endpoints, database access, production environment details, private validator files, truth files, presigned URL inspection, or manual signed request construction.
+Do not suggest admin endpoints, database access, production environment details, private validator files, unreleased truth files, presigned URL inspection, or manual signed request construction.

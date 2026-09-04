@@ -1,13 +1,14 @@
-"""Which scoring formula a validator applies, and what happens when it cannot ask.
+"""Which scoring version a validator applies, and what happens when it cannot
+read one.
 
-v1 and v2 are different SCALES. A fleet split across them produces a meaningless
-ranking, and ranking is what pays — so the choice belongs to the platform, not
-to each operator's environment.
+v1 and v2 are different SCALES, so every score in a round has to come from the
+same one. Ranking is what pays, so the active version is published in network
+configuration rather than set per operator.
 
-The interesting case is the failure one. Defaulting to v1 whenever the platform
-is unreachable would be actively harmful during a v2 rollout: every validator
-that lost the platform for one round would drop back to v1 and diverge from the
-fleet exactly when nobody is watching. So a resolved version is remembered.
+The interesting case is the failure one. Defaulting to v1 whenever network
+configuration is unreachable would move a validator off the version the rest of
+the network is using, for as long as it stayed unreachable. So a resolved
+version is remembered.
 """
 import json
 import pathlib
@@ -86,15 +87,16 @@ class TestWhenThePlatformCannotBeReached:
 class TestPersistence:
     def test_the_write_is_atomic(self, state):
         """A crash mid-write must not leave a truncated file, which would read
-        as 'never resolved' and silently drop the validator back to v1."""
+        as 'never resolved' and drop the validator back to v1."""
         sv.record_used("v2", state)
         leftovers = list(state.parent.glob("*.tmp"))
         assert not leftovers, f"temp files left behind: {leftovers}"
         assert json.loads(state.read_text())["scoring_version"] == "v2"
 
     def test_an_unwritable_location_does_not_break_scoring(self, tmp_path):
-        """Losing the memory costs a restart's worth of stickiness. Raising here
-        would cost the round."""
+        """The write is best-effort: an unwritable location costs a restart's
+        worth of stickiness, which is the milder outcome than raising out of
+        the scoring path."""
         sv.record_used("v2", tmp_path / "nope" / "deep" / "x.json")
 
     def test_a_bad_version_is_never_persisted(self, state):

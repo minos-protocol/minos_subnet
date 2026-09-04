@@ -5,11 +5,9 @@ canonical tiebreak runs. If an unusable canonical voided the round instead, the
 miners would have done the work and the emission would simply be lost. So every
 failure mode DEGRADES to the local ordering rather than aborting.
 
-The other half matters just as much: a rewrite of those degrade paths once
-deleted the parse loop along with the abort branches it meant to remove. Every
-failure still degraded correctly, every test still passed, and the canonical was
-silently unused on every round. These tests execute the real block rather than
-reading it, so that cannot happen again.
+The second half matters as much: these tests execute the real parse block
+rather than reading it, so the canonical cannot fall out of use while every
+degrade path still behaves correctly.
 """
 import pathlib
 import textwrap

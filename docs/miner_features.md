@@ -1,8 +1,9 @@
 # Miner features: config commitment and paid resubmission
 
-Two features that do nothing until the platform asks for them. **Neither is
-turned on by a local setting** — the platform decides, and one of them can spend
-TAO, so read that section before you auto-update.
+Two optional features. Both are inactive unless network configuration
+advertises support for them, and paid resubmission additionally requires an
+explicit operator opt-in because it can spend TAO. Read that section before
+enabling automatic updates.
 
 ---
 
@@ -12,23 +13,25 @@ Your miner can publish a cryptographic commitment to the config it submitted:
 on chain (timestamped by block, signed by your hotkey) and alongside the
 submission to the platform.
 
-> **Off unless the platform asks for it.** Committing costs one extrinsic per
-> submission, so it is enabled network-wide from the platform rather than by
-> each operator. While no policy is advertised — which is the case today — your
-> miner publishes nothing and submits exactly as before. A platform your miner
-> cannot reach also means no commitment, so an outage never starts it spending
-> extrinsics.
+> **Off unless network configuration advertises support for it**
+> (`config_commitment_enabled` in `/scoring/network-config`). Committing costs
+> one extrinsic per submission, so it is enabled network-wide through network
+> configuration rather than per operator. While it is not advertised, your
+> miner publishes nothing and submits exactly as before. If network
+> configuration cannot be read, no commitment is made, so an outage never
+> starts extrinsic spending.
 
 ### What it buys you
 
-The chain commitment is timestamped and signed, so neither side can move
-afterwards. The platform cannot claim you sent a different config, and you
-cannot claim you sent a better one than you did. The platform runs its own
-commitment over the config it **stored**; this is the other half, over the
-config as **sent**.
+The on-chain commitment is a timestamped, signed record of the config you
+submitted, which you can independently verify later from your local ledger and
+the chain.
 
-Where the two differ, the difference is the submit-time clamping — which makes
-clamping auditable instead of invisible.
+Minos separately records its own commitment over the configuration it stores
+for scoring (`config_hash`, published after the round closes — see
+[docs/verification.md](verification.md#config-commitment-hashes-commitments)).
+The two commitments use different constructions and nonces, so their hash
+values are not directly comparable; each is verified on its own terms.
 
 ### How it works
 
@@ -45,7 +48,7 @@ digest binds more than the config on purpose:
 | Field | Prevents |
 |---|---|
 | `domain` | replaying the hash as a different Minos signature |
-| `version` | silently reinterpreting old commitments under a new scheme |
+| `version` | reinterpreting old commitments under a new scheme |
 | `netuid` | a commitment on one subnet counting on another |
 | `round_id` | reusing a commitment for a later round |
 | `hotkey` | another miner claiming your published commitment |
@@ -86,12 +89,23 @@ unguessable before you publish, and it is disclosed to the platform with the
 config it commits to.
 
 **Back up the ledger.** It is your own copy of what you sent and of the nonce
-that opens it, which is what lets you check a commitment without relying on the
-platform's record.
+that opens it, which is what allows you to independently recompute your
+commitment.
 
 | Variable | Default | Effect |
 |---|---|---|
 | `MINOS_COMMITMENT_LEDGER` | `~/.minos/commitments.jsonl` | Where commitments and nonces are stored |
+
+### Checking what was recorded
+
+Once a round closes, `GET /verification/round/{round_id}` includes your
+commitment hash (when this feature is enabled), so you can confirm the recorded
+value matches your ledger and the on-chain record. Nonces and configurations
+are not published. The response also carries `config_hash`, a separate
+commitment over the server-recorded configuration; the two use different
+constructions and nonces and cannot be compared directly. See
+[docs/verification.md](verification.md#config-commitment-hashes-commitments)
+for the endpoint shape.
 
 ### Current limits
 
@@ -103,18 +117,18 @@ as sent, round, hotkey, netuid, tool, and the block the chain write landed at.
 The chain write can also be skipped without stopping the submission. Subtensor
 enforces a minimum block interval between commitments from one hotkey, so a
 rate-limited write is logged and the miner still submits the commitment and
-nonce to the platform — you get the platform-side half of that round, not the
-timestamped one.
+nonce with the config — the record for that round then has no on-chain block
+timestamp.
 
 ---
 
 ## Paid resubmission
 
-> **This feature spends TAO from your coldkey.** Whether resubmissions cost
-> anything is decided by the PLATFORM, not by a local switch. While the platform
-> advertises no fee — which is the case today — nothing is ever spent. If it
-> begins advertising one, a miner that resubmits will pay it unless you have
-> opted out. Read "Turning it off" before enabling auto-updates.
+> **Paid resubmissions are disabled by default.** They require both network
+> support (`resubmission_fee_enabled` in `/scoring/network-config`) and
+> explicit operator authorization through `MINER_PAY_FOR_RESUBMISSIONS=1` and
+> `--resubmit`. Automatic updates alone cannot authorize a payment. Read
+> "Turning it on" before enabling auto-updates.
 
 ### What it is
 
@@ -145,20 +159,19 @@ last. The shape, for a base of 0.01 TAO and a step that doubles:
 | 3 | 0.08 |
 | 7 | 1.28 |
 
-The base and the step are the platform's, not the miner's — the table is the
-shape, not a quote. The ladder is per coldkey, not per hotkey, so hotkeys
+Current fee parameters are published through network configuration — the table
+is the shape, not a quote. The ladder is per coldkey, not per hotkey, so hotkeys
 sharing a coldkey advance it together. Your free submissions are unaffected —
 one per hotkey, always.
 
-**The miner pays the price the platform quotes.** `round-status` returns
+**The miner pays the quoted price.** `round-status` returns
 `next_submission_fee_tao`: the cost of *this hotkey's* next paid submission,
 already advanced for wherever the coldkey sits on the ladder. The miner records
 that quote when it picks up the round and pays exactly it. The base fee in
-`/scoring/network-config` is only a fallback, used when no quote came back — an
-older platform, or a response without the field. Paying a base fee for anything
-past the first paid submission underpays, and underpaying does not fail cheaply:
-the transfer is already on chain when the platform rejects it, so the TAO is
-gone.
+`/scoring/network-config` is only a fallback, used when no quote came back. A
+payment below the quoted price is rejected on arrival, and an on-chain transfer
+cannot be reversed, so the miner never pays an older or base price for a later
+submission.
 
 **The per-submission ceiling applies to the quote as well.** A quote above
 `MINOS_MAX_RESUBMISSION_FEE_TAO` is refused outright, not clamped, and the miner
@@ -167,10 +180,10 @@ underpaid. On a doubling ladder that starts at the default `0.01` ceiling, that
 allows the round's first paid submission and refuses the second. Raise the
 ceiling deliberately if you want more.
 
-One consequence worth knowing: if two of your own hotkeys submit at the same
-moment, both are quoted the same price and only one can have it. The other is
-rejected as underpaid and loses its fee. Submit sequentially if you run several
-hotkeys under one coldkey.
+Run paid submissions sequentially when several hotkeys share a coldkey. The
+ladder advances per coldkey, so concurrent submissions can be quoted the same
+price, and only one payment at that price is accepted — a submission that
+underpays is refused.
 
 ### When this can actually fire
 
@@ -207,8 +220,8 @@ need to pay.
 
 The price is read from the same round response that reports `has_submitted`, so
 it already reflects the escalation from every submission your coldkey has made
-this round. If the platform quotes no fee, the miner refuses rather than guessing
-a price -- an underpayment is refused on arrival and the TAO is already gone.
+this round. If no fee is quoted, the miner does not guess a price; it skips the
+paid submission.
 
 ### Turning it on
 
@@ -223,16 +236,16 @@ platform advertises. A submission past the free allowance still goes out, just
 without a payment proof; the platform refuses it with HTTP 402, the miner logs
 that and carries on to the next round. Nothing is spent either way.
 
-**Why this is opt-in.** `scripts/auto_update.sh` pulls and restarts under pm2,
-so a miner acquires new behaviour without anyone reading a release note. If a
-published policy were enough to authorise spending, every auto-updated miner
-would begin paying the moment one appeared. A ceiling bounds what a mistake
-costs; it does not make the spending consented to.
+**Why this is opt-in.** Miners can update automatically
+(`scripts/auto_update.sh`), so a published fee policy on its own is never
+enough to authorise spending; a payment requires an explicit local decision.
+The ceilings below bound how much an opted-in miner can spend; they do not
+replace the opt-in.
 
-**Set the ceilings anyway.** They bound what a wrong or hostile policy can cost
-once you have opted in: a fee above the per-submission cap is refused outright,
-and spend is capped over a rolling 24 hours both per hotkey and across every
-hotkey sharing this host.
+**Set the ceilings anyway.** They bound what can be spent once you have opted
+in: a fee above the per-submission cap is refused outright, and spend is capped
+over a rolling 24 hours both per hotkey and across every hotkey sharing this
+host.
 
 | Variable | Default | Effect |
 |---|---|---|
@@ -243,10 +256,10 @@ hotkey sharing this host.
 | `MINOS_PAYMENT_LEDGER` | `~/.minos/submission_payments.jsonl` | Payment record |
 | `MINER_ALLOW_ZERO_FREE_SUBMISSIONS` | *(unset = off)* | Honour an advertised allowance of **zero** free submissions |
 
-An advertised `free_submissions_per_round: 0` would charge for a round's *first*
-submission. The miner does not honour that by default: it logs the discrepancy
-and uses one free submission instead, unless `MINER_ALLOW_ZERO_FREE_SUBMISSIONS`
-is set to `1`/`true`/`yes`.
+Compatibility rule: an advertised `free_submissions_per_round` of `0` is treated
+as `1` unless `MINER_ALLOW_ZERO_FREE_SUBMISSIONS` is set to `1`/`true`/`yes`,
+so a round's first submission is never charged without an explicit local
+setting.
 
 Worst case with the defaults is `0.05` TAO per hotkey per day, regardless of
 what the platform advertises or how many rounds ask. The ceiling is per hotkey
@@ -254,17 +267,28 @@ because the allowance is: an operator running several hotkeys on one host would
 otherwise share a single budget and silently stop submitting once the busiest
 one exhausted it.
 
+Both ceilings are measured from the payment ledger above — `~/.minos/submission_payments.jsonl` by default, or wherever `MINOS_PAYMENT_LEDGER` points. If that ledger cannot
+be fully read — a line that is not valid JSON, a payment record with an
+unreadable amount, or a file the process cannot open — the ceilings treat spend
+as unlimited and **refuse further paid submissions**, logging the reason. A
+partially-read ledger would otherwise look like unused allowance. Inspect or
+move the file to resume paying.
+
 ### The safety rails
 
-Destination and allowance come from the platform's `/scoring/network-config`, an
-**unauthenticated** response. The fee is the `round-status` quote when there is
-one — that response is authenticated — and the network-config figure otherwise.
-The transfer is signed with your **coldkey**. So:
+Fee, destination and allowance are read from network configuration: the fee is
+the `round-status` quote when there is one, and the `/scoring/network-config`
+figure otherwise. The transfer is signed with your **coldkey**, so treat those
+values as inputs bounded by your own settings rather than as authorisation —
+every limit below is enforced locally, on your machine:
 
 - **Capped.** A fee above `MINOS_MAX_RESUBMISSION_FEE_TAO` is **refused, not
   clamped**: paying a capped amount toward a bad fee is still paying.
 - **Destination validated** as a real ss58 address. A malformed destination is an
   irrecoverable transfer to an account nobody controls.
+- **Destination pinnable.** Set `MINOS_EXPECTED_PAYMENT_ADDRESS` and the miner
+  refuses to pay any other destination, whatever network configuration
+  advertises.
 - **Units guarded.** The transfer refuses outright if the SDK exposes no
   `Balance` type, because a bare float can be read as RAO and a 1e9x transfer
   cannot be undone.
@@ -282,9 +306,9 @@ The transfer is signed with your **coldkey**. So:
 5. mark spent only once the PLATFORM ACCEPTS
 ```
 
-Step 5 follows the platform's verdict, not the HTTP status: a 200 carrying
-`success: false` is a rejected submission, and marking it spent there would make
-you pay again to retry something you already paid for.
+Step 5 keys on the response body's `success` field, not the HTTP status: a
+`200` carrying `success: false` is a rejected submission, so the proof stays
+unspent and is reused on the next attempt rather than paid for again.
 
 ### If something goes wrong
 
@@ -294,15 +318,10 @@ remove the stale intent once you have settled it.
 
 ### Current status
 
-**The fee is switched off, and nothing is charged.** The platform gates it behind
-two separate switches — one to publish the policy, one to enforce it — and both
-are off. While no policy is advertised, the miner never reads a fee, never
-transfers, and submits exactly as it always has.
+**Paid resubmission is not active on production.** Network configuration does
+not advertise a fee (`resubmission_fee_enabled: false`), so the miner never
+reads one, never transfers, and submits exactly as it always has.
 
-The server-side half exists: the allowance is counted per hotkey, on-chain proofs
-are verified against the chain, and spent references are recorded so a payment
-cannot be used twice. None of it has run against a live chain yet.
-
-Expect an announcement before any of this becomes active. You do not need to do
-anything to stay out of it: without `MINER_PAY_FOR_RESUBMISSIONS` set, this
-miner never pays, regardless of what the platform later advertises.
+Expect an announcement before it is activated. You do not need to do anything
+to stay out of it: without `MINER_PAY_FOR_RESUBMISSIONS` set, this miner never
+pays, regardless of what network configuration later advertises.

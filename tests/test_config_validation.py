@@ -1,16 +1,14 @@
-"""Regression tests for config parsing and parameter validation.
+"""Tests for config parsing and parameter validation.
 
-Three defects, each of which put a value on the variant caller's command line
-that the range guards were supposed to have stopped, or lost a miner's whole
-submission to a cosmetic problem in their .conf:
+Three properties the validation layer has to hold, each easy to get wrong:
 
-  * NaN passed every numeric range check (``nan < min`` and ``nan > max`` are
-    both False) and reached the command line as ``nan``.
-  * ``bool`` is a subclass of ``int``, so ``True`` satisfied an int parameter
-    and rendered as the literal ``True`` in the flag.
-  * .conf files were opened with the process locale encoding, so a file saved
-    by a Windows editor either failed to decode or read its BOM into the first
-    key name.
+  * NaN must be rejected by the numeric range checks. ``nan < min`` and
+    ``nan > max`` are both False, so a plain range test lets it through and it
+    reaches the command line as ``nan``.
+  * ``bool`` is a subclass of ``int``, so an int parameter must reject ``True``
+    rather than rendering it as the literal ``True`` in the flag.
+  * .conf files are read as UTF-8 with BOM handling, so a file saved by a
+    Windows editor decodes and its first key name stays intact.
 """
 
 import logging
@@ -54,9 +52,10 @@ class TestNonFiniteRejected:
         assert result["errors"]
 
     def test_nan_never_reaches_the_command_line(self):
-        """The bug: nan compared False against both bounds and passed."""
+        """nan compares False against both bounds, so a plain range check
+        lets it through."""
         nan = float("nan")
-        assert not (nan < 0) and not (nan > 100), "premise of the bug"
+        assert not (nan < 0) and not (nan > 100), "premise: nan loses both comparisons"
 
         result = validate_and_build_flags(
             "gatk", {"standard_min_confidence_threshold_for_calling": nan}
@@ -100,7 +99,7 @@ class TestNonFiniteRejected:
 class TestBoolRejectedForNumericParams:
 
     def test_isinstance_premise(self):
-        assert isinstance(True, int), "premise of the bug"
+        assert isinstance(True, int), "premise: bool is a subclass of int"
 
     @pytest.mark.parametrize("value", [True, False])
     def test_int_param_rejects_bool(self, value):
@@ -118,7 +117,8 @@ class TestBoolRejectedForNumericParams:
         assert any("must be float" in e for e in result["errors"])
 
     def test_bool_never_renders_as_a_literal_in_a_flag(self):
-        """The bug: True satisfied the int check and became '--min-pruning True'."""
+        """Without an explicit bool check, True satisfies the int check and
+        renders as '--min-pruning True'."""
         result = validate_and_build_flags("gatk", {"min_pruning": True})
         assert not any("True" in f for f in _flag_text(result["flags"]))
 
@@ -205,7 +205,7 @@ class TestConfEncoding:
         (tmp_path / f"{tool}.conf").write_text(text, encoding=encoding)
 
     def test_bom_is_stripped_from_the_first_key(self, tmp_path, monkeypatch):
-        """A Windows editor's BOM used to become part of the first key name."""
+        """A Windows editor's BOM must not become part of the first key name."""
         monkeypatch.setattr("utils.config_loader.CONFIG_DIR", tmp_path)
         self._write(
             tmp_path, "gatk",
@@ -219,8 +219,9 @@ class TestConfEncoding:
         assert not any(k.startswith("﻿") for k in options)
         assert validate_and_build_flags("gatk", options)["valid"] is True
 
-    def test_bom_config_would_otherwise_void_the_submission(self, tmp_path, monkeypatch):
-        """Pin the consequence the BOM had, so a regression is unmistakable."""
+    def test_a_bom_config_still_validates(self, tmp_path, monkeypatch):
+        """End to end: a BOM must not reach the parameter names, so a config
+        saved by a Windows editor validates like any other."""
         monkeypatch.setattr("utils.config_loader.CONFIG_DIR", tmp_path)
         self._write(tmp_path, "gatk", "min_pruning=3\n", "utf-8-sig")
 
@@ -229,7 +230,8 @@ class TestConfEncoding:
         )["valid"] is True
 
     def test_utf8_values_decode_regardless_of_process_locale(self, tmp_path, monkeypatch):
-        """Non-ASCII bytes used to raise UnicodeDecodeError under a C locale."""
+        """Non-ASCII bytes raise UnicodeDecodeError under a C locale, so the
+        read pins UTF-8 rather than following the process locale."""
         monkeypatch.setattr("utils.config_loader.CONFIG_DIR", tmp_path)
         self._write(tmp_path, "gatk", "# café naïve\nmin_pruning=3\n", "utf-8")
 
@@ -281,7 +283,7 @@ class TestLoadTimeWhitelistWarning:
 
 
 # ---------------------------------------------------------------------------
-# End to end: a hostile .conf cannot smuggle nan/True through the loader
+# End to end: a crafted .conf cannot smuggle nan/True through the loader
 # ---------------------------------------------------------------------------
 
 

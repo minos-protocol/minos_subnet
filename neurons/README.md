@@ -107,7 +107,7 @@ A validator uses miners config file and selected hyperparameters to run the vari
    - Fetch scoring assignment from platform (primary miner range based on validator stake)
    - Score primary miners first (no deadline pressure)
    - Score secondary miners for gap coverage until 3 min before deadline
-   - Re-run each miner's tool config locally (trustless verification)
+   - Re-run each miner's tool config locally (independent verification)
    - Run hap.py to compare against known truth
    - Calculate quality scores for SNPs and INDELs
 
@@ -167,6 +167,13 @@ python -m neurons.validator
 | `SCORING_THREADS` | auto | Override: threads per scoring Docker job. Auto-tuned from cores (clamped 2–8) |
 | `SCORING_MEMORY_GB` | 16 | Override: memory per scoring Docker job. **Below 16 OOM-crashes DeepVariant** |
 | `MINOS_VALIDATOR_CONCURRENCY` | auto | Override: concurrent miner jobs. Auto = `min(cores//threads, ram_gb//16, 8)` |
+| `NETWORK` | finney | Chain to connect to. Read after CLI parsing, so a value here overrides `--subtensor.network` |
+| `SCORE_GRACE_SECONDS` | 60 | Seconds waited past the round deadline before scoring. Combined with the network-supplied value using `max()`, so a large local value delays your own backfill and weight-setting |
+| `SCORE_FINALIZATION_DELAY_SECONDS` | 5 | Delay between scoring and finalization. Also combined with `max()` |
+| `MINOS_OWNER_SYNC_TIMEOUT` | 30 | Timeout on the pre-weights metagraph sync. On timeout the validator proceeds with the last synced hotkeys and permits, and skips coldkey deduplication for that round |
+| `CANONICAL_MIN_VALIDATOR_COUNT` | 2 | Distinct validators required before the canonical ranking is used for the winner tiebreak. Network configuration overrides this when it publishes a value |
+| `CANONICAL_MIN_VALIDATOR_STAKE` | 5000 | Combined with the count above as one aggregate floor: the ranking is used only when total considered stake reaches `count x stake`. Below that the validator falls back to its own ordering. Network configuration overrides this too |
+| `MINOS_FALLBACK_PRIMARY_N` | auto | Override: how many miners are scored as primary when the platform returns no assignment |
 
 ## The Complete Cycle
 
@@ -217,13 +224,30 @@ python -m neurons.validator
 ### Weight Distribution
 
 Validators apply the `/scoring/network-config` reward policy (dynamic — check it
-for current values). Currently the top eligible miner gets ~90% and eligible
-ranks #2 through #20 split the remaining ~10% as ranked pruning dust; burn is 0%.
+for current values). The top eligible miner gets the `winner_weight` share and
+eligible ranks #2 through `dust_top_n` split the remainder as ranked pruning
+dust; `burn_rate` goes to burn.
 Eligibility requires at least 5 valid scored rounds in the last 20 finalized rounds, and
 the current round counts toward that threshold. Eligible miners are ranked only
 by the current round's AdvancedScorer score; ineligible miners receive 0
-weight. Tiebreaker: earliest submission timestamp (applied only at
-floating-point tolerance).
+weight.
+
+**Tiebreaks.** Exactly equal scores (within `1e-9`) are broken by earliest
+submission timestamp, then by hotkey so every validator orders them the same
+way. Separately, when a canonical cross-validator ranking is available its
+winner is adopted if that miner's score is within `0.001` of local rank-1 — 0.1
+points on the raw 0–100 scale — so a miner who is marginally ahead locally can
+still not receive the winner share. The canonical ranking is used only when it
+carries at least `CANONICAL_MIN_VALIDATOR_COUNT` validators and, in aggregate,
+`count × CANONICAL_MIN_VALIDATOR_STAKE` of stake; below that the validator uses
+its own ordering.
+
+**One reward per coldkey.** When `/scoring/network-config` sets
+`reward_normalization: true`, only each coldkey's best-ranked hotkey stays in
+the reward set — every other hotkey under that coldkey earns 0 for the round,
+whatever its own score. Ownership is read from the metagraph, falling back to
+`POST /v2/owner-map`; if neither resolves, the deduplication is skipped for that
+round rather than guessing.
 
 ## Requirements
 

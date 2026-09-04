@@ -20,4 +20,4 @@ Important beginner ideas:
 
 Better mining does not mean producing more variants. Good results usually balance recall, precision, completeness, quality filtering, and runtime.
 
-Do not paste private BAM files, VCF files, truth files, confident regions, presigned URLs, or private challenge data into Ditto, public issues, or public support channels.
+Do not paste private BAM files, VCF files, unreleased truth files, confident regions, presigned URLs, or private challenge data into Ditto, public issues, or public support channels.

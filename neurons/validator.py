@@ -87,14 +87,11 @@ OWNER_SYNC_TIMEOUT_SECONDS = float(os.getenv("MINOS_OWNER_SYNC_TIMEOUT", "30"))
 def _reward_normalization_enabled(network_cfg) -> bool:
     """Whether the platform is asking for the reward set to be normalised.
 
-    Fails to False on any doubt. Enabled, this REMOVES hotkeys from the reward
-    set, so an unreadable policy must leave the ranking alone rather than guess
-    at dropping people.
+    Returns False for any policy it cannot read: enabling this removes hotkeys
+    from the reward set, so an unresolved policy leaves the ranking unchanged.
 
-    Module level deliberately: it needs no instance state, and reaching it
-    through self makes it silently absent on any object that is not a full
-    Validator -- which is how a missing attribute becomes a round that scores
-    nobody.
+    Module level deliberately: it needs no instance state, so it resolves the
+    same way regardless of how complete the calling object is.
     """
     if not isinstance(network_cfg, dict):
         return False
@@ -239,7 +236,7 @@ class Validator:
         # UIDs and permits come from this validator's own metagraph -- freshly
         # synced when that worked, last good otherwise.
         #
-        # Not a question of trusting the platform. The weight vector is a list
+        # An ordering constraint, not a choice of source. The weight vector is a list
         # INDEXED BY UID, submitted against this metagraph; if the ordering came
         # from any other view of the chain, including a correct one cached a few
         # blocks earlier, the weights land in the wrong slots. It has to be the
@@ -261,8 +258,8 @@ class Validator:
             # and stays there. The platform's cached map is therefore a fine
             # source -- and a more available one. The cost of using it is at
             # most a brand-new hotkey being absent, and an absent owner keeps
-            # its slot. Skipping deduplication instead would pay a whole sybil
-            # fleet for the round, which is what this exists to prevent.
+            # its slot. Skipping deduplication instead would pay one operator's
+            # hotkeys several times for one round, which this exists to prevent.
             try:
                 payload = await self.platform_client.get_owner_map()
                 owners = {
@@ -291,10 +288,8 @@ class Validator:
 
         Declaring on the first fetch means _scoring_version may already have
         resolved from the network config and cached that answer. If the pin
-        disagrees, the cache is now wrong: drop it so the pin wins. Without
-        this, declaring earlier would quietly pin the validator to whatever the
-        network config said at the moment it asked -- reintroducing the split
-        the pin exists to prevent.
+        disagrees, the cache is stale: drop it so the pin wins and every
+        validator scoring this round resolves the same version.
         """
         self._round_pinned_version = (round_id, pinned)
         if not pinned:
@@ -345,9 +340,8 @@ class Validator:
             )
 
         # Fetched HERE, not read from a cache. The cached config is refreshed
-        # during finalization — after this round was scored — so relying on it
-        # made a fresh validator score its first round on the fallback rather
-        # than on what the platform actually advertises.
+        # during finalization, which is after this round is scored, so on a
+        # validator's first round there is nothing cached yet to read.
         network_config = None
         try:
             network_config = await self.platform_client.get_network_config()
@@ -416,7 +410,7 @@ class Validator:
             f"{self._scoring_cfg['mem_per_job_gb']} GB "
             f"(host: {self._scoring_cfg['host_cores']}c / {self._scoring_cfg['host_ram_gb']} GB RAM)"
         )
-        # Older .env files pinned SCORING_MEMORY_GB=8, which OOMs DeepVariant.
+        # DeepVariant OOMs below 16 GB per scoring job.
         if self._scoring_cfg["mem_per_job_gb"] < 16:
             bt.logging.warning(
                 f"SCORING_MEMORY_GB={self._scoring_cfg['mem_per_job_gb']} is below "
@@ -781,7 +775,7 @@ class Validator:
                 # possibly under a different scoring version. Combining it with
                 # scores from the current version puts two scales in one
                 # ranking, so a mismatch is dropped and the miner is rescored
-                # rather than trusted.
+                # rather than reused.
                 restore_scorer = scoring_version_util.scorer_name(
                     await self._scoring_version(round_id)
                 )
@@ -1111,7 +1105,7 @@ class Validator:
                 if chrom == "chr20" and legacy_bed.exists():
                     truth_bed_path = legacy_bed
 
-        # The platform uploads a merged truth VCF (GIAB + synthetic) to S3.
+        # The platform uploads a merged truth VCF (GIAB + synthetic) to object storage.
         # Use it directly — no need to re-parse or re-merge.
         # Verify it has variants before proceeding.
         truth_variant_count = 0
@@ -1214,7 +1208,7 @@ class Validator:
 
             scoring_elapsed = time.time() - scoring_start
 
-            # 6. Upload VCF artifacts to S3 (audit trail)
+            # 6. Upload VCF artifacts to platform storage (audit trail)
             output_vcf_s3_key = None
             output_vcf_sha256_val = None
             happy_output_s3_key = None
@@ -1248,7 +1242,7 @@ class Validator:
                         happy_output_s3_key = None
 
                 if output_vcf_s3_key:
-                    print(f"   VCFs uploaded to S3 for audit trail", flush=True)
+                    print(f"   VCFs uploaded to platform storage for audit trail", flush=True)
             except Exception as e:
                 if self.is_registered:
                     bt.logging.warning(f"VCF upload failed for {miner_hotkey[:16]}: {e}")
@@ -1260,13 +1254,13 @@ class Validator:
                 )
                 return
 
-            # 7. Validate and submit score to platform (with VCF S3 keys)
+            # 7. Validate and submit score to platform (with VCF storage keys)
             print(f"   SNP F1={metrics.get('f1_snp', 0):.4f}  INDEL F1={metrics.get('f1_indel', 0):.4f}", flush=True)
-            # WHICH SCORER RUNS IS THE PLATFORM'S DECISION, not this node's.
-            # v1 and v2 are different scales, so a fleet split across them
-            # produces a meaningless ranking. See utils/scoring_version: an
-            # unreachable platform keeps whatever this validator used last
-            # rather than snapping back to v1 and diverging mid-rollout.
+            # The active scoring version comes from network configuration, not
+            # from this node. v1 and v2 are different scales, so every score in
+            # a round has to come from the same one. See utils/scoring_version:
+            # if network configuration cannot be read, the validator keeps the
+            # version it last resolved rather than reverting to v1.
             scoring_version = await self._scoring_version(round_id)
 
             legacy_score_v1 = None
@@ -1454,15 +1448,14 @@ class Validator:
             )
             wait_secs = (final_score_deadline - now).total_seconds()
             if wait_secs > 0:
-                # The deadline is unvalidated platform input and this is the
-                # single-task main loop, so an absurd value must not park the
-                # validator indefinitely. Clamp as _calculate_wait_until_scoring does.
+                # This is the single-task main loop, so a very large wait must
+                # not park the validator. Clamp as _calculate_wait_until_scoring does.
                 if wait_secs > MAX_WAIT_SECONDS:
                     bt.logging.error(
                         f"Round {round_id}: scoring deadline implies a "
                         f"{wait_secs:.0f}s wait, beyond the {MAX_WAIT_SECONDS}s "
-                        f"ceiling. Clamping — the platform deadline "
-                        f"({final_score_deadline.isoformat()}) is almost certainly wrong."
+                        f"ceiling. Clamping to the ceiling "
+                        f"(deadline {final_score_deadline.isoformat()})."
                     )
                     wait_secs = MAX_WAIT_SECONDS
                 bt.logging.info(
@@ -2358,7 +2351,7 @@ class Validator:
                 return False
             miner_weights = [w / total for w in miner_weights]
 
-            # CRITICAL: Use numpy arrays, NOT torch tensors!
+            # Pass numpy arrays here, not torch tensors.
             uids_array = np.array(miner_uids, dtype=np.int64)
             weights_array = np.array(miner_weights, dtype=np.float32)
 

@@ -92,6 +92,6 @@ Important subject groups:
 This pack is public-only. It must not include or request secrets, private
 configs, private BAM/VCF files, private challenge data, database access, admin
 endpoints, cloud bucket credentials, production infrastructure details,
-presigned URLs, truth files, confident-region files, private validator data,
+presigned URLs, unreleased truth files, confident-region files, private validator data,
 private benchmark data, model provider API keys, or guaranteed winning config
 claims.

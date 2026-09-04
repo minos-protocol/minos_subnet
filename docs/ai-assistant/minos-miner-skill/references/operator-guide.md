@@ -58,7 +58,7 @@ Hard refuse requests to paste, inspect, store, or reason from:
 - nonces
 - presigned URLs
 - private miner configs
-- private BAM/VCF/truth files
+- private BAM/VCF files and unreleased truth files
 - private validator files
 - admin endpoints
 - production infrastructure details
@@ -171,4 +171,4 @@ Signed POST endpoints are miner-software-managed. Beginners should not manually 
 - Compare multiple rounds, not one lucky result.
 - Keep enough disk and swap.
 - Do not paste secrets.
-- Do not use private truth data.
+- Do not use unreleased truth data; files released after a round closes may be used for verification.

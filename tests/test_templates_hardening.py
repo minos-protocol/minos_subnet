@@ -87,9 +87,10 @@ class TestFreebayesCompressFailure:
     def test_failed_compression_is_not_reported_as_an_empty_callset(self, tmp_path):
         """rc!=0 from bgzip must fail the round, not score 0 variants.
 
-        The shell redirect creates out.vcf.gz before bgzip writes anything, so
-        the old `if not output_vcf_path.exists()` check passed and gzip.open on
-        the 0-byte file returned '' without raising.
+        The shell redirect creates out.vcf.gz before bgzip writes anything,
+        so an existence check alone would pass, and gzip.open on the 0-byte
+        file returns '' without raising. The return code is what separates
+        them.
         """
         bam, ref, out = _inputs(tmp_path)
         docker = _FreebayesDocker(out, compress_rc=125,
@@ -300,5 +301,5 @@ class TestDeepvariantCountVariantsDeduplicated:
     def test_deepvariant_uses_the_shared_helper(self):
         assert deepvariant.count_variants is _common.count_variants
 
-    def test_private_duplicate_is_gone(self):
+    def test_deepvariant_defines_no_private_count_variants(self):
         assert not hasattr(deepvariant, "_count_variants")

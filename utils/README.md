@@ -4,7 +4,7 @@ This folder contains all the genomics processing tools used by miners and valida
 
 ## Overview
 
-The utils folder is organized into 7 focused modules:
+The utils folder's main modules are:
 
 ```text
 utils/
@@ -14,7 +14,12 @@ utils/
 ├── platform_client.py    # Platform API client for miners/validators
 ├── subset_scoring.py     # Subset scoring helpers (assignments, deadlines)
 ├── config_loader.py      # Config file loading for miner templates
-└── path_utils.py         # Safe filesystem paths for round directories
+├── path_utils.py         # Safe filesystem paths for round directories
+├── bt_compat.py          # Bittensor SDK compatibility shim
+├── config_commit.py      # Miner-side config commitments and ledger
+├── reward_normalization.py # One reward-eligible hotkey per coldkey
+├── scoring_version.py    # Resolves which scoring version applies
+└── submission_payment.py # Paid resubmission policy, ledger and ceilings
 ```
 
 ## Module Details
@@ -121,10 +126,17 @@ download_file_with_fallback(
 **Features:**
 
 - Automatic caching
-- SHA256 verification: enforced for cached files, advisory for fresh
-  downloads unless MINOS_ENFORCE_DOWNLOAD_SHA256 is set
+- SHA256 verification: every file with a published digest is checked. A
+  mismatching cache is discarded and re-fetched; on a fresh download the backup
+  URL is tried before anything is accepted, and a mismatch that survives that is
+  logged. Set MINOS_ENFORCE_DOWNLOAD_SHA256 to reject it outright instead
 - HTTP and presigned URL support
-- Primary/backup URL fallback (`STORAGE_PRIMARY_BACKEND` env var: `hippius` (default) or `aws_s3`)
+- `MINOS_DOWNLOAD_SOCKET_TIMEOUT` (default 60): per-socket-operation timeout for
+  every round-data download. A stall longer than this aborts the download and
+  the round fails for that neuron — raise it on a high-latency link
+- Primary/backup URL fallback. The order is chosen by the caller from
+  `STORAGE_PRIMARY_BACKEND` (`hippius` by default, or `aws_s3`); file_utils
+  receives the two URLs already ordered
 
 ### 4. Platform Client (platform_client.py)
 

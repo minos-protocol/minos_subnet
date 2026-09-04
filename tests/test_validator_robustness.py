@@ -1,15 +1,15 @@
-"""Regression tests for validator failure paths that silently cost rounds.
+"""Tests for validator paths where a response is incomplete rather than absent.
 
-Each of these was a quiet loss, not a crash:
+Each pins the decision the validator makes in that case:
 
-* a malformed-but-successful assignment payload escaped the no-assignment
-  fallback, so the round was retried forever and never scored;
-* a missing ``submission_count`` in the round listing was read as zero, which
-  marked the round scored without ever scoring it;
-* weight history was reported over the unfiltered tracked miners, so the
-  dashboard credited hotkeys the chain was never paying;
-* the inter-round wait lived inside the main loop's try, so a subtensor outage
-  collapsed the ~hour interval into a 10s retry sleep.
+* a malformed-but-successful assignment payload reaches the no-assignment
+  fallback and scores everyone, rather than failing the round and retrying it;
+* a missing ``submission_count`` in the round listing means unknown, not zero,
+  so the round is scored rather than marked done without scoring;
+* weight history must describe the same population the weights were computed
+  over, so the reported ranking matches what the chain is paid;
+* the inter-round wait sits outside the main loop's try, so an outage does not
+  collapse the ~hour interval into the handler's 10s retry sleep.
 """
 
 import asyncio
@@ -78,10 +78,10 @@ async def _snapshot():
 class TestAssignmentFallback:
     """A bad assignment payload must degrade to scoring everyone.
 
-    Before the fix the handler caught only PlatformClientError, so a null
-    primary_miner_hotkeys (TypeError in set()) or a non-ISO scoring_deadline
-    (ValueError in fromisoformat) fell through to the method's catch-all, which
-    returns False — the round was never scored and was retried forever.
+    The handler has to catch the payload errors as well as PlatformClientError:
+    a null primary_miner_hotkeys (TypeError in set()) or a non-ISO
+    scoring_deadline (ValueError in fromisoformat) would otherwise reach the
+    method's catch-all, which returns False and leaves the round unscored.
     """
 
     def _run(self, validator_module, assignment):
@@ -178,12 +178,12 @@ class TestAssignmentFallback:
 
 
 class TestUnknownSubmissionCount:
-    """An absent submission_count is UNKNOWN, never zero.
+    """An absent submission_count means unknown, never zero.
 
     The zero branch is the only path that adds a round to scored_rounds without
-    _score_round_submissions confirming finalization, so a renamed listing field
-    or a lagging read replica permanently zeroed this validator's contribution to
-    the round with no error anywhere.
+    _score_round_submissions confirming finalization, so reading an absent or
+    renamed listing field as zero marks the round done without scoring it, and
+    without raising.
     """
 
     def _run(self, validator_module, round_info, score_result=True):
@@ -245,8 +245,9 @@ class TestUnknownSubmissionCount:
 class TestWeightHistoryPopulation:
     """Weight history must describe the population the weights were computed over.
 
-    Reporting the unfiltered tracked miners gave a deregistered top scorer
-    rank=1 weight=0.0, so the public audit trail contradicted the chain payment.
+    Reporting the unfiltered tracked miners would give a deregistered top
+    scorer rank=1 weight=0.0, so the reported ranking would not match what the
+    chain was paid.
     """
 
     def test_deregistered_top_scorer_is_not_reported(self, validator_module):
@@ -315,8 +316,8 @@ class TestMainLoopWaitSurvivesErrors:
     """A throw after scoring must not collapse the inter-round wait.
 
     With the wait inside the per-iteration try, a subtensor outage in
-    sync_metagraph dropped the loop into the handler's 10s sleep: ~360
-    authenticated platform polls an hour for as long as the outage lasted.
+    sync_metagraph leaves the loop on the handler's 10s retry sleep instead of
+    the full inter-round interval, for as long as the outage lasts.
     """
 
     def _drive_loop(self, validator_module, monkeypatch, sync_raises, iterations=2):

@@ -12,7 +12,7 @@ This is public-safe scoring education for Minos subnet 107. It explains concepts
 
 Miners submit variant-calling configs or pipelines. Validators rerun those configs, generate variant calls, and score the generated calls.
 
-The validator-side scoring compares called variants against benchmark/reference truth data. Miners should not ask for, paste, or use private truth files.
+The validator-side scoring compares called variants against benchmark/reference truth data. Do not request or disclose unreleased round truth data or other non-public validator materials. Files officially released through the public verification endpoint after a round closes may be used for independent verification.
 
 ## hap.py Concepts
 
@@ -32,7 +32,7 @@ AdvancedScorer is Minos scoring logic that combines benchmark signals into a pub
 
 ## Which Scorer Is Live
 
-Two scorers exist: v1 and v2. The platform decides which one the whole network uses and advertises it as `scoring_version` in `/scoring/network-config`; validators follow it, and v1 is what a validator uses when it has never been told otherwise. The two are different scales, so scores from one are not comparable with scores from the other, and the tuning that pays differs. Point miners at `docs/scoring.md` in the repo for the formulas, and at `/scoring/network-config` for which one is live now.
+Two scoring versions exist: v1 and v2. The active one is published in network configuration (`scoring_version` in `/scoring/network-config`) and applied consistently by validators; a validator that has never read it uses v1. The two are different scales, so scores from one are not comparable with scores from the other, and the tuning that pays differs. Point miners at `docs/scoring.md` in the repo for the formulas, and at `/scoring/network-config` for which one is active now.
 
 ## Common Tradeoff
 
@@ -50,4 +50,4 @@ Do not tune before the miner can complete demo mode, participate live, produce v
 
 ## Safety Boundary
 
-Do not expose private truth files, private benchmark data, private validator files, private scoring details, private configs, presigned URLs, signatures, nonces, or admin output.
+Do not expose unreleased truth files, non-public benchmark data, private validator files, private scoring details, private configs, presigned URLs, signatures, nonces, or admin output.

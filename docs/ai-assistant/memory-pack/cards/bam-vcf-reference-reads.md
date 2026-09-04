@@ -16,6 +16,6 @@ BAM files usually contain aligned reads. BAM files can be large and may reveal p
 
 VCF files contain variant calls such as SNPs and indels. Miner support should focus on the official miner flow and public score output, not manual VCF paste-back.
 
-Truth VCFs and confident-region files are validator-side benchmark materials. They must never be shared publicly or uploaded into a public knowledge graph.
+Truth VCFs and confident-region files are validator-side benchmark materials while a round is open. Do not request or disclose unreleased round truth data or other non-public validator materials, and do not upload them into a public knowledge graph. Files officially released through the public verification endpoint after a round closes may be used for independent verification.
 
 Public-safe support can discuss what these file types mean, common error categories, and public logs after secrets and private paths are removed.

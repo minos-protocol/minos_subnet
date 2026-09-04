@@ -92,11 +92,10 @@ def variant_call(
     mpileup_flags_str = _quote_flags(mpileup_flags)
 
     # `bcftools call` requires a caller-mode flag (`-m` for multiallelic,
-    # `-c` for consensus). The previous default `-mv` was only injected
-    # when call_flags was completely empty; submissions that included
-    # other call-stage params (e.g. `prior`, `pval_threshold`) produced
-    # a malformed `bcftools call` invocation that exited non-zero. Force
-    # a caller mode whenever neither is present.
+    # `-c` for consensus). A submission that sets other call-stage params
+    # (e.g. `prior`, `pval_threshold`) without a caller mode would otherwise
+    # produce an invocation with no mode at all, so force a caller mode
+    # whenever neither is present.
     def _has_caller_mode(flags: list[str]) -> bool:
         for f in flags:
             tok = f.split()[0]

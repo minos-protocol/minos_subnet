@@ -1,13 +1,13 @@
-"""Path-safety regressions around platform-supplied region strings.
+"""Path safety around round-supplied region strings.
 
-The platform supplies ``region`` for every round. ``round_id`` is hashed by
-``safe_round_dir_name()`` before it becomes a directory, but the chromosome was
-taken as ``region.split(":")[0]`` and interpolated raw into
-``datasets/reference/<chrom>/<chrom>.fa`` and the truth BED name. A region such
-as ``"../../etc/x:1-2"`` therefore escaped ``datasets/``.
-``templates.tool_params.validate_region`` does constrain the region, but only
-inside ``variant_call()`` — long after those paths are built — so it never
-protected this path.
+``region`` arrives with every round. ``round_id`` is hashed by
+``safe_round_dir_name()`` before it becomes a directory, and the chromosome is
+allowlisted before it is interpolated into
+``datasets/reference/<chrom>/<chrom>.fa`` or the truth BED name — so a region
+such as ``"../../etc/x:1-2"`` cannot reach a path.
+``templates.tool_params.validate_region`` constrains the region too, but only
+inside ``variant_call()`` — after those paths are built — so the allowlist here
+is what covers them.
 
 Also covers the spec-version packing published on chain as ``version_key``.
 """
@@ -54,8 +54,8 @@ class TestSafeChrom:
         assert safe_chrom(region) is None
 
     def test_empty_region_keeps_the_historical_chr20_default(self):
-        # Callers previously did `region.split(":")[0] if region else "chr20"`;
-        # an absent region must keep resolving to chr20, not become an error.
+        # The historical behaviour is `region.split(":")[0] if region else
+        # "chr20"`: an absent region resolves to chr20 rather than erroring.
         assert safe_chrom("") == "chr20"
         assert safe_chrom(None) == "chr20"
 
@@ -264,9 +264,9 @@ class TestMinerReferenceResolution:
         (base / "datasets" / "reference" / "chr20" / "chr20.fa").write_text(">chr20\n")
         outside = tmp_path / "outside"
         outside.mkdir()
-        # Would be hit by chrom="../../../outside/evil" style traversal.
-        (outside / "evil").mkdir()
-        (outside / "evil" / "evil.fa").write_text(">evil\n")
+        # Would be hit by chrom="../../../outside/planted" style traversal.
+        (outside / "planted").mkdir()
+        (outside / "planted" / "planted.fa").write_text(">planted\n")
         return base
 
     def test_supported_chromosome_still_resolves(self, miner_module, monkeypatch, tmp_path):
@@ -276,7 +276,7 @@ class TestMinerReferenceResolution:
             base / "datasets" / "reference" / "chr20" / "chr20.fa"
 
     @pytest.mark.parametrize("chrom", [
-        "../../../outside/evil", "..", "../..", "/etc", "chr20/../..",
+        "../../../outside/planted", "..", "../..", "/etc", "chr20/../..",
         "chrZ", "chr23", "", "chr20;rm -rf /",
     ])
     def test_traversal_chromosome_resolves_to_nothing(self, miner_module, monkeypatch, tmp_path, chrom):
@@ -291,10 +291,10 @@ class TestMinerReferenceResolution:
         base = self._plant_reference_outside(tmp_path)
         monkeypatch.setattr(miner_module, "BASE_DIR", base)
 
-        chrom = "../../../outside/evil"
+        chrom = "../../../outside/planted"
         planted = (base / "datasets" / "reference" / chrom / f"{chrom}.fa").resolve()
         planted.parent.mkdir(parents=True, exist_ok=True)
-        planted.write_text(">evil\n")
+        planted.write_text(">planted\n")
 
         assert base not in planted.parents, "decoy must sit outside BASE_DIR"
         assert (base / "datasets" / "reference" / chrom / f"{chrom}.fa").exists()

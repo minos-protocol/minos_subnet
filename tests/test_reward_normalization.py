@@ -1,7 +1,7 @@
 """One reward-eligible representative per coldkey.
 
 Ownership is read from the metagraph -- public chain state every validator
-already syncs -- so two honest validators agree without anything being attested.
+already syncs -- so two validators agree without anything being attested.
 """
 import types
 
@@ -70,8 +70,8 @@ class TestOnePerColdkey:
 
     @pytest.mark.parametrize("missing", [{}, {"hk2": "ckB"}])
     def test_an_unknown_owner_is_kept_not_dropped(self, missing):
-        """A stale or partial metagraph must not silently remove real miners.
-        Paying a sybil twice is recoverable; unpaying a legitimate miner is not."""
+        """A stale or partial metagraph must not remove real miners. Paying one
+        operator twice is recoverable; dropping a legitimate miner is not."""
         ranked = ["hk1", "hk2"]
         kept, _ = one_per_owner(ranked, missing)
         assert "hk1" in kept, "a hotkey with no resolvable owner was dropped"
@@ -199,7 +199,7 @@ class TestTheChainSnapshot:
         assert calls == []
 
     def test_an_unreachable_platform_leaves_the_ranking_alone(self):
-        """Neither source answering must rank everyone, never silently drop."""
+        """Neither source answering must rank everyone, never drop."""
         import asyncio
         mg = _mg([("hk1", "")])
         mg.coldkeys = []
