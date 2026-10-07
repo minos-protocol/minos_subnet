@@ -10,7 +10,12 @@ import subprocess
 import time
 import os
 from .tool_params import validate_and_build_flags, validate_region
-from ._common import container_name, count_variants, reap_container
+from ._common import (
+    container_name,
+    count_variants,
+    reap_container,
+    run_container,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +94,7 @@ def variant_call(
         cmd.extend(str(flag).split())
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        result = run_container(cmd, capture_output=True, text=True, timeout=timeout)
         elapsed = time.time() - start_time
 
         if result.returncode != 0:

@@ -49,9 +49,15 @@ from utils.file_utils import compute_sha256
 from utils.file_utils import download_file_with_fallback
 from utils.path_utils import safe_round_dir_name
 from utils.platform_client import ValidatorPlatformClient, PlatformConfig, PlatformClientError
-from utils.subset_scoring import should_stop_secondary_scoring
+from utils.subset_scoring import (
+    DEFAULT_CUTOFF_LEAD_SECONDS,
+    scoring_window_closed,
+    seconds_until_deadline,
+    should_stop_secondary_scoring,
+)
 from utils import scoring_version as scoring_version_util
 from templates import DEPRECATED_TEMPLATES, load_template
+from templates._common import begin_round, reap_live_containers
 from templates.tool_params import validate_round_id
 
 sys.stdout.reconfigure(line_buffering=True)
@@ -76,6 +82,21 @@ MIN_WAIT_SECONDS = 60
 BITTENSOR_BLOCK_TIME_SECONDS = 12
 MAX_SLEEP_SECONDS = 120
 SCORE_GRACE_SECONDS = int(os.getenv("SCORE_GRACE_SECONDS", "60"))
+
+# Per-job ceiling on variant calling while scoring. Separate from
+# GENOMICS_CONFIG["variant_calling_timeout"], which neurons/miner.py also reads:
+# how long a miner waits for its own calls is a different decision on different
+# hardware.
+#
+# Sized above the slowest config observed to place in a round, measured per
+# validator rather than averaged, since this fires per validator. It bounds a
+# pathological config; the median job is a small fraction of it.
+VALIDATOR_VARIANT_CALLING_TIMEOUT_SECONDS = int(
+    os.getenv("VALIDATOR_VARIANT_CALLING_TIMEOUT_SECONDS", "900")
+)
+SCORE_CUTOFF_LEAD_SECONDS = int(
+    os.getenv("SCORE_CUTOFF_LEAD_SECONDS", str(DEFAULT_CUTOFF_LEAD_SECONDS))
+)
 SCORE_FINALIZATION_DELAY_SECONDS = int(os.getenv("SCORE_FINALIZATION_DELAY_SECONDS", "5"))
 
 
@@ -354,6 +375,26 @@ class Validator:
         version = scoring_version_util.resolve(network_config, logger=bt.logging)
         self._scoring_version_cache = (round_id, version)
         return version
+
+    def _submit_grace_seconds(self) -> int:
+        """How long after scoring_end_time a score is still accepted.
+
+        The platform's advertised value, which is what /submit-score applies;
+        the local constant is only the fallback. Holding the local value against
+        a platform configured for longer would discard work whose result would
+        still have been stored.
+        """
+        cfg = getattr(self, "_last_network_config", None)
+        if not isinstance(cfg, dict) or "score_grace_seconds" not in cfg:
+            return SCORE_GRACE_SECONDS
+        try:
+            published = int(cfg["score_grace_seconds"])
+        except (TypeError, ValueError, OverflowError):
+            bt.logging.warning(
+                "Invalid score_grace_seconds in network config; using local default"
+            )
+            return SCORE_GRACE_SECONDS
+        return SCORE_GRACE_SECONDS if published < 0 else published
 
     def __init__(self, config=None):
         self.config = config or self.get_config()
@@ -855,12 +896,54 @@ class Validator:
             # deadline check only prevents starting new secondary work.
             sem = asyncio.Semaphore(self._scoring_cfg["concurrency"])
 
+            grace_seconds = self._submit_grace_seconds()
+
+            async def _reap_past_the_window():
+                """Reap variant calling once its output can no longer be stored.
+
+                The two checks below only decide what is STARTED. A job already
+                running holds the round open for as long as it takes, up to
+                VALIDATOR_VARIANT_CALLING_TIMEOUT_SECONDS, and goes on holding
+                CPU and memory that the next round needs -- which is how one
+                late round makes the next one late.
+
+                Reaped at the point its result stops being storable, not
+                earlier: before that, a job still in flight can finish and have
+                its score accepted, and killing it would throw that away.
+                """
+                if scoring_deadline is None:
+                    return  # fallback mode: no assignment, so no window to enforce
+                while not scoring_window_closed(scoring_deadline, grace_seconds):
+                    await asyncio.sleep(5)
+                reaped = await asyncio.get_running_loop().run_in_executor(
+                    None, reap_live_containers
+                )
+                if reaped:
+                    bt.logging.warning(
+                        f"Round {round_id}: reaped {reaped} variant-calling "
+                        f"container(s) still running past the submit window "
+                        f"(scoring_end_time + {grace_seconds}s); their results "
+                        f"could no longer be stored"
+                    )
+
             async def _bounded_score(sub, is_secondary: bool):
                 async with sem:
-                    if is_secondary and should_stop_secondary_scoring(scoring_deadline, buffer_seconds=180):
+                    # Past the submit window, so nothing left in the queue can
+                    # be stored. Applies to primary work too, which is subject
+                    # to the same window.
+                    if scoring_window_closed(scoring_deadline, grace_seconds):
                         bt.logging.debug(
-                            f"Round {round_id}: deadline reached, skipping secondary "
-                            f"miner {sub.get('miner_hotkey', '')[:16]}..."
+                            f"Round {round_id}: submit window closed — dropping "
+                            f"{sub.get('miner_hotkey', '')[:16]}... unscored"
+                        )
+                        return
+                    if is_secondary and should_stop_secondary_scoring(
+                        scoring_deadline, buffer_seconds=SCORE_CUTOFF_LEAD_SECONDS
+                    ):
+                        bt.logging.debug(
+                            f"Round {round_id}: within {SCORE_CUTOFF_LEAD_SECONDS}s "
+                            f"of the deadline, skipping secondary miner "
+                            f"{sub.get('miner_hotkey', '')[:16]}..."
                         )
                         return
                     await self._score_single_miner(
@@ -870,60 +953,101 @@ class Validator:
                         mutations_vcf_path=mutations_vcf_path,
                     )
 
-            if primary_hotkeys:
-                primary_subs_only = [s for s in ordered_subs if s.get("miner_hotkey") in primary_hotkeys]
-                secondary_subs_only = [s for s in ordered_subs if s.get("miner_hotkey") not in primary_hotkeys]
+            # Scoring is bounded by the window, not by the jobs finishing.
+            # Whatever has landed by then is what the round publishes: the
+            # sequence after this point -- submit, backfill, set weights -- has
+            # to be reached on every round, and a job that will not end must not
+            # be able to prevent it.
+            async def _run_scoring():
 
-                if primary_subs_only:
-                    bt.logging.info(
-                        f"Round {round_id}: scoring {len(primary_subs_only)} primary miners "
-                        f"(concurrency={self._scoring_cfg['concurrency']})"
-                    )
-                    await asyncio.gather(*[_bounded_score(s, False) for s in primary_subs_only])
+                    if primary_hotkeys:
+                        primary_subs_only = [s for s in ordered_subs if s.get("miner_hotkey") in primary_hotkeys]
+                        secondary_subs_only = [s for s in ordered_subs if s.get("miner_hotkey") not in primary_hotkeys]
 
-                if secondary_subs_only:
-                    if should_stop_secondary_scoring(scoring_deadline, buffer_seconds=180):
-                        bt.logging.info(
-                            f"Round {round_id}: approaching deadline — skipping "
-                            f"{len(secondary_subs_only)} secondary miners"
-                        )
+                        if primary_subs_only:
+                            bt.logging.info(
+                                f"Round {round_id}: scoring {len(primary_subs_only)} primary miners "
+                                f"(concurrency={self._scoring_cfg['concurrency']})"
+                            )
+                            await asyncio.gather(*[_bounded_score(s, False) for s in primary_subs_only])
+
+                        if secondary_subs_only:
+                            if should_stop_secondary_scoring(
+                                scoring_deadline, buffer_seconds=SCORE_CUTOFF_LEAD_SECONDS
+                            ):
+                                bt.logging.info(
+                                    f"Round {round_id}: approaching deadline — skipping "
+                                    f"{len(secondary_subs_only)} secondary miners"
+                                )
+                            else:
+                                bt.logging.info(
+                                    f"Round {round_id}: scoring {len(secondary_subs_only)} secondary miners "
+                                    f"(concurrency={self._scoring_cfg['concurrency']})"
+                                )
+                                await asyncio.gather(*[_bounded_score(s, True) for s in secondary_subs_only])
                     else:
+                        # No assignment (fallback / single-validator) — mirror the assigned
+                        # path: a bounded head is always scored, the tail is deadline-guarded,
+                        # so falling behind costs tail coverage rather than the whole round.
+                        # Head size mirrors the platform's sharding in
+                        # utils/assignment.compute_assignments; MINOS_FALLBACK_PRIMARY_N overrides.
+                        n_validators = 1
+                        try:
+                            permits = getattr(self.metagraph, "validator_permit", None)
+                            if permits is not None:
+                                n_validators = max(1, sum(1 for p in permits if bool(p)))
+                        except Exception:
+                            n_validators = 1
+                        auto_head = max(1, len(ordered_subs) // n_validators)
+                        head_n = max(1, int(os.getenv("MINOS_FALLBACK_PRIMARY_N") or auto_head))
+                        head = ordered_subs[:head_n]
+                        tail = ordered_subs[head_n:]
                         bt.logging.info(
-                            f"Round {round_id}: scoring {len(secondary_subs_only)} secondary miners "
-                            f"(concurrency={self._scoring_cfg['concurrency']})"
+                            f"Round {round_id}: no assignment — scoring {len(head)} miners as "
+                            f"primary, {len(tail)} deadline-guarded (validators={n_validators}, "
+                            f"concurrency={self._scoring_cfg['concurrency']})"
                         )
-                        await asyncio.gather(*[_bounded_score(s, True) for s in secondary_subs_only])
-            else:
-                # No assignment (fallback / single-validator) — mirror the assigned
-                # path: a bounded head is always scored, the tail is deadline-guarded,
-                # so falling behind costs tail coverage rather than the whole round.
-                # Head size mirrors the platform's sharding in
-                # utils/assignment.compute_assignments; MINOS_FALLBACK_PRIMARY_N overrides.
-                n_validators = 1
-                try:
-                    permits = getattr(self.metagraph, "validator_permit", None)
-                    if permits is not None:
-                        n_validators = max(1, sum(1 for p in permits if bool(p)))
-                except Exception:
-                    n_validators = 1
-                auto_head = max(1, len(ordered_subs) // n_validators)
-                head_n = max(1, int(os.getenv("MINOS_FALLBACK_PRIMARY_N") or auto_head))
-                head = ordered_subs[:head_n]
-                tail = ordered_subs[head_n:]
-                bt.logging.info(
-                    f"Round {round_id}: no assignment — scoring {len(head)} miners as "
-                    f"primary, {len(tail)} deadline-guarded (validators={n_validators}, "
-                    f"concurrency={self._scoring_cfg['concurrency']})"
-                )
-                await asyncio.gather(*[_bounded_score(s, False) for s in head])
-                if tail:
-                    if should_stop_secondary_scoring(scoring_deadline, buffer_seconds=180):
-                        bt.logging.info(
-                            f"Round {round_id}: approaching deadline — skipping "
-                            f"{len(tail)} fallback secondary miners"
+                        await asyncio.gather(*[_bounded_score(s, False) for s in head])
+                        if tail:
+                            if should_stop_secondary_scoring(
+                                scoring_deadline, buffer_seconds=SCORE_CUTOFF_LEAD_SECONDS
+                            ):
+                                bt.logging.info(
+                                    f"Round {round_id}: approaching deadline — skipping "
+                                    f"{len(tail)} fallback secondary miners"
+                                )
+                            else:
+                                await asyncio.gather(*[_bounded_score(s, True) for s in tail])
+
+
+            # Ties every job started below to this round, so a worker left over
+            # from an earlier round cannot start a container in this one.
+            # Before the reaper and before any job, in both modes.
+            begin_round()
+            reaper = asyncio.create_task(_reap_past_the_window())
+            try:
+                if scoring_deadline is None:
+                    # No assignment, so no window to enforce.
+                    await _run_scoring()
+                else:
+                    budget = seconds_until_deadline(scoring_deadline) + grace_seconds
+                    try:
+                        await asyncio.wait_for(_run_scoring(), timeout=max(0.0, budget))
+                    except asyncio.TimeoutError:
+                        # Cancelling the coroutines unwinds the awaits, but a
+                        # job's worker thread keeps going until its container
+                        # exits -- so reap here as well as in the watchdog,
+                        # which may not have woken yet.
+                        reaped = await asyncio.get_running_loop().run_in_executor(
+                            None, reap_live_containers
                         )
-                    else:
-                        await asyncio.gather(*[_bounded_score(s, True) for s in tail])
+                        bt.logging.warning(
+                            f"Round {round_id}: scoring stopped at the submit "
+                            f"window with work still running; reaped {reaped} "
+                            f"container(s). Finalizing with the scores already in."
+                        )
+            finally:
+                reaper.cancel()
 
             # --- Steps 5 & 6: Backfill + finalize ---
             finalized = await self._finalize_round_scores(
@@ -1191,19 +1315,18 @@ class Validator:
 
             # 5. Score with hap.py, off-loop like variant calling below: score_vcf
             # blocks on a docker subprocess, and running it inline would serialise
-            # the fan-out above and stall the deadline checks.
-            _loop = asyncio.get_running_loop()
-            metrics = await _loop.run_in_executor(
-                None,
-                lambda: self.happy_scorer.score_vcf(
-                    truth_vcf=str(truth_vcf_path),
-                    query_vcf=str(miner_vcf_path),
-                    reference_fasta=str(ref_path),
-                    confident_bed=str(truth_bed_path) if truth_bed_path and truth_bed_path.exists() else None,
-                    region=region,
-                    reference_sdf=str(ref_sdf_path) if ref_sdf_path.exists() else None,
-                    mutations_vcf=str(mutations_vcf_path) if mutations_vcf_path else None
-                ),
+            # the fan-out above and stall the deadline checks. asyncio.to_thread
+            # rather than run_in_executor: it carries the job's round into the
+            # worker thread, which run_container checks before starting anything.
+            metrics = await asyncio.to_thread(
+                self.happy_scorer.score_vcf,
+                truth_vcf=str(truth_vcf_path),
+                query_vcf=str(miner_vcf_path),
+                reference_fasta=str(ref_path),
+                confident_bed=str(truth_bed_path) if truth_bed_path and truth_bed_path.exists() else None,
+                region=region,
+                reference_sdf=str(ref_sdf_path) if ref_sdf_path.exists() else None,
+                mutations_vcf=str(mutations_vcf_path) if mutations_vcf_path else None,
             )
 
             scoring_elapsed = time.time() - scoring_start
@@ -1611,23 +1734,21 @@ class Validator:
             # SCORING_THREADS / SCORING_MEMORY_GB env vars override there.
             config = {
                 **sanitized_config,  # Miner's quality params FIRST
-                "timeout": GENOMICS_CONFIG.get("variant_calling_timeout", 1800),
+                "timeout": VALIDATOR_VARIANT_CALLING_TIMEOUT_SECONDS,
                 "threads": self._scoring_cfg["threads_per_job"],
                 "memory_gb": self._scoring_cfg["mem_per_job_gb"],
                 "ref_build": "GRCh38",  # Standard reference build
             }
 
-            # Run variant calling in thread pool to avoid blocking
-            loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: template.variant_call(
-                    bam_path=bam_path,
-                    reference_path=ref_path,
-                    output_vcf_path=output_vcf_path,
-                    region=region,
-                    config=config
-                )
+            # Run variant calling off the event loop. asyncio.to_thread carries
+            # the job's round into the worker thread; run_in_executor does not.
+            result = await asyncio.to_thread(
+                template.variant_call,
+                bam_path=bam_path,
+                reference_path=ref_path,
+                output_vcf_path=output_vcf_path,
+                region=region,
+                config=config,
             )
 
             return result
