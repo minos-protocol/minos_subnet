@@ -8,7 +8,12 @@ from pathlib import Path
 from typing import Dict, Any
 import subprocess
 
-from ._common import container_name, count_variants, reap_container
+from ._common import (
+    container_name,
+    count_variants,
+    reap_container,
+    run_container,
+)
 import time
 import shutil
 import os
@@ -123,7 +128,7 @@ def variant_call(
         cmd.append(f'--postprocess_variants_extra_args={",".join(postprocess_variants_args)}')
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        result = run_container(cmd, capture_output=True, text=True, timeout=timeout)
         elapsed = time.time() - start_time
 
         if result.returncode != 0:

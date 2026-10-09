@@ -12,7 +12,12 @@ import os
 import shlex
 import time
 from .tool_params import validate_and_build_flags, validate_region
-from ._common import container_name, count_variants, reap_container
+from ._common import (
+    container_name,
+    count_variants,
+    reap_container,
+    run_container,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +144,7 @@ def variant_call(
             ])
 
             try:
-                index_result = subprocess.run(
+                index_result = run_container(
                     index_cmd,
                     capture_output=True,
                     text=True,
@@ -173,7 +178,7 @@ def variant_call(
     ])
 
     try:
-        result = subprocess.run(
+        result = run_container(
             bcftools_cmd,
             capture_output=True,
             text=True,

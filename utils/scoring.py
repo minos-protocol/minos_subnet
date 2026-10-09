@@ -17,6 +17,11 @@ import logging
 
 from templates.tool_params import validate_region
 
+# Scoring-stage containers are named and registered like the callers': a
+# subprocess timeout kills the docker CLI, not the container it started, and
+# a validator out of time has to be able to remove what is still running.
+from templates._common import container_name, run_container
+
 logger = logging.getLogger(__name__)
 
 # Docker images for scoring tools.
@@ -106,9 +111,12 @@ def slice_truth_vcf(source_vcf: Path, target_vcf: Path, region: str) -> bool:
         source_dir = source_vcf.parent
         target_dir = target_vcf.parent
 
+        # Declared outside the branch: both arms name the same container, and
+        # the name has to exist on either path.
+        _slice_name = container_name("happy-slice")
         if source_dir == target_dir:
             slice_cmd = [
-                "docker", "run", "--rm",
+                "docker", "run", "--rm", "--name", _slice_name,
                 "-v", f"{source_dir}:/data",
                 BCFTOOLS_DOCKER_IMAGE,
                 "bcftools", "view", "-r", region,
@@ -116,7 +124,7 @@ def slice_truth_vcf(source_vcf: Path, target_vcf: Path, region: str) -> bool:
             ]
         else:
             slice_cmd = [
-                "docker", "run", "--rm",
+                "docker", "run", "--rm", "--name", _slice_name,
                 "-v", f"{source_dir}:/source",
                 "-v", f"{target_dir}:/target",
                 BCFTOOLS_DOCKER_IMAGE,
@@ -125,7 +133,7 @@ def slice_truth_vcf(source_vcf: Path, target_vcf: Path, region: str) -> bool:
             ]
 
         logger.info(f"Slicing truth VCF: {region}")
-        result = subprocess.run(slice_cmd, capture_output=True, text=True, timeout=300)
+        result = run_container(slice_cmd, capture_output=True, text=True, timeout=300)
 
         if result.returncode != 0:
             logger.error(f"bcftools failed: {result.stderr}")
@@ -135,14 +143,15 @@ def slice_truth_vcf(source_vcf: Path, target_vcf: Path, region: str) -> bool:
             logger.error(f"Output not created: {target_vcf}")
             return False
 
+        _index_name = container_name("happy-index")
         index_cmd = [
-            "docker", "run", "--rm",
+            "docker", "run", "--rm", "--name", _index_name,
             "-v", f"{target_dir}:/data",
             BCFTOOLS_DOCKER_IMAGE,
             "bcftools", "index", f"/data/{target_vcf.name}",
         ]
 
-        result = subprocess.run(index_cmd, capture_output=True, text=True, timeout=60)
+        result = run_container(index_cmd, capture_output=True, text=True, timeout=60)
         if result.returncode != 0:
             logger.warning(f"Index failed: {result.stderr}")
 
@@ -816,8 +825,9 @@ class HappyScorer:
 
             # Build Docker command as argument list (no shell=True) to prevent injection
             # RTG_MEM fixes "Cannot determine system memory" error in Docker (use 8g for larger VCFs)
+            _happy_name = container_name("happy")
             cmd_parts = [
-                "docker", "run", "--rm",
+                "docker", "run", "--rm", "--name", _happy_name,
                 "-e", f"HGREF=/data/reference/{ref_path.name if ref_path else 'ref.fa'}",
                 "-e", "RTG_MEM=8g",
                 "-v", f"{truth_vcf.parent}:/data/truth",
@@ -888,7 +898,7 @@ class HappyScorer:
                     logger.warning(f"Could not remove stale artifact {stale.name}: {exc}")
 
             invocation_start = time.time()
-            result = subprocess.run(cmd_parts, capture_output=True, text=True, timeout=600)
+            result = run_container(cmd_parts, capture_output=True, text=True, timeout=600)
 
             def _from_this_run(path: Path) -> bool:
                 """Whether this invocation produced the file.

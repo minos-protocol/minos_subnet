@@ -10,6 +10,13 @@ from typing import Dict, List, Optional
 
 from utils.weight_tracking import parse_deadline
 
+# Stop starting new secondary scoring this many seconds before scoring_end_time.
+#
+# A literal, not an env read: this module is imported before load_dotenv(), so
+# reading the environment here would miss .env on a manual launch. The override
+# is applied beside SCORE_GRACE_SECONDS in neurons/validator.py.
+DEFAULT_CUTOFF_LEAD_SECONDS = 420
+
 
 def get_miners_from_metagraph(metagraph, my_uid: Optional[int] = None) -> List[str]:
     """
@@ -82,7 +89,7 @@ def seconds_until_deadline(
 
 def should_stop_secondary_scoring(
     scoring_end_time: Optional[datetime],
-    buffer_seconds: int = 180,
+    buffer_seconds: int = DEFAULT_CUTOFF_LEAD_SECONDS,
 ) -> bool:
     """
     Return True if the scoring deadline is close enough that secondary (non-primary)
@@ -99,3 +106,24 @@ def should_stop_secondary_scoring(
         return False
     remaining = seconds_until_deadline(scoring_end_time)
     return remaining < buffer_seconds
+
+
+def scoring_window_closed(
+    scoring_end_time: Optional[datetime],
+    grace_seconds: int,
+) -> bool:
+    """Whether a newly submitted score would still be accepted.
+
+    /submit-score accepts a score up to grace_seconds past scoring_end_time.
+    Past that, work in progress can no longer produce anything storable, so it
+    is both pointless to start more and pointless to keep running what is
+    already going -- which is what the reaper in the scoring loop acts on.
+
+    Fails open on a missing deadline: the single-validator fallback path has no
+    assignment, and stopping all scoring there would cost the whole round
+    rather than its tail.
+    """
+    if scoring_end_time is None:
+        return False
+    remaining = seconds_until_deadline(scoring_end_time)
+    return remaining < -grace_seconds
