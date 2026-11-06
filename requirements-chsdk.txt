@@ -1,0 +1,3 @@
+# See docs/chsdk.md
+-r requirements.txt
+compute-horde-sdk[local]>=0.0.20

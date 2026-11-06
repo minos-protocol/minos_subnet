@@ -2,6 +2,7 @@
 import contextvars
 import gzip
 import logging
+import os
 import subprocess
 import threading
 import time
@@ -67,6 +68,17 @@ def _remaining(deadline: Optional[float]) -> Optional[float]:
     return None if deadline is None else max(0.0, deadline - time.monotonic())
 
 
+def _chsdk_runner():
+    runner = os.getenv("CONTAINER_RUNNER", "native")
+    if runner == "native":
+        return None
+    if runner != "chsdk":
+        raise ValueError("CONTAINER_RUNNER must be native or chsdk")
+    # Native-only installations must not import or initialize the CHSDK.
+    from . import _chsdk
+    return _chsdk
+
+
 def run_container(cmd: List[str], **kwargs) -> subprocess.CompletedProcess:
     """Run a `docker run --name ...` command the way subprocess.run would.
 
@@ -79,6 +91,9 @@ def run_container(cmd: List[str], **kwargs) -> subprocess.CompletedProcess:
 
     Outside a round the command runs unchanged.
     """
+    runner = _chsdk_runner()
+    if runner is not None:
+        return runner.run_container(cmd, **kwargs)
     round_id = _job_round.get()
     if round_id is None:
         return subprocess.run(cmd, **kwargs)
@@ -166,6 +181,9 @@ def reap_live_containers(budget_seconds: int = REAP_BUDGET_SECONDS) -> int:
     Also ends the open round, so nothing is started for it afterwards.
     """
     global _open_round
+    runner = _chsdk_runner()
+    if runner is not None:
+        return runner.reap_live_containers(budget_seconds)
     with _live_lock:
         # Ended under the same lock as the snapshot: a container is either
         # registered here, and removed below, or refused by run_container.
@@ -198,6 +216,9 @@ def reap_live_containers(budget_seconds: int = REAP_BUDGET_SECONDS) -> int:
 
 def reap_container(name: str) -> None:
     """Force-remove a container by name. Safe if it is already gone."""
+    runner = _chsdk_runner()
+    if runner is not None:
+        return runner.reap_container(name)
     if not name:
         return
     release_container(name)
