@@ -27,7 +27,7 @@ from neurons import __SPEC_VERSION__, safe_chrom
 
 # Bittensor SDK compatibility — importing utils.bt_compat restores the
 # lowercase bt.subtensor/wallet/config aliases and supplies the wrappers used below.
-from utils import bt_compat, reward_normalization
+from utils import bt_compat, config_commit, reward_normalization
 
 from base import GENOMICS_CONFIG, VALIDATOR_CONFIG, is_docker_available, require_docker, BASE_DIR
 from utils import (
@@ -1286,6 +1286,29 @@ class Validator:
             submission_times[miner_hotkey] = _ts
 
         print(f"\n   --- Miner {miner_hotkey[:16]}... ({tool_name}) ---", flush=True)
+        # The config about to be scored, hashed into the form miners publish on
+        # chain, next to what the miner published in its commitment block, so a
+        # shared log shows whether they match. Never the config.
+        try:
+            digest = config_commit.compute_commitment(
+                netuid=self.config.netuid, round_id=round_id, hotkey=miner_hotkey,
+                tool_name=tool_name, tool_config=tool_config, nonce=sub.get("config_nonce"))
+            block, on_chain = sub.get("commitment_block"), None
+            # Read from the block body, which a pruned node still serves.
+            for ex in (self.subtensor.substrate.get_block(block_number=int(block))["extrinsics"] if block else []):
+                ex = getattr(ex, "value", ex)
+                call = ex.get("call") or {}
+                args = {a["name"]: a["value"] for a in call.get("call_args") or []}
+                if ex.get("address") == miner_hotkey and call.get("call_function") == "set_commitment" \
+                        and args.get("netuid") == self.config.netuid:
+                    raw = next(iter(args["info"]["fields"][0].values()))
+                    on_chain = bytes.fromhex(raw.removeprefix("0x")).decode("utf-8", "ignore")
+            payload = config_commit.chain_payload(round_id, digest)
+            verdict = "MATCH" if payload == on_chain else "NOT FOUND" if on_chain is None else "MISMATCH"
+            print(f"   Config commitment {miner_hotkey}: {payload}"
+                  f" | on chain at block {block}: {on_chain} | {verdict}", flush=True)
+        except Exception as e:  # noqa: BLE001 - a log line must never cost a score
+            print(f"   Config commitment {miner_hotkey}: not computed ({e})", flush=True)
 
         try:
             # Run variant calling with miner's config
